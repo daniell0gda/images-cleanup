@@ -1,0 +1,810 @@
+"""Tests for GroupByTags sorter."""
+import pytest
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+from PIL import Image
+
+
+def make_jpeg(path: Path) -> Path:
+    """Create a minimal JPEG image at path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", (10, 10), color=(128, 128, 128))
+    img.save(str(path), "JPEG")
+    return path
+
+
+def _make_config(tmp_path, tag_groups, *, copy=False, recursive=False,
+                 unclassified_enabled=False, unclassified_dest=None):
+    from imagesorter.config import Config, TagGroup, Unclassified
+    return Config(
+        mode="GroupByTags",
+        source_folder=str(tmp_path / "src"),
+        recursive=recursive,
+        copy_instead_of_move=copy,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=unclassified_enabled,
+            folder_name="others",
+            destination=str(unclassified_dest or tmp_path / "unclassified"),
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+
+def _make_yolo_result(class_names: list[str], all_names: dict):
+    """Build a mock YOLO result with the given detected class names."""
+    result = MagicMock()
+    # Map class names to indices
+    name_to_id = {v: k for k, v in all_names.items()}
+    cls_ids = [name_to_id[n] for n in class_names]
+    import torch
+    result.boxes.cls = torch.tensor(cls_ids, dtype=torch.float32)
+    return result
+
+
+COCO_NAMES = {
+    0: "person", 1: "bicycle", 2: "car", 3: "motorcycle", 5: "bus",
+    7: "truck", 14: "bird", 15: "cat", 16: "dog",
+}
+
+
+# ── Criterion 6: AND logic, most-specific wins, earlier-listed tie-break ──────
+
+def test_image_moved_to_matching_group(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "family"
+
+    tag_groups = [
+        TagGroup(name="Family", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    result = _make_yolo_result(["person"], COCO_NAMES)
+    mock_model.return_value = [result]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest / "photo.jpg").exists()
+    assert not img.exists()  # moved, not copied
+
+
+def test_and_logic_all_tags_required(tmp_path):
+    """Image with only one of two required tags should NOT match."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "vehicles"
+
+    tag_groups = [
+        TagGroup(name="Vehicles", tags=["car", "truck"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    # Only 'car' detected, not 'truck'
+    result = _make_yolo_result(["car"], COCO_NAMES)
+    mock_model.return_value = [result]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    # Image should not be moved (no unclassified enabled)
+    assert img.exists()
+    assert not (dest / "photo.jpg").exists()
+
+
+def test_most_specific_rule_wins(tmp_path):
+    """When multiple groups match, most tags wins."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest_generic = tmp_path / "has_person"
+    dest_specific = tmp_path / "person_and_dog"
+
+    tag_groups = [
+        TagGroup(name="Generic", tags=["person"], destination=str(dest_generic),
+                 group_by_year=False, group_by_month=False),
+        TagGroup(name="Specific", tags=["person", "dog"], destination=str(dest_specific),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    result = _make_yolo_result(["person", "dog"], COCO_NAMES)
+    mock_model.return_value = [result]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest_specific / "photo.jpg").exists()
+    assert not (dest_generic / "photo.jpg").exists()
+
+
+def test_earlier_listed_rule_wins_tie(tmp_path):
+    """When two groups have same tag count, first in list wins."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest_first = tmp_path / "first"
+    dest_second = tmp_path / "second"
+
+    tag_groups = [
+        TagGroup(name="First", tags=["person"], destination=str(dest_first),
+                 group_by_year=False, group_by_month=False),
+        TagGroup(name="Second", tags=["dog"], destination=str(dest_second),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    result = _make_yolo_result(["person", "dog"], COCO_NAMES)
+    mock_model.return_value = [result]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest_first / "photo.jpg").exists()
+    assert not (dest_second / "photo.jpg").exists()
+
+
+# ── Criterion 7: group_by_year / group_by_month sub-paths ─────────────────────
+
+def test_flat_when_both_false(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest / "photo.jpg").exists()
+
+
+def test_year_subpath_when_year_only(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=True, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    fixed_dt = datetime(2023, 7, 15)
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model), \
+         patch("imagesorter.sorter._get_image_date", return_value=fixed_dt):
+        run(config)
+
+    assert (dest / "2023" / "photo.jpg").exists()
+
+
+def test_year_month_subpath_when_both_true(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=True, group_by_month=True),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    fixed_dt = datetime(2023, 7, 15)
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model), \
+         patch("imagesorter.sorter._get_image_date", return_value=fixed_dt):
+        run(config)
+
+    assert (dest / "2023" / "07" / "photo.jpg").exists()
+
+
+def test_month_only_subpath(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=True),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    fixed_dt = datetime(2023, 7, 15)
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model), \
+         patch("imagesorter.sorter._get_image_date", return_value=fixed_dt):
+        run(config)
+
+    assert (dest / "07" / "photo.jpg").exists()
+
+
+# ── Criterion 8: EXIF date vs mtime fallback ──────────────────────────────────
+
+def test_exif_date_used_when_present(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter import sorter
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img_path = make_jpeg(src / "photo.jpg")
+
+    # Patch _get_image_date to simulate EXIF present
+    exif_date = datetime(2020, 3, 5, 12, 0, 0)
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=True, group_by_month=True),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model), \
+         patch("imagesorter.sorter._get_image_date", return_value=exif_date):
+        sorter.run(config)
+
+    assert (dest / "2020" / "03" / "photo.jpg").exists()
+
+
+def test_mtime_fallback_when_no_exif(tmp_path):
+    """_get_image_date should return mtime when EXIF is absent."""
+    from imagesorter.sorter import _get_image_date
+    from datetime import datetime
+    import os
+
+    img_path = make_jpeg(tmp_path / "photo.jpg")
+    # Set a known mtime
+    known_ts = datetime(2019, 6, 1, 0, 0, 0).timestamp()
+    os.utime(str(img_path), (known_ts, known_ts))
+
+    dt = _get_image_date(img_path)
+    assert dt.year == 2019
+    assert dt.month == 6
+
+
+# ── Criterion 9: unclassified images ──────────────────────────────────────────
+
+def test_unclassified_image_placed_in_unclassified_folder(tmp_path):
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "unknown.jpg")
+    unclassified_dest = tmp_path / "sorted"
+
+    config = _make_config(
+        tmp_path,
+        tag_groups=[],  # no groups
+        unclassified_enabled=True,
+        unclassified_dest=unclassified_dest,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result([], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (unclassified_dest / "others" / "unknown.jpg").exists()
+    assert not img.exists()
+
+
+def test_unclassified_disabled_image_stays(tmp_path):
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "unknown.jpg")
+
+    config = _make_config(tmp_path, tag_groups=[], unclassified_enabled=False)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result([], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert img.exists()
+
+
+# ── Criterion (pending): unclassified path ordering ───────────────────────────
+
+def test_unclassified_path_folder_name_before_year_month(tmp_path):
+    """Path must be destination/folder_name/YYYY/MM, not destination/YYYY/MM/folder_name."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "unknown.jpg")
+    unclassified_dest = tmp_path / "sorted"
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[],
+        unclassified=Unclassified(
+            enabled=True,
+            folder_name="others",
+            destination=str(unclassified_dest),
+            group_by_year=True,
+            group_by_month=True,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result([], COCO_NAMES)]
+    fixed_dt = datetime(2023, 7, 15)
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model), \
+         patch("imagesorter.sorter._get_image_date", return_value=fixed_dt):
+        run(config)
+
+    # Correct: destination / folder_name / YYYY / MM
+    assert (unclassified_dest / "others" / "2023" / "07" / "unknown.jpg").exists(), (
+        "Expected destination/folder_name/YYYY/MM, got wrong path order"
+    )
+    # Make sure it's NOT under the wrong path
+    assert not (unclassified_dest / "2023" / "07" / "others" / "unknown.jpg").exists()
+
+
+# ── Criterion (pending): recursive flag ───────────────────────────────────────
+
+def test_recursive_false_ignores_subdirectory_images(tmp_path):
+    """Images in subdirectories must NOT be processed when recursive=False."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    top_img = make_jpeg(src / "top.jpg")
+    sub_img = make_jpeg(src / "sub" / "nested.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups, recursive=False)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    # Only one image is scanned — top.jpg
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest / "top.jpg").exists()
+    assert sub_img.exists()  # subdirectory image untouched
+
+
+def test_recursive_true_includes_subdirectory_images(tmp_path):
+    """Images in subdirectories must be processed when recursive=True."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    top_img = make_jpeg(src / "top.jpg")
+    sub_img = make_jpeg(src / "sub" / "nested.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups, recursive=True)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    # Two images scanned
+    mock_model.return_value = [
+        _make_yolo_result(["person"], COCO_NAMES),
+        _make_yolo_result(["person"], COCO_NAMES),
+    ]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest / "top.jpg").exists()
+    assert (dest / "nested.jpg").exists()
+
+
+# ── Criterion (pending): thread-safety of counters ────────────────────────────
+
+def test_counter_accuracy_with_multiple_threads(tmp_path, caplog):
+    """Counters must be accurate when N images are processed concurrently."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter import sorter
+    import logging
+
+    src = tmp_path / "src"
+    src.mkdir()
+    n = 20
+    for i in range(n):
+        make_jpeg(src / f"photo_{i:02d}.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=8,  # force concurrency
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)] * n
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            sorter.run(config)
+
+    summary_messages = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_messages, "No summary log emitted"
+    summary = summary_messages[-1]
+    # All n images should be counted as moved
+    assert f"moved={n}" in summary, f"Expected moved={n} in summary, got: {summary}"
+    assert "errors=0" in summary
+
+
+# ── Criterion (pending): tag case-insensitivity ────────────────────────────────
+
+def test_mixed_case_tag_matches_lowercase_detection(tmp_path):
+    """Tag 'Person' in a rule must match YOLO-detected label 'person'."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "family"
+
+    # Rule tag uses mixed case — should still match lowercase YOLO output
+    tag_groups = [
+        TagGroup(name="Family", tags=["Person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES  # returns lowercase "person"
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest / "photo.jpg").exists(), "Mixed-case tag 'Person' should match detected 'person'"
+
+
+def test_uppercase_tag_matches_lowercase_detection(tmp_path):
+    """Tag 'CAR' in a rule must match YOLO-detected label 'car'."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "vehicles"
+
+    tag_groups = [
+        TagGroup(name="Vehicles", tags=["CAR"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["car"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest / "photo.jpg").exists(), "Uppercase tag 'CAR' should match detected 'car'"
+
+
+# ── Criterion 24: empty / zero-match source folder ────────────────────────────
+
+def test_empty_source_logs_summary_group_by_tags(tmp_path, caplog):
+    """GroupByTags: empty source completes without error and logs a run summary."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()  # empty — no images at all
+
+    dest = tmp_path / "out"
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)  # must not raise
+
+    summary_messages = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_messages, "Expected a run summary log when source has no matching images"
+
+
+def test_unsupported_formats_only_logs_summary_group_by_tags(tmp_path, caplog):
+    """GroupByTags: source with only unsupported formats logs a run summary."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "notes.txt").write_text("hello")  # not in include_formats
+
+    dest = tmp_path / "out"
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    summary_messages = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_messages, "Expected a run summary log when source has no matching images"
+
+
+# ── Criterion 23: include_formats filtering ───────────────────────────────────
+
+def test_non_listed_extension_not_processed(tmp_path):
+    """Files whose extension is not in include_formats must not be moved or passed to YOLO."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # Only .jpg is in include_formats; .txt and .png must be skipped
+    txt_file = src / "notes.txt"
+    txt_file.write_text("hello")
+    png_file = src / "image.png"
+    make_jpeg(png_file)  # valid image content, but wrong extension relative to config
+
+    dest = tmp_path / "out"
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    # include_formats only has .jpg — png is excluded
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []  # no images fed to YOLO
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    # Non-listed files must remain untouched
+    assert txt_file.exists(), ".txt file should not be moved"
+    assert png_file.exists(), ".png file should not be moved when not in include_formats"
+    # Destination folder should not be created (nothing processed)
+    assert not dest.exists() or list(dest.rglob("*")) == []
+
+
+# ── Criterion: copy_instead_of_move=True in GroupByTags (end-to-end) ─────────
+
+def test_copy_instead_of_move_keeps_source_files(tmp_path):
+    """When copy_instead_of_move=True, source files remain in place after sorter.run()."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img1 = make_jpeg(src / "photo1.jpg")
+    img2 = make_jpeg(src / "photo2.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups, copy=True)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [
+        _make_yolo_result(["person"], COCO_NAMES),
+        _make_yolo_result(["person"], COCO_NAMES),
+    ]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    # Destination must have copies
+    assert (dest / "photo1.jpg").exists(), "photo1.jpg should be copied to destination"
+    assert (dest / "photo2.jpg").exists(), "photo2.jpg should be copied to destination"
+    # Source files must still exist (copy, not move)
+    assert img1.exists(), "photo1.jpg source must remain after copy_instead_of_move=True"
+    assert img2.exists(), "photo2.jpg source must remain after copy_instead_of_move=True"
+
+
+# ── Criterion: YOLO batch call (model called once per run()) ─────────────────
+
+def test_yolo_called_once_with_full_list(tmp_path):
+    """YOLO model must be called exactly once with a list of all images."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(5):
+        make_jpeg(src / f"img_{i}.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)] * 5
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    # The model must have been called exactly once (batch, not per-image)
+    assert mock_model.call_count == 1, (
+        f"Expected model to be called once (batch), got {mock_model.call_count} calls"
+    )
+    # The single call must have received a list (all images together)
+    call_args = mock_model.call_args
+    batch_arg = call_args[0][0]
+    assert isinstance(batch_arg, list), f"Expected list argument, got {type(batch_arg)}"
+    assert len(batch_arg) == 5, f"Expected 5 images in batch, got {len(batch_arg)}"
+
+
+# ── Criterion 10: source == destination error ──────────────────────────────────
+
+def test_error_when_destination_same_as_source(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(src),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+    config = config.__class__(
+        mode=config.mode,
+        source_folder=str(src),
+        recursive=config.recursive,
+        copy_instead_of_move=config.copy_instead_of_move,
+        include_formats=config.include_formats,
+        threads=config.threads,
+        log_level=config.log_level,
+        log_file=config.log_file,
+        tag_groups=tag_groups,
+        unclassified=config.unclassified,
+        similarity_threshold=config.similarity_threshold,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        with pytest.raises(SystemExit):
+            run(config)

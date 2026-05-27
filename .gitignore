@@ -1,0 +1,28 @@
+# Generated / runtime
+.gen/
+*.log
+*.pt
+sorted/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# User config
+config.yaml
+quick-start.md
