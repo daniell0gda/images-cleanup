@@ -80,3 +80,33 @@ def test_move_removes_source_after_confirmed_copy(tmp_path):
     result = transfer(src, dest_dir, copy=False)
     assert result.exists()
     assert not src.exists()
+
+
+# ── Atomicity: rollback on delete failure ─────────────────────────────────────
+
+def test_move_rolls_back_dest_when_src_delete_fails(tmp_path):
+    """If os.remove(src) raises, the destination copy must be deleted (no duplicate)."""
+    from unittest.mock import patch
+    from imagesorter.file_ops import transfer
+    src = make_file(tmp_path / "src" / "photo.jpg", b"data")
+    dest_dir = tmp_path / "dest"
+
+    with patch("imagesorter.file_ops.os.remove", side_effect=PermissionError("Access is denied")):
+        with pytest.raises(PermissionError):
+            transfer(src, dest_dir, copy=False)
+
+    assert not (dest_dir / "photo.jpg").exists()
+
+
+def test_move_leaves_source_intact_when_src_delete_fails(tmp_path):
+    """If os.remove(src) raises, the source file must still exist."""
+    from unittest.mock import patch
+    from imagesorter.file_ops import transfer
+    src = make_file(tmp_path / "src" / "photo.jpg", b"data")
+    dest_dir = tmp_path / "dest"
+
+    with patch("imagesorter.file_ops.os.remove", side_effect=PermissionError("Access is denied")):
+        with pytest.raises(PermissionError):
+            transfer(src, dest_dir, copy=False)
+
+    assert src.exists()

@@ -37,12 +37,17 @@ def transfer(src: Path, dest_dir: Path, copy: bool) -> Path:
         shutil.copy2(str(src), str(dest))
         logger.debug("Copied %s -> %s", src, dest)
     else:
-        # Safe move: copy first, verify, then remove source
+        # Safe move: copy first, verify, then remove source.
+        # If source delete fails, roll back by removing the destination copy
+        # so neither side is left in a half-moved state.
         shutil.copy2(str(src), str(dest))
-        if dest.exists():
-            os.remove(str(src))
-            logger.debug("Moved %s -> %s", src, dest)
-        else:
+        if not dest.exists():
             raise IOError(f"Destination {dest} not confirmed after copy")
+        try:
+            os.remove(str(src))
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
+        logger.debug("Moved %s -> %s", src, dest)
 
     return dest
