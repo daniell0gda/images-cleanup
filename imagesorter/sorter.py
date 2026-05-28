@@ -88,13 +88,27 @@ def run(config: Config) -> None:
 
     logger.info("Mode: GroupByTags | Source: %s | Images: %d", source, total)
 
-    # Batch YOLO inference
-    results = model(images, verbose=False)
+    # Chunked YOLO inference
+    batch_size = config.batch_size
+    num_batches = (total + batch_size - 1) // batch_size
+    results: list = []
+    for batch_idx in range(num_batches):
+        start = batch_idx * batch_size
+        end = min(start + batch_size, total)
+        chunk = images[start:end]
+        logger.info(
+            "Processing batch %d/%d (images %d–%d of %d)",
+            batch_idx + 1, num_batches, start + 1, end, total,
+        )
+        chunk_results = model(chunk, conf=config.confidence_threshold, verbose=False)
+        results.extend(chunk_results)
 
     def process(img: Path, result) -> None:
         nonlocal moved, skipped, errors
         try:
-            detected = {model.names[int(cls)].lower() for cls in result.boxes.cls}
+            cls_tensor = result.boxes.cls if result.boxes is not None else []
+            detected = {model.names[int(cls)].lower() for cls in cls_tensor}
+            logger.debug("%s: detected %s", img.name, sorted(detected))
             group = _select_group(detected, config.tag_groups)
 
             if group is None:

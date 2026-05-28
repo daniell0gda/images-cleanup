@@ -808,3 +808,244 @@ def test_error_when_destination_same_as_source(tmp_path):
     with patch("imagesorter.sorter.YOLO", return_value=mock_model):
         with pytest.raises(SystemExit):
             run(config)
+
+
+# ── Criterion: chunked YOLO calls with batch_size ─────────────────────────────
+
+def test_yolo_called_once_per_chunk(tmp_path):
+    """5 images + batch_size=2 → 3 YOLO calls (chunks of 2, 2, 1)."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(5):
+        make_jpeg(src / f"img_{i}.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        batch_size=2,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)] * 2
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert mock_model.call_count == 3, (
+        f"Expected 3 YOLO calls for 5 images with batch_size=2, got {mock_model.call_count}"
+    )
+
+
+# ── Criterion: conf= forwarded on every YOLO call ────────────────────────────
+
+def test_conf_kwarg_forwarded_to_yolo(tmp_path):
+    """confidence_threshold is passed as conf= on every YOLO call."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(3):
+        make_jpeg(src / f"img_{i}.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        batch_size=2,
+        confidence_threshold=0.7,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)] * 2
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    for call in mock_model.call_args_list:
+        assert call.kwargs.get("conf") == 0.7, (
+            f"Expected conf=0.7 in YOLO call, got kwargs={call.kwargs}"
+        )
+
+
+# ── Criterion: INFO log per batch ─────────────────────────────────────────────
+
+def test_info_log_emitted_per_batch(tmp_path, caplog):
+    """INFO log 'Processing batch N/M (images S–E of T)' emitted per batch."""
+    import logging
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(5):
+        make_jpeg(src / f"img_{i}.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="INFO",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        batch_size=2,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)] * 2
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    batch_logs = [r.message for r in caplog.records if "Processing batch" in r.message]
+    assert len(batch_logs) == 3, f"Expected 3 batch log lines, got {len(batch_logs)}: {batch_logs}"
+    # Check the pattern: "Processing batch N/M (images S–E of T)"
+    assert "Processing batch 1/3 (images 1" in batch_logs[0]
+    assert "of 5)" in batch_logs[0]
+    assert "Processing batch 2/3" in batch_logs[1]
+    assert "Processing batch 3/3" in batch_logs[2]
+
+
+# ── Criterion: result.boxes is None → zero detections, no error ──────────────
+
+def test_none_boxes_no_attribute_error(tmp_path, caplog):
+    """result.boxes=None must not raise AttributeError and must not increment errors."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+
+    tag_groups = []
+    config = _make_config(tmp_path, tag_groups, unclassified_enabled=False)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    result = MagicMock()
+    result.boxes = None
+    mock_model.return_value = [result]
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)  # must not raise
+
+    summary = next(r.message for r in caplog.records if "Run summary" in r.message)
+    assert "errors=0" in summary, f"Expected errors=0, got: {summary}"
+    assert "skipped=1" in summary, f"Expected skipped=1, got: {summary}"
+
+
+# ── Criterion: DEBUG log per image with detected labels ───────────────────────
+
+def test_debug_log_with_detections(tmp_path, caplog):
+    """DEBUG log 'photo.jpg: detected [person, dog]' emitted per image."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+
+    tag_groups = []
+    config = _make_config(tmp_path, tag_groups, unclassified_enabled=False)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person", "dog"], COCO_NAMES)]
+
+    with caplog.at_level(logging.DEBUG, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    debug_logs = [r.message for r in caplog.records if "detected" in r.message and r.levelno == logging.DEBUG]
+    assert debug_logs, f"Expected at least one DEBUG 'detected' log, got none. All logs: {[r.message for r in caplog.records]}"
+    log = debug_logs[0]
+    assert "photo.jpg" in log
+    assert "person" in log
+    assert "dog" in log
+
+
+def test_debug_log_empty_detections(tmp_path, caplog):
+    """DEBUG log with empty list when no detections."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+
+    tag_groups = []
+    config = _make_config(tmp_path, tag_groups, unclassified_enabled=False)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result([], COCO_NAMES)]
+
+    with caplog.at_level(logging.DEBUG, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    debug_logs = [r.message for r in caplog.records if "detected" in r.message and r.levelno == logging.DEBUG]
+    assert debug_logs, "Expected a DEBUG 'detected' log even for empty detections"
+    log = debug_logs[0]
+    assert "photo.jpg" in log
+    assert "[]" in log
