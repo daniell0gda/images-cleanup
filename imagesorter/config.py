@@ -117,7 +117,7 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
 
     unclassified_raw = raw.get("unclassified", {})
     unclassified = Unclassified(
-        enabled=unclassified_raw.get("enabled", False),
+        enabled=unclassified_raw.get("enabled", True),
         folder_name=unclassified_raw.get("folder_name", "others"),
         destination=unclassified_raw.get("destination", "./sorted"),
         group_by_year=unclassified_raw.get("group_by_year", False),

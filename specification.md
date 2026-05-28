@@ -135,12 +135,18 @@ Date is sourced from EXIF `DateTimeOriginal`; falls back to file modification da
 
 ### Source Folder Exclusion
 
-The `source_folder` is never used as a destination. If a configured `destination` resolves to the same path as `source_folder`, the tool exits with an error before processing.
+The `source_folder` is never used as a destination. If any configured `tag_groups[].destination` or `unclassified.destination` resolves to the same path as `source_folder`, the tool exits with an error before processing any images.
 
 ### Unclassified Images
 
-If `unclassified.enabled: true`, images that match no tag group are moved/copied to:
+`unclassified.enabled` defaults to `true` when the key is omitted from the config file.
+
+When `unclassified.enabled: true`, images that match no tag group are **moved or copied** (according to `copy_instead_of_move`) to:
 `unclassified.destination / unclassified.folder_name / [year/month if configured]`
+
+When `unclassified.enabled: false`, non-matching images are left in place.
+
+`unclassified.destination` is validated against `source_folder` at startup. If they resolve to the same path and `unclassified.enabled: true`, the tool exits with an error message referencing both `unclassified.destination` and `source_folder` before any images are processed.
 
 ### File Collision Handling
 
