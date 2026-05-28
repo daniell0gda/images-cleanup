@@ -67,6 +67,14 @@ def run(config: Config) -> None:
                 f"Error: destination '{group.destination}' resolves to the same path as source_folder '{config.source_folder}'"
             )
 
+    if config.unclassified.enabled:
+        uncl_dest = Path(config.unclassified.destination).resolve()
+        if uncl_dest == source:
+            raise SystemExit(
+                f"Error: unclassified.destination '{config.unclassified.destination}' "
+                f"resolves to the same path as source_folder '{config.source_folder}'"
+            )
+
     # Collect images
     pattern = "**/*" if config.recursive else "*"
     images: list[Path] = []

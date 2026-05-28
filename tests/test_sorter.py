@@ -1023,6 +1023,84 @@ def test_debug_log_with_detections(tmp_path, caplog):
     assert "dog" in log
 
 
+# ── AC4: SystemExit when unclassified.destination == source_folder and enabled=True ─
+
+def test_system_exit_when_unclassified_dest_same_as_source_enabled(tmp_path):
+    """sorter.run() must raise SystemExit when enabled=True and destination resolves to source."""
+    from imagesorter.config import Config, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[],
+        unclassified=Unclassified(
+            enabled=True,
+            folder_name="others",
+            destination=str(src),  # same as source_folder
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        run(config)
+
+    msg = str(exc_info.value)
+    assert "unclassified.destination" in msg
+    assert "source_folder" in msg
+
+
+# ── AC5: No SystemExit when destination==source but enabled=False ──────────────
+
+def test_no_system_exit_when_unclassified_dest_same_as_source_disabled(tmp_path):
+    """sorter.run() must NOT raise when enabled=False, even if destination == source."""
+    from imagesorter.config import Config, Unclassified
+    from imagesorter.sorter import run
+    from unittest.mock import patch, MagicMock
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[],
+        unclassified=Unclassified(
+            enabled=False,
+            folder_name="others",
+            destination=str(src),  # same as source_folder — but disabled
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    # Must NOT raise
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+
 def test_debug_log_empty_detections(tmp_path, caplog):
     """DEBUG log with empty list when no detections."""
     import logging
