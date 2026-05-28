@@ -33,6 +33,9 @@ log_file: ./imagesorter.log  # Path to log file. null = console only
 
 # --- GroupByTags mode ---------------------------------------------------------
 
+batch_size: 16               # Number of images per YOLO inference batch
+confidence_threshold: 0.5    # Minimum YOLO detection confidence (0.0-1.0)
+
 tag_groups:
   - name: Family             # Human-readable label (used in logs)
     tags:                    # ALL tags must be detected for a match (AND logic)
@@ -93,6 +96,8 @@ class Config:
     tag_groups: list[TagGroup]
     unclassified: Unclassified
     similarity_threshold: float
+    batch_size: int = 16
+    confidence_threshold: float = 0.5
 
 
 def _default_threads() -> int:
@@ -131,6 +136,14 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
         for tg in tag_groups_raw
     ]
 
+    batch_size = int(raw.get("batch_size", 16))
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+
+    confidence_threshold = float(raw.get("confidence_threshold", 0.5))
+    if not 0.0 <= confidence_threshold <= 1.0:
+        raise ValueError(f"confidence_threshold must be in [0.0, 1.0], got {confidence_threshold}")
+
     return Config(
         mode=raw.get("mode", "GroupByTags"),
         source_folder=raw.get("source_folder", "./photos"),
@@ -143,4 +156,6 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
         tag_groups=tag_groups,
         unclassified=unclassified,
         similarity_threshold=float(raw.get("similarity_threshold", 0.96)),
+        batch_size=batch_size,
+        confidence_threshold=confidence_threshold,
     )
