@@ -25,13 +25,18 @@ def _collision_free_path(dest: Path) -> Path:
         counter += 1
 
 
-def transfer(src: Path, dest_dir: Path, copy: bool) -> Path:
+def transfer(src: Path, dest_dir: Path, copy: bool, on_collision: str = "rename") -> Path | None:
     """Move or copy src into dest_dir, handling name collisions.
 
-    Returns the final destination path.
+    Returns the final destination path, or None when on_collision='skip' and a
+    collision is detected (source file is left untouched in that case).
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = _collision_free_path(dest_dir / src.name)
+    natural = dest_dir / src.name
+    if natural.exists() and on_collision == "skip":
+        logger.warning("Collision: %s already exists, skipping %s", natural.name, src.name)
+        return None
+    dest = _collision_free_path(natural)
 
     if copy:
         shutil.copy2(str(src), str(dest))
