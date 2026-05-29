@@ -139,8 +139,11 @@ def run(config: Config) -> None:
         subfolder = representative.parent / representative.stem
         for p in group_paths:
             try:
-                transfer(p, subfolder, config.copy_instead_of_move)
-                moved += 1
+                result = transfer(p, subfolder, config.copy_instead_of_move, on_collision=config.on_collision)
+                if result is None:
+                    skipped += 1
+                else:
+                    moved += 1
             except Exception as exc:
                 logger.error("Error moving %s: %s", p, exc)
                 errors += 1

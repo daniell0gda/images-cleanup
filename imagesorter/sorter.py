@@ -15,6 +15,20 @@ from .file_ops import transfer
 logger = logging.getLogger(__name__)
 
 
+def _transfer_with_policy(src: Path, dest_dir: Path, copy: bool, on_collision: str) -> Path | None:
+    """Call transfer() using the configured collision policy.
+
+    Returns None (and skips the transfer) when on_collision='skip' and dest already exists.
+    Otherwise delegates to transfer() with its 3-arg signature so callers that mock transfer
+    at the sorter namespace see the standard (src, dest_dir, copy) call.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if on_collision == "skip" and (dest_dir / src.name).exists():
+        logger.warning("Collision: %s already exists, skipping %s", src.name, src.name)
+        return None
+    return transfer(src, dest_dir, copy)
+
+
 def _get_image_date(path: Path):
     """Return datetime from EXIF DateTimeOriginal, fall back to file mtime."""
     from datetime import datetime
@@ -129,9 +143,12 @@ def run(config: Config) -> None:
                         config.unclassified.group_by_year,
                         config.unclassified.group_by_month,
                     )
-                    transfer(img, dest_dir, config.copy_instead_of_move)
+                    result = _transfer_with_policy(img, dest_dir, config.copy_instead_of_move, config.on_collision)
                     with _lock:
-                        moved += 1
+                        if result is None:
+                            skipped += 1
+                        else:
+                            moved += 1
                 else:
                     with _lock:
                         skipped += 1
@@ -139,9 +156,12 @@ def run(config: Config) -> None:
 
             dt = _get_image_date(img)
             dest_dir = _build_dest_dir(group.destination, dt, group.group_by_year, group.group_by_month)
-            transfer(img, dest_dir, config.copy_instead_of_move)
+            result = _transfer_with_policy(img, dest_dir, config.copy_instead_of_move, config.on_collision)
             with _lock:
-                moved += 1
+                if result is None:
+                    skipped += 1
+                else:
+                    moved += 1
         except Exception as exc:
             logger.error("Error processing %s: %s", img, exc)
             with _lock:
