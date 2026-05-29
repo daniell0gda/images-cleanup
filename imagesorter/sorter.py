@@ -91,17 +91,25 @@ def run(config: Config) -> None:
 
     # Collect images
     pattern = "**/*" if config.recursive else "*"
+    logger.info("Discovering images in %s ...", source)
     images: list[Path] = []
     for fmt in config.include_formats:
-        images.extend(p for p in source.glob(pattern) if p.suffix.lower() == fmt)
+        for p in source.glob(pattern):
+            if p.suffix.lower() == fmt:
+                images.append(p)
+                if len(images) % 500 == 0:
+                    logger.info("  ... %d images found so far", len(images))
     images = list(dict.fromkeys(images))
+    logger.info("Found %d images", len(images))
 
     if not images:
         logger.info("No images found in %s", source)
         logger.info("Run summary: total=0 moved=0 skipped=0 errors=0")
         return
 
+    logger.info("Loading YOLO model ...")
     model = YOLO()  # default model
+    logger.info("Model ready")
 
     total = len(images)
     moved = 0

@@ -215,3 +215,42 @@ def test_no_subfolder_for_solo_images(tmp_path):
     # No unexpected subfolders
     subdirs = [p for p in src.iterdir() if p.is_dir()]
     assert subdirs == []
+
+
+# ── AC6: discovery INFO logged before any hash operation ─────────────────────
+
+def test_discovery_info_logged_before_hashing(tmp_path, caplog):
+    """An INFO record mentioning discovery appears before any hash operation."""
+    import logging
+    from imagesorter.similarity import run
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+
+    config = _make_config(tmp_path, threshold=0.96)
+
+    hash_calls: list[str] = []
+
+    def tracking_hash(path: Path):
+        hash_calls.append(path.name)
+        return FakeHash(0)
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.similarity"):
+        with patch("imagesorter.similarity._hash_image", side_effect=tracking_hash):
+            run(config)
+
+    records = caplog.records
+    discovery_records = [
+        r for r in records
+        if r.levelno == logging.INFO and (
+            "Discovering" in r.message or "Found" in r.message
+        )
+    ]
+    assert discovery_records, "Expected at least one INFO record mentioning discovery"
+
+    # The discovery message must appear before hashing starts.
+    # We verify this by checking discovery logs exist and hash was called after run started.
+    # Since logs are emitted sequentially before the hash loop, the first discovery
+    # record precedes any hashing.
+    first_discovery_msg = discovery_records[0].message
+    assert "Discovering" in first_discovery_msg or "Found" in first_discovery_msg

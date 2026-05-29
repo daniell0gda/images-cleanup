@@ -1177,3 +1177,50 @@ def test_no_duplicate_rename_when_single_collision(tmp_path):
 
     assert (dest / "photo_1.jpg").exists(), "Expected photo_1.jpg to be created for the renamed collision"
     assert not (dest / "photo_2.jpg").exists(), "photo_2.jpg must not exist — source was processed only once"
+
+
+# ── AC5: discovery / model-loading INFO logged before first "Processing batch" ─
+
+def test_discovery_info_logged_before_processing_batch(tmp_path, caplog):
+    """An INFO record mentioning discovery or model loading precedes 'Processing batch'."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    records = caplog.records
+    batch_indices = [i for i, r in enumerate(records) if "Processing batch" in r.message]
+    assert batch_indices, "Expected at least one 'Processing batch' log record"
+    first_batch_idx = batch_indices[0]
+
+    discovery_before_batch = [
+        r for r in records[:first_batch_idx]
+        if r.levelno == logging.INFO and (
+            "Discovering" in r.message
+            or "Found" in r.message
+            or "Loading YOLO" in r.message
+            or "Model ready" in r.message
+        )
+    ]
+    assert discovery_before_batch, (
+        "Expected at least one INFO record mentioning discovery or model loading "
+        "before the first 'Processing batch' record"
+    )
