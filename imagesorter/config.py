@@ -17,6 +17,7 @@ source_folder: ./photos      # Directory to search for images
 recursive: true              # Search subfolders recursively
 
 copy_instead_of_move: false  # If true, copy files; if false, move them
+on_collision: rename         # rename | skip
 
 include_formats:             # Image file extensions to process (case-insensitive)
   - .jpg
@@ -98,6 +99,7 @@ class Config:
     similarity_threshold: float
     batch_size: int = 16
     confidence_threshold: float = 0.5
+    on_collision: str = "rename"
 
 
 def _default_threads() -> int:
@@ -144,6 +146,10 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
     if not 0.0 <= confidence_threshold <= 1.0:
         raise ValueError(f"confidence_threshold must be in [0.0, 1.0], got {confidence_threshold}")
 
+    on_collision = raw.get("on_collision", "rename")
+    if on_collision not in {"rename", "skip"}:
+        raise ValueError(f"on_collision must be 'rename' or 'skip', got {on_collision!r}")
+
     return Config(
         mode=raw.get("mode", "GroupByTags"),
         source_folder=raw.get("source_folder", "./photos"),
@@ -158,4 +164,5 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
         similarity_threshold=float(raw.get("similarity_threshold", 0.96)),
         batch_size=batch_size,
         confidence_threshold=confidence_threshold,
+        on_collision=on_collision,
     )

@@ -67,7 +67,7 @@ def test_generate_config_contains_required_keys():
     required_keys = {"mode", "source_folder", "recursive", "copy_instead_of_move",
                      "include_formats", "threads", "log_level", "log_file",
                      "tag_groups", "unclassified", "similarity_threshold",
-                     "batch_size", "confidence_threshold"}
+                     "batch_size", "confidence_threshold", "on_collision"}
     for key in required_keys:
         assert key in parsed, f"Missing key: {key}"
 
