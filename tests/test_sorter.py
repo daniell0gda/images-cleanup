@@ -1127,3 +1127,53 @@ def test_debug_log_empty_detections(tmp_path, caplog):
     log = debug_logs[0]
     assert "photo.jpg" in log
     assert "[]" in log
+
+
+# ── AC7: single collision → exactly one renamed file, no second copy ──────────
+
+def test_no_duplicate_rename_when_single_collision(tmp_path):
+    """One source image + same-named file already at dest → exactly photo_1.jpg, no photo_2.jpg."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    # Pre-place a file with the same name at the destination to trigger a collision
+    make_jpeg(dest / "photo.jpg")
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        on_collision="rename",
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (dest / "photo_1.jpg").exists(), "Expected photo_1.jpg to be created for the renamed collision"
+    assert not (dest / "photo_2.jpg").exists(), "photo_2.jpg must not exist — source was processed only once"

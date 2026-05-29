@@ -66,6 +66,7 @@ def run(config: Config) -> None:
     images: list[Path] = []
     for fmt in config.include_formats:
         images.extend(p for p in source.glob(pattern) if p.suffix.lower() == fmt)
+    images = list(dict.fromkeys(images))
 
     if not images:
         logger.info("No images found in %s", source)
