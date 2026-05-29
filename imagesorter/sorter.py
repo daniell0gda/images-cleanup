@@ -111,10 +111,10 @@ def run(config: Config) -> None:
 
     logger.info("Mode: GroupByTags | Source: %s | Images: %d", source, total)
 
-    # Chunked YOLO inference
+    # Chunked YOLO inference; fall back to one-by-one on batch failure (e.g. truncated file)
     batch_size = config.batch_size
     num_batches = (total + batch_size - 1) // batch_size
-    results: list = []
+    paired: list[tuple[Path, object]] = []
     for batch_idx in range(num_batches):
         start = batch_idx * batch_size
         end = min(start + batch_size, total)
@@ -123,8 +123,17 @@ def run(config: Config) -> None:
             "Processing batch %d/%d (images %d–%d of %d)",
             batch_idx + 1, num_batches, start + 1, end, total,
         )
-        chunk_results = model(chunk, conf=config.confidence_threshold, verbose=False)
-        results.extend(chunk_results)
+        try:
+            chunk_results = model(chunk, conf=config.confidence_threshold, verbose=False)
+            paired.extend(zip(chunk, chunk_results))
+        except Exception:
+            for img in chunk:
+                try:
+                    res = model([img], conf=config.confidence_threshold, verbose=False)
+                    paired.append((img, res[0]))
+                except Exception as exc:
+                    logger.error("Skipping unreadable image %s: %s", img.name, exc)
+                    errors += 1
 
     def process(img: Path, result) -> None:
         nonlocal moved, skipped, errors
@@ -169,7 +178,7 @@ def run(config: Config) -> None:
                 errors += 1
 
     with ThreadPoolExecutor(max_workers=config.threads) as pool:
-        futures = [pool.submit(process, img, result) for img, result in zip(images, results)]
+        futures = [pool.submit(process, img, result) for img, result in paired]
         for future in futures:
             future.result()
 
