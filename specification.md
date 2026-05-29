@@ -60,6 +60,8 @@ recursive: true              # Search subfolders recursively
 
 copy_instead_of_move: false  # If true, copy files; if false, move them
 
+on_collision: rename         # rename | skip
+
 include_formats:             # Image file extensions to process (case-insensitive)
   - .jpg
   - .jpeg
@@ -102,6 +104,13 @@ unclassified:
 
 similarity_threshold: 0.96   # 0.0–1.0. Images at or above this similarity are grouped
 ```
+
+### `on_collision` Policy
+
+Controls what happens when a file with the same name already exists at the destination:
+
+- `rename` — the incoming file is renamed with an incrementing numeric suffix (e.g. `image.jpg` → `image_1.jpg` → `image_2.jpg`). The collision is logged as a WARNING.
+- `skip` — the source file is left untouched and the transfer is skipped. The collision is logged as a WARNING.
 
 ---
 
@@ -150,9 +159,9 @@ When `unclassified.enabled: false`, non-matching images are left in place.
 
 ### File Collision Handling
 
-If a file with the same name already exists at the destination:
-- The incoming file is renamed with an incrementing suffix: `image.jpg` → `image_1.jpg` → `image_2.jpg`
-- The collision is logged as a WARNING.
+Controlled by the `on_collision` config key:
+- `rename` — the incoming file is renamed with an incrementing numeric suffix: `image.jpg` → `image_1.jpg` → `image_2.jpg`. The collision is logged as a WARNING.
+- `skip` — the source file is left untouched and the transfer is skipped. The collision is logged as a WARNING.
 
 ---
 
@@ -176,7 +185,9 @@ Images with no similar counterparts above the threshold are **left in place**. N
 
 ### File Collision Handling
 
-Same as GroupByTags: rename with incrementing suffix, log as WARNING.
+Controlled by the `on_collision` config key:
+- `rename` — the incoming file is renamed with an incrementing numeric suffix: `image.jpg` → `image_1.jpg` → `image_2.jpg`. The collision is logged as a WARNING.
+- `skip` — the source file is left untouched and the transfer is skipped. The collision is logged as a WARNING.
 
 ---
 
@@ -209,7 +220,7 @@ Same as GroupByTags: rename with incrementing suffix, log as WARNING.
 
 - **Nothing is deleted.** The tool only moves or copies. Move = copy + delete original, where original is deleted only after successful copy is confirmed.
 - **Source folder is never a destination** for GroupByTags mode (validated at startup).
-- **Collisions never overwrite** — always renamed with suffix.
+- **Collisions never overwrite** — when `on_collision: rename`, the incoming file is renamed with an incrementing numeric suffix; when `on_collision: skip`, the incoming file is left at the source and a WARNING is logged.
 - **Errors are non-fatal** — a single unreadable file is logged and skipped; processing continues.
 - All operations are logged so the user has a full audit trail.
 
