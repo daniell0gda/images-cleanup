@@ -1,3 +1,7 @@
+# Python
+
+Use Python 3.11. It can be found at C:\Python311\python.exe
+
 # Git
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) for all commit messages:
