@@ -1354,6 +1354,259 @@ def test_unclassified_inside_source_not_reprocessed(tmp_path):
     assert not (src / "others" / "photo_2.jpg").exists(), "Image must not be re-processed multiple times"
 
 
+# ── Collision vs unclassified skip counter distinction ───────────────────────
+
+def test_summary_distinguishes_collision_skips_from_unclassified_skips(tmp_path, caplog):
+    """Run summary log must distinguish collision-skipped from unclassified-skipped images."""
+    import logging
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    # Image 1: will match group but collision skip
+    collision_img = make_jpeg(src / "collision.jpg")
+    # Image 2: no group match and unclassified disabled → unclassified skip
+    unclassified_img = make_jpeg(src / "unclassified.jpg")
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    # Pre-place collision.jpg at destination to trigger collision skip
+    make_jpeg(dest / "collision.jpg")
+
+    tag_groups = [
+        TagGroup(name="ByPerson", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="INFO",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        on_collision="skip",
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    # collision.jpg → detected person (matches group, but dest already exists → skip)
+    # unclassified.jpg → no detections (no match, unclassified disabled → skip)
+    mock_model.return_value = [
+        _make_yolo_result(["person"], COCO_NAMES),
+        _make_yolo_result([], COCO_NAMES),
+    ]
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    summary_msgs = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_msgs, "Expected a run summary"
+    summary = summary_msgs[-1]
+    # The summary must separately mention collision-skipped and unclassified-skipped
+    assert "collision_skipped=1" in summary or "skipped_collision=1" in summary, (
+        f"Expected collision skip count in summary, got: {summary}"
+    )
+    assert "skipped=1" in summary or "unclassified_skipped=1" in summary, (
+        f"Expected unclassified skip count in summary, got: {summary}"
+    )
+
+
+# ── Thread-safe error counter ─────────────────────────────────────────────────
+
+def test_errors_counted_when_image_unreadable(tmp_path, caplog):
+    """Unreadable images must be counted in the errors summary."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # Create a real jpeg so YOLO mock is happy, but then make model raise
+    img = make_jpeg(src / "bad.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    # Make batch call raise so the per-image fallback path runs
+    mock_model.side_effect = Exception("batch failed")
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    summary_msgs = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_msgs, "Expected a run summary"
+    assert "errors=1" in summary_msgs[-1], f"Expected errors=1, got: {summary_msgs[-1]}"
+
+
+# ── Empty tags list warning ───────────────────────────────────────────────────
+
+def test_empty_tags_group_emits_warning(tmp_path, caplog):
+    """A TagGroup with tags=[] must emit a WARNING log."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    tag_groups = [
+        TagGroup(name="EmptyGroup", tags=[], destination=str(tmp_path / "out"),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("tag" in m.lower() or "EmptyGroup" in m for m in warning_msgs), (
+        f"Expected a WARNING about empty tags, got: {warning_msgs}"
+    )
+
+
+# ── Month-without-year warning ───────────────────────────────────────────────
+
+def test_group_by_month_without_year_emits_warning(tmp_path, caplog):
+    """group_by_month=True and group_by_year=False must emit a WARNING log."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    tag_groups = [
+        TagGroup(name="ByMonth", tags=["person"], destination=str(tmp_path / "out"),
+                 group_by_year=False, group_by_month=True),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("month" in m.lower() for m in warning_msgs), (
+        f"Expected a WARNING about month-without-year, got: {warning_msgs}"
+    )
+
+
+# ── Duplicate destination warning ────────────────────────────────────────────
+
+def test_duplicate_destination_emits_warning(tmp_path, caplog):
+    """Two TagGroups with the same destination must emit a WARNING log."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    shared_dest = tmp_path / "shared"
+
+    tag_groups = [
+        TagGroup(name="Group1", tags=["person"], destination=str(shared_dest),
+                 group_by_year=False, group_by_month=False),
+        TagGroup(name="Group2", tags=["dog"], destination=str(shared_dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("destination" in m.lower() for m in warning_msgs), (
+        f"Expected a WARNING about duplicate destination, got: {warning_msgs}"
+    )
+
+
+# ── on_collision="skip" forwarded end-to-end ─────────────────────────────────
+
+def test_on_collision_skip_leaves_source_when_dest_exists(tmp_path):
+    """on_collision='skip': source stays when a same-named file already exists at dest."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    # Pre-place same-named file at destination
+    existing = make_jpeg(dest / "photo.jpg")
+    existing_content = existing.read_bytes()
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        on_collision="skip",
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    # Source must still exist (skip policy)
+    assert img.exists(), "Source must remain when on_collision='skip' and dest exists"
+    # Destination must be unchanged
+    assert (dest / "photo.jpg").read_bytes() == existing_content, "Destination file must not be modified"
+    # No renamed file must appear
+    assert not (dest / "photo_1.jpg").exists(), "No renamed file should appear under skip policy"
+
+
 # ── AC3: destination/folder_name == source (empty folder_name) → SystemExit ──
 
 def test_unclassified_empty_folder_name_raises_system_exit(tmp_path):
@@ -1386,3 +1639,583 @@ def test_unclassified_empty_folder_name_raises_system_exit(tmp_path):
 
     with pytest.raises(SystemExit):
         run(config)
+
+
+# ── WARNING-level log when PIL fails to parse EXIF data ──────────────────────
+
+def test_warning_emitted_when_exif_parse_fails(tmp_path, caplog):
+    """When PIL fails to parse EXIF for a file, _get_image_date emits a WARNING naming the file."""
+    import logging
+    from imagesorter.sorter import _get_image_date
+
+    img_path = make_jpeg(tmp_path / "corrupt_exif.jpg")
+
+    # Make PIL.Image.open raise — simulating corrupt file that triggers exception in EXIF parsing
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("PIL.Image.open", side_effect=Exception("Corrupt EXIF")):
+            result = _get_image_date(img_path)
+
+    # Must fall back gracefully (return a datetime)
+    from datetime import datetime
+    assert isinstance(result, datetime)
+
+    # Must have emitted a WARNING
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "corrupt_exif" in m.lower() or "exif" in m.lower() or "mtime" in m.lower()
+        for m in warning_msgs
+    ), f"Expected WARNING about EXIF parse failure naming the file, got: {warning_msgs}"
+    # The file name must appear in the WARNING
+    assert any("corrupt_exif" in m for m in warning_msgs), (
+        f"Expected file name 'corrupt_exif.jpg' in WARNING, got: {warning_msgs}"
+    )
+
+
+# ── Non-RGB image converted to RGB before YOLO ───────────────────────────────
+
+def test_non_rgb_image_converted_to_rgb_before_yolo(tmp_path):
+    """CMYK/palette images must be converted to RGB before being passed to the YOLO model."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+    from PIL import Image as PILImage
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    # Create a CMYK image
+    cmyk_img_path = src / "cmyk_photo.jpg"
+    cmyk_img = PILImage.new("CMYK", (10, 10), color=(100, 50, 0, 0))
+    cmyk_img.save(str(cmyk_img_path), "JPEG")
+
+    dest = tmp_path / "out"
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=True,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    received_images: list = []
+
+    def tracking_model(images, **kwargs):
+        received_images.extend(images)
+        return [_make_yolo_result([], COCO_NAMES) for _ in images]
+
+    mock_model = MagicMock(side_effect=tracking_model)
+    mock_model.names = COCO_NAMES
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert received_images, "Expected model to receive at least one image"
+    for img in received_images:
+        assert img.mode == "RGB", (
+            f"Expected RGB image passed to YOLO, got mode={img.mode}"
+        )
+
+
+# ── WARNING when zero tag-group rules matched ─────────────────────────────────
+
+def test_warning_when_no_tag_groups_matched(tmp_path, caplog):
+    """When all images go to unclassified (no group matched), emit a WARNING."""
+    import logging
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+
+    tag_groups = [
+        TagGroup(name="Vehicles", tags=["car"], destination=str(tmp_path / "vehicles"),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=True,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=True,
+            folder_name="others",
+            destination=str(tmp_path / "sorted"),
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    # No car detected — image goes to unclassified
+    mock_model.return_value = [_make_yolo_result([], COCO_NAMES)]
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "group" in m.lower() or "matched" in m.lower() or "unclassified" in m.lower()
+        for m in warning_msgs
+    ), f"Expected WARNING that no tag groups matched, got: {warning_msgs}"
+
+
+# ── max_image_dimension=0 with large images emits WARNING ────────────────────
+
+def test_max_image_dimension_zero_with_large_image_emits_warning(tmp_path, caplog):
+    """max_image_dimension=0 and a large image (>4096x4096) must emit a WARNING."""
+    import logging
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+    from PIL import Image as PILImage
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # Create a large synthetic image (>4096x4096)
+    large_img_path = src / "large.jpg"
+    large_img = PILImage.new("RGB", (4097, 4097), color=(100, 100, 100))
+    large_img.save(str(large_img_path), "JPEG")
+
+    dest = tmp_path / "out"
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=True,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        max_image_dimension=0,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result([], COCO_NAMES)]
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        ("resize" in m.lower() or "dimension" in m.lower() or "memory" in m.lower() or "large" in m.lower())
+        for m in warning_msgs
+    ), f"Expected WARNING about large image with resizing disabled, got: {warning_msgs}"
+
+
+# ── confidence_threshold=0.0 emits WARNING ───────────────────────────────────
+
+def test_confidence_threshold_zero_emits_warning(tmp_path, caplog):
+    """confidence_threshold=0.0 must emit a WARNING that every detection will pass."""
+    import logging
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(tmp_path / "out"),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=True,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        confidence_threshold=0.0,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "confidence" in m.lower() or "detection" in m.lower() or "0.0" in m
+        for m in warning_msgs
+    ), f"Expected WARNING about confidence_threshold=0.0, got: {warning_msgs}"
+
+
+# ── Recursive: destination subtrees inside source excluded from discovery ─────
+
+def test_recursive_excludes_tag_dest_subtree_inside_source(tmp_path, caplog):
+    """When recursive=True and tag-group destination is inside source, images there are not re-processed."""
+    import logging
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+
+    # Destination is INSIDE source
+    dest = src / "sorted"
+    dest.mkdir()
+    # Pre-place an image there to verify it's not re-processed
+    already_sorted = make_jpeg(dest / "already.jpg")
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=True,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="INFO",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    # The summary should show total=1 (only photo.jpg discovered, not already.jpg)
+    summary_msgs = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_msgs
+    summary = summary_msgs[-1]
+    assert "total=1" in summary, (
+        f"Expected total=1 (already.jpg in dest subtree should be excluded), got: {summary}"
+    )
+    # already.jpg should still be in dest (not moved somewhere else)
+    assert (dest / "already.jpg").exists()
+
+
+# ── WARNING at startup when copy_instead_of_move=False ───────────────────────
+
+def test_warning_emitted_at_startup_when_move_mode(tmp_path, caplog):
+    """When copy_instead_of_move=False, a WARNING-level log must be emitted at startup."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(tmp_path / "out"),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups, copy=False)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        ("move" in m.lower() or "permanent" in m.lower() or "original" in m.lower())
+        for m in warning_msgs
+    ), f"Expected WARNING about permanent move at startup, got: {warning_msgs}"
+
+
+def test_no_move_warning_when_copy_mode(tmp_path, caplog):
+    """When copy_instead_of_move=True, no WARNING about permanent move should be emitted."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(tmp_path / "out"),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups, copy=True)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING
+                    and "permanent" in r.message.lower()]
+    assert not warning_msgs, f"No permanent-move warning expected in copy mode, got: {warning_msgs}"
+
+
+# ── Ancestor conflict: destination is ancestor of source_folder ───────────────
+
+def test_system_exit_when_destination_is_ancestor_of_source(tmp_path):
+    """sorter.run() raises SystemExit when a tag-group destination is an ancestor of source_folder."""
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    # source_folder = tmp_path/parent/source, destination = tmp_path/parent (ancestor!)
+    parent = tmp_path / "parent"
+    src = parent / "source"
+    src.mkdir(parents=True)
+    make_jpeg(src / "photo.jpg")
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(parent),
+                 group_by_year=False, group_by_month=False),
+    ]
+    from imagesorter.config import Config, Unclassified
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
+    assert "ancestor" in str(exc_info.value).lower() or "parent" in str(exc_info.value).lower() or str(parent) in str(exc_info.value)
+
+
+def test_system_exit_when_unclassified_destination_is_ancestor_of_source(tmp_path):
+    """sorter.run() raises SystemExit when unclassified destination is an ancestor of source_folder."""
+    from imagesorter.config import Config, Unclassified
+    from imagesorter.sorter import run
+
+    parent = tmp_path / "parent"
+    src = parent / "source"
+    src.mkdir(parents=True)
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[],
+        unclassified=Unclassified(
+            enabled=True,
+            folder_name="",  # empty so full path = destination = parent (ancestor of source)
+            destination=str(parent),
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    with pytest.raises(SystemExit):
+        run(config)
+
+
+# ── Symlinks outside source skipped ──────────────────────────────────────────
+
+def test_symlink_outside_source_not_processed(tmp_path):
+    """A symlink inside source_folder that points outside must not be moved."""
+    src = tmp_path / "src"
+    src.mkdir()
+    # Create an image outside source_folder
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_img = make_jpeg(outside / "external.jpg")
+    # Create a symlink inside source pointing to the outside image
+    symlink = src / "external.jpg"
+    try:
+        symlink.symlink_to(outside_img)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this system")
+
+    dest = tmp_path / "out"
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    # The outside image must remain untouched
+    assert outside_img.exists(), "External file must not be moved"
+    # The dest folder should not contain the symlink target
+    assert not (dest / "external.jpg").exists(), "Symlink target must not be moved to dest"
+
+
+# ── YOLO inference serialised in multi-thread mode ───────────────────────────
+
+def test_yolo_inference_never_called_from_worker_threads(tmp_path):
+    """When threads > 1, YOLO model is only called from the main thread (serialised)."""
+    import threading
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(4):
+        make_jpeg(src / f"img_{i}.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=4,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+        batch_size=1,  # force one image per batch so each batch spawns a thread
+    )
+
+    main_thread = threading.current_thread()
+    model_call_threads: list[threading.Thread] = []
+
+    def tracking_model(images, **kwargs):
+        model_call_threads.append(threading.current_thread())
+        return [_make_yolo_result(["person"], COCO_NAMES) for _ in images]
+
+    mock_model = MagicMock(side_effect=tracking_model)
+    mock_model.names = COCO_NAMES
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    # All model calls must have happened on the main thread
+    for t in model_call_threads:
+        assert t is main_thread, f"YOLO model was called from worker thread {t.name}"
+
+
+# ── RuntimeError from _collision_free_path() surfaced in summary ─────────────
+
+def test_collision_free_path_runtime_error_logged_and_counted(tmp_path, caplog):
+    """RuntimeError from transfer() must appear in ERROR log with 'collision'/'attempt' and increment errors."""
+    import logging
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    collision_error = RuntimeError("No free collision-free path found after 1000 attempts")
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model), \
+             patch("imagesorter.sorter.transfer", side_effect=collision_error):
+            run(config)
+
+    error_msgs = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+    assert error_msgs, "Expected at least one ERROR log when transfer raises RuntimeError"
+    assert any("collision" in m.lower() or "attempt" in m.lower() for m in error_msgs), (
+        f"Expected ERROR log to mention 'collision' or 'attempt', got: {error_msgs}"
+    )
+
+    summary_msgs = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_msgs, "Expected a run summary log"
+    assert "errors=1" in summary_msgs[-1], (
+        f"Expected errors=1 in summary, got: {summary_msgs[-1]}"
+    )

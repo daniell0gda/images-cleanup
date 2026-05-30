@@ -68,6 +68,24 @@ def test_mtime_fallback_when_no_exif(tmp_path):
     assert dt.month == 6
 
 
+def test_get_image_date_logs_warning_on_exif_failure(tmp_path, caplog):
+    """_get_image_date logs a WARNING message when EXIF read fails."""
+    import logging
+    from imagesorter.sorter import _get_image_date
+
+    # A non-image file causes EXIF read to fail
+    bad_file = tmp_path / "fake.jpg"
+    bad_file.write_bytes(b"not an image")
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.sorter"):
+        _get_image_date(bad_file)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("EXIF" in m or "mtime" in m or "fallback" in m for m in warning_msgs), (
+        f"Expected a WARNING log about EXIF fallback, got: {warning_msgs}"
+    )
+
+
 # ── _build_dest_dir ───────────────────────────────────────────────────────────
 
 def test_build_dest_dir_flat():

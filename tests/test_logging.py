@@ -175,10 +175,10 @@ def test_unreadable_image_logged_and_skipped(tmp_path, caplog):
     # Make transfer fail for bad.jpg
     from imagesorter import file_ops
     original_transfer = file_ops.transfer
-    def patched_transfer(src_path, dest_dir, copy):
+    def patched_transfer(src_path, dest_dir, copy, on_collision="rename"):
         if src_path.name == "bad.jpg":
             raise IOError("Cannot read bad.jpg")
-        return original_transfer(src_path, dest_dir, copy)
+        return original_transfer(src_path, dest_dir, copy, on_collision)
 
     with caplog.at_level(logging.ERROR, logger="imagesorter.sorter"), \
          patch("imagesorter.sorter.YOLO", return_value=mock_model), \
@@ -217,11 +217,11 @@ def test_processing_continues_after_single_error(tmp_path, caplog):
     from imagesorter import file_ops
     original_transfer = file_ops.transfer
     call_order = []
-    def patched_transfer(src_path, dest_dir, copy):
+    def patched_transfer(src_path, dest_dir, copy, on_collision="rename"):
         call_order.append(src_path.name)
         if src_path.name == "img2.jpg":
             raise IOError("Simulated error")
-        return original_transfer(src_path, dest_dir, copy)
+        return original_transfer(src_path, dest_dir, copy, on_collision)
 
     with caplog.at_level(logging.ERROR, logger="imagesorter.sorter"), \
          patch("imagesorter.sorter.YOLO", return_value=mock_model), \
