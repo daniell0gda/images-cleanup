@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -81,6 +80,25 @@ def _select_group(detected_labels: set[str], tag_groups: list[TagGroup]) -> TagG
     return matches[0][2]
 
 
+def _iter_batches(source: Path, pattern: str, include_formats: list[str], batch_size: int):
+    """Yield lists of Path objects in batch_size chunks, deduplicating via seen set."""
+    seen: set[Path] = set()
+    formats = set(include_formats)
+    batch: list[Path] = []
+    for p in source.glob(pattern):
+        if p.suffix.lower() not in formats:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        batch.append(p)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def run(config: Config) -> None:
     """Run GroupByTags mode."""
     source = Path(config.source_folder).resolve()
@@ -101,70 +119,18 @@ def run(config: Config) -> None:
                 f"resolves to the same path as source_folder '{config.source_folder}'"
             )
 
-    # Collect images
     pattern = "**/*" if config.recursive else "*"
     logger.info("Discovering images in %s ...", source)
-    images: list[Path] = []
-    for fmt in config.include_formats:
-        for p in source.glob(pattern):
-            if p.suffix.lower() == fmt:
-                images.append(p)
-                if len(images) % 500 == 0:
-                    logger.info("  ... %d images found so far", len(images))
-    images = list(dict.fromkeys(images))
-    logger.info("Found %d images", len(images))
-
-    if not images:
-        logger.info("No images found in %s", source)
-        logger.info("Run summary: total=0 moved=0 skipped=0 errors=0")
-        return
 
     logger.info("Loading YOLO model ...")
     model = YOLO()  # default model
     logger.info("Model ready")
 
-    total = len(images)
+    total = 0
     moved = 0
     skipped = 0
     errors = 0
     _lock = threading.Lock()
-
-    logger.info("Mode: GroupByTags | Source: %s | Images: %d", source, total)
-
-    # Chunked YOLO inference; fall back to one-by-one on batch failure (e.g. truncated file)
-    batch_size = config.batch_size
-    num_batches = (total + batch_size - 1) // batch_size
-    paired: list[tuple[Path, object]] = []
-    for batch_idx in range(num_batches):
-        start = batch_idx * batch_size
-        end = min(start + batch_size, total)
-        chunk = images[start:end]
-        logger.info(
-            "Processing batch %d/%d (images %d–%d of %d)",
-            batch_idx + 1, num_batches, start + 1, end, total,
-        )
-        try:
-            chunk_imgs = []
-            for img_path in chunk:
-                with _PILImage.open(img_path) as pil:
-                    pil = _resize_if_needed(pil, config.max_image_dimension)
-                    chunk_imgs.append(pil.copy())
-            chunk_results = model(chunk_imgs, conf=config.confidence_threshold, verbose=False)
-            paired.extend(zip(chunk, chunk_results))
-        except Exception:
-            for img in chunk:
-                try:
-                    try:
-                        with _PILImage.open(img) as pil:
-                            pil = _resize_if_needed(pil, config.max_image_dimension)
-                            model_input = [pil.copy()]
-                    except Exception:
-                        model_input = [img]
-                    res = model(model_input, conf=config.confidence_threshold, verbose=False)
-                    paired.append((img, res[0]))
-                except Exception as exc:
-                    logger.error("Skipping unreadable image %s: %s", img.name, exc)
-                    errors += 1
 
     def process(img: Path, result) -> None:
         nonlocal moved, skipped, errors
@@ -184,9 +150,9 @@ def run(config: Config) -> None:
                         config.unclassified.group_by_year,
                         config.unclassified.group_by_month,
                     )
-                    result = _transfer_with_policy(img, dest_dir, config.copy_instead_of_move, config.on_collision)
+                    transfer_result = _transfer_with_policy(img, dest_dir, config.copy_instead_of_move, config.on_collision)
                     with _lock:
-                        if result is None:
+                        if transfer_result is None:
                             skipped += 1
                         else:
                             moved += 1
@@ -197,9 +163,9 @@ def run(config: Config) -> None:
 
             dt = _get_image_date(img)
             dest_dir = _build_dest_dir(group.destination, dt, group.group_by_year, group.group_by_month)
-            result = _transfer_with_policy(img, dest_dir, config.copy_instead_of_move, config.on_collision)
+            transfer_result = _transfer_with_policy(img, dest_dir, config.copy_instead_of_move, config.on_collision)
             with _lock:
-                if result is None:
+                if transfer_result is None:
                     skipped += 1
                 else:
                     moved += 1
@@ -209,9 +175,39 @@ def run(config: Config) -> None:
                 errors += 1
 
     with ThreadPoolExecutor(max_workers=config.threads) as pool:
-        futures = [pool.submit(process, img, result) for img, result in paired]
-        for future in futures:
-            future.result()
+        for batch_idx, chunk in enumerate(_iter_batches(source, pattern, config.include_formats, config.batch_size)):
+            batch_start = total + 1
+            batch_end = total + len(chunk)
+            total += len(chunk)
+            logger.info(
+                "Processing batch %d (images %d–%d)",
+                batch_idx + 1, batch_start, batch_end,
+            )
+            try:
+                chunk_imgs = []
+                for img_path in chunk:
+                    with _PILImage.open(img_path) as pil:
+                        pil = _resize_if_needed(pil, config.max_image_dimension)
+                        chunk_imgs.append(pil.copy())
+                chunk_results = model(chunk_imgs, conf=config.confidence_threshold, verbose=False)
+                futures = [pool.submit(process, img, result) for img, result in zip(chunk, chunk_results)]
+            except Exception:
+                futures = []
+                for img in chunk:
+                    try:
+                        try:
+                            with _PILImage.open(img) as pil:
+                                pil = _resize_if_needed(pil, config.max_image_dimension)
+                                model_input = [pil.copy()]
+                        except Exception:
+                            model_input = [img]
+                        res = model(model_input, conf=config.confidence_threshold, verbose=False)
+                        futures.append(pool.submit(process, img, res[0]))
+                    except Exception as exc:
+                        logger.error("Skipping unreadable image %s: %s", img.name, exc)
+                        errors += 1
+            for future in futures:
+                future.result()
 
     logger.info(
         "Run summary: total=%d moved=%d skipped=%d errors=%d",
