@@ -110,3 +110,72 @@ def test_move_leaves_source_intact_when_src_delete_fails(tmp_path):
             transfer(src, dest_dir, copy=False)
 
     assert src.exists()
+
+
+# ── Thread-safe collision detection ──────────────────────────────────────────
+
+def test_concurrent_transfer_no_data_loss(tmp_path):
+    """Two threads transferring same-named files concurrently must not overwrite each other."""
+    import threading
+    from imagesorter.file_ops import transfer
+
+    src1 = make_file(tmp_path / "src1" / "photo.jpg", b"content-from-source-1")
+    src2 = make_file(tmp_path / "src2" / "photo.jpg", b"content-from-source-2")
+    dest_dir = tmp_path / "dest"
+
+    results = []
+    errors = []
+
+    def move(src):
+        try:
+            result = transfer(src, dest_dir, copy=False)
+            results.append(result)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=move, args=(src1,))
+    t2 = threading.Thread(target=move, args=(src2,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert not errors, f"Unexpected errors: {errors}"
+    # Both sources moved
+    assert not src1.exists(), "src1 should have been moved"
+    assert not src2.exists(), "src2 should have been moved"
+    # Total bytes in dest equals total bytes from both sources
+    total_source_bytes = len(b"content-from-source-1") + len(b"content-from-source-2")
+    dest_files = list(dest_dir.iterdir())
+    assert len(dest_files) == 2, f"Expected 2 files in dest, got {len(dest_files)}: {dest_files}"
+    total_dest_bytes = sum(f.read_bytes().__len__() for f in dest_files)
+    assert total_dest_bytes == total_source_bytes, "File content was overwritten"
+
+
+# ── Windows path length limit ────────────────────────────────────────────────
+
+def test_transfer_raises_oserror_when_path_exceeds_260_chars(tmp_path):
+    """transfer() must raise explicit OSError when resolved destination path exceeds 260 characters."""
+    from imagesorter.file_ops import transfer
+    src = make_file(tmp_path / "src" / "photo.jpg")
+    # Build a dest_dir whose resolved path + filename exceeds 260 chars
+    long_segment = "a" * 200
+    dest_dir = tmp_path / long_segment / long_segment
+    with pytest.raises(OSError) as exc_info:
+        transfer(src, dest_dir, copy=False)
+    assert str(dest_dir / src.name) in str(exc_info.value) or len(str(dest_dir / src.name)) > 260
+
+
+# ── Bounded loop in _collision_free_path() ────────────────────────────────────
+
+def test_collision_free_path_raises_after_max_iterations(tmp_path):
+    """_collision_free_path() must raise RuntimeError when all candidates exist."""
+    from unittest.mock import patch
+    from imagesorter.file_ops import _collision_free_path
+
+    dest = tmp_path / "photo.jpg"
+    dest.write_bytes(b"existing")
+
+    with patch("pathlib.Path.exists", return_value=True):
+        with pytest.raises(RuntimeError):
+            _collision_free_path(dest)
