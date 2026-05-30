@@ -217,6 +217,151 @@ def test_no_subfolder_for_solo_images(tmp_path):
     assert subdirs == []
 
 
+# ── Progress INFO logs during pairwise comparison for >500 images ─────────────
+
+def test_progress_logs_emitted_for_large_collections(tmp_path, caplog):
+    """When more than 500 images are compared, periodic INFO progress logs must be emitted."""
+    import logging
+    from imagesorter.similarity import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    # Create 502 image entries (real files not needed since we mock hashing)
+    n = 502
+    # We only need the paths to exist for the image list; use a minimal file
+    for i in range(n):
+        img_path = src / f"img_{i:04d}.jpg"
+        img_path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 10)  # minimal JPEG-like header
+
+    config = _make_config(tmp_path, threshold=0.99)  # high threshold → no matches
+
+    call_count = [0]
+
+    def counting_hash(path: Path):
+        call_count[0] += 1
+        return FakeHash(call_count[0])  # all different hashes → no pairs
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.similarity"):
+        with patch("imagesorter.similarity._hash_image", side_effect=counting_hash):
+            run(config)
+
+    # Only check for progress logs that mention "comparing" or "pairs" explicitly
+    # (not matching on path names which may accidentally contain keywords)
+    progress_msgs = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.INFO and r.name == "imagesorter.similarity" and (
+            r.funcName != "run" or (
+                "comparing" in r.getMessage().lower()
+                or r.getMessage().startswith("Comparing")
+            )
+        ) and "comparing" in r.getMessage().lower()
+    ]
+    assert progress_msgs, (
+        f"Expected at least one INFO progress log during pairwise comparison of {n} images, got none. "
+        f"All INFO logs: {[r.getMessage() for r in caplog.records if r.levelno == logging.INFO]}"
+    )
+
+
+# ── No groups found: actionable log message ───────────────────────────────────
+
+def test_no_similar_groups_found_emits_actionable_message(tmp_path, caplog):
+    """When no similar groups found, log must include actionable advice to lower threshold."""
+    import logging
+    from imagesorter.similarity import run
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+    make_jpeg(src / "b.jpg")
+
+    # Use threshold=0.99 so diverse images (big hash diff) won't match
+    config = _make_config(tmp_path, threshold=0.99)
+
+    # Assign very different hashes so no pairs match
+    def no_match_hash(path: Path):
+        return FakeHash(0 if path.name == "a.jpg" else 60)
+
+    with caplog.at_level(logging.INFO, logger="imagesorter.similarity"):
+        with patch("imagesorter.similarity._hash_image", side_effect=no_match_hash):
+            run(config)
+
+    all_msgs = [r.message for r in caplog.records]
+    assert any(
+        "threshold" in m.lower() or "lower" in m.lower() or "no group" in m.lower()
+        for m in all_msgs
+    ), f"Expected actionable message about threshold when no groups found, got: {all_msgs}"
+
+
+# ── similarity_threshold=0.0 raises ValueError or emits WARNING ───────────────
+
+def test_similarity_threshold_zero_emits_warning(tmp_path, caplog):
+    """similarity_threshold=0.0 must emit a WARNING before proceeding (every pair matches)."""
+    import logging
+    from imagesorter.similarity import run
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+    make_jpeg(src / "b.jpg")
+
+    config = _make_config(tmp_path, threshold=0.0)
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.similarity"):
+        with patch("imagesorter.similarity._hash_image", return_value=FakeHash(0)), \
+             patch("imagesorter.similarity._get_image_date", return_value=__import__("datetime").datetime(2020, 1, 1)):
+            run(config)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "threshold" in m.lower() or "0.0" in m or "every" in m.lower() or "meaningless" in m.lower()
+        for m in warning_msgs
+    ), f"Expected WARNING about threshold=0.0, got: {warning_msgs}"
+
+
+# ── Symlinks outside source skipped in similarity mode ───────────────────────
+
+def test_similarity_symlink_outside_source_not_included(tmp_path):
+    """A symlink inside source_folder pointing outside must be skipped (not included in image list)."""
+    from imagesorter.similarity import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # No real images in source — only a symlink pointing outside
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_img = make_jpeg(outside / "external.jpg")
+
+    symlink = src / "external.jpg"
+    try:
+        symlink.symlink_to(outside_img)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this system")
+
+    config = _make_config(tmp_path, threshold=0.96)
+
+    hash_calls: list[Path] = []
+
+    def tracking_hash(path: Path):
+        hash_calls.append(path)
+        return FakeHash(0)
+
+    with patch("imagesorter.similarity._hash_image", side_effect=tracking_hash):
+        run(config)
+
+    # The symlink inside source (pointing outside) must NOT be hashed
+    symlink_in_hash_calls = [p for p in hash_calls if p.is_symlink()]
+    outside_symlinks = []
+    for p in symlink_in_hash_calls:
+        try:
+            p.resolve().relative_to(src.resolve())
+        except ValueError:
+            outside_symlinks.append(p)
+
+    assert not outside_symlinks, (
+        f"Symlinks pointing outside source were hashed: {outside_symlinks}"
+    )
+
+
 # ── AC6: discovery INFO logged before any hash operation ─────────────────────
 
 def test_discovery_info_logged_before_hashing(tmp_path, caplog):
@@ -254,3 +399,63 @@ def test_discovery_info_logged_before_hashing(tmp_path, caplog):
     # record precedes any hashing.
     first_discovery_msg = discovery_records[0].message
     assert "Discovering" in first_discovery_msg or "Found" in first_discovery_msg
+
+
+# ── Pending: similarity._get_image_date emits WARNING on EXIF failure ─────────
+
+def test_similarity_get_image_date_warns_on_exif_failure(tmp_path, caplog):
+    """When PIL fails to parse EXIF for a file, similarity._get_image_date emits WARNING naming the file."""
+    import logging
+    from imagesorter.similarity import _get_image_date
+
+    img_path = make_jpeg(tmp_path / "broken_exif.jpg")
+
+    with caplog.at_level(logging.WARNING, logger="imagesorter.similarity"):
+        with patch("PIL.Image.open") as mock_open:
+            mock_img = MagicMock()
+            mock_img._getexif.side_effect = Exception("corrupt EXIF")
+            mock_open.return_value.__enter__ = MagicMock(return_value=mock_img)
+            mock_open.return_value.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_img
+            _get_image_date(img_path)
+
+    warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("broken_exif.jpg" in m for m in warning_msgs), (
+        f"Expected WARNING naming 'broken_exif.jpg' on EXIF failure, got: {warning_msgs}"
+    )
+
+
+# ── Pending: similarity._get_image_date uses st_mtime (not st_ctime) ──────────
+
+def test_similarity_get_image_date_uses_mtime_for_fallback(tmp_path):
+    """When EXIF is absent, _get_image_date falls back to st_mtime, not st_ctime."""
+    from imagesorter.similarity import _get_image_date
+    from datetime import datetime, timezone
+    import os
+
+    img_path = make_jpeg(tmp_path / "no_exif.jpg")
+
+    # Set a known mtime and a different ctime-equivalent via os.utime
+    known_mtime = 1_000_000.0  # some epoch timestamp
+    os.utime(img_path, (known_mtime, known_mtime))
+
+    # Mock stat to return distinguishable mtime vs ctime values
+    original_stat = img_path.stat()
+
+    class FakeStat:
+        st_mtime = known_mtime
+        st_ctime = known_mtime + 9999  # deliberately different
+
+    with patch("pathlib.Path.stat", return_value=FakeStat()):
+        # Also mock PIL to return no EXIF (so we hit the fallback)
+        with patch("PIL.Image.open") as mock_open:
+            mock_img = MagicMock()
+            mock_img._getexif.return_value = None
+            mock_open.return_value = mock_img
+            result = _get_image_date(img_path)
+
+    expected = datetime.fromtimestamp(known_mtime)
+    assert result == expected, (
+        f"Expected fallback to st_mtime ({expected}), got {result}. "
+        "similarity._get_image_date must use st_mtime, not st_ctime."
+    )

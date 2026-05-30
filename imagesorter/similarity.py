@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_image_date(path: Path) -> datetime:
-    """Return datetime from EXIF DateTimeOriginal, fall back to file creation time."""
+    """Return datetime from EXIF DateTimeOriginal, fall back to file mtime."""
     try:
         from PIL import Image
         from PIL.ExifTags import TAGS
@@ -22,9 +22,9 @@ def _get_image_date(path: Path) -> datetime:
             for tag_id, value in exif_data.items():
                 if TAGS.get(tag_id) == "DateTimeOriginal":
                     return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-    except Exception:
-        pass
-    return datetime.fromtimestamp(path.stat().st_ctime)
+    except Exception as exc:
+        logger.warning("EXIF read failed for %s, falling back to mtime: %s", path.name, exc)
+    return datetime.fromtimestamp(path.stat().st_mtime)
 
 
 def _hash_image(path: Path):
@@ -68,6 +68,12 @@ def run(config: Config) -> None:
     for fmt in config.include_formats:
         for p in source.glob(pattern):
             if p.suffix.lower() == fmt:
+                if p.is_symlink():
+                    try:
+                        p.resolve().relative_to(source.resolve())
+                    except ValueError:
+                        logger.warning("Skipping symlink %s: target is outside source_folder", p)
+                        continue
                 images.append(p)
                 if len(images) % 500 == 0:
                     logger.info("  ... %d images found so far", len(images))
@@ -78,6 +84,12 @@ def run(config: Config) -> None:
         logger.info("No images found in %s", source)
         logger.info("Run summary: total=0 moved=0 skipped=0 errors=0")
         return
+
+    if config.similarity_threshold == 0.0:
+        logger.warning(
+            "similarity_threshold is 0.0: every image pair will match, triggering O(n²) work "
+            "with no meaningful grouping result. Consider raising the threshold."
+        )
 
     total = len(images)
     moved = 0
@@ -102,7 +114,11 @@ def run(config: Config) -> None:
 
     # Find similar pairs
     pairs: list[tuple[int, int]] = []
+    _log_progress = n > 500
+    _progress_step = max(n // 10, 1)
     for i in range(n):
+        if _log_progress and i > 0 and i % _progress_step == 0:
+            logger.info("Comparing images: %d/%d (%.0f%%) ...", i, n, 100 * i / n)
         for j in range(i + 1, n):
             h1, h2 = hashes[i], hashes[j]
             max_bits = max(len(h1.hash) ** 2, 1)
@@ -112,7 +128,11 @@ def run(config: Config) -> None:
                 pairs.append((i, j))
 
     if not pairs:
-        logger.info("No similar image groups found.")
+        logger.info(
+            "No similar image groups found. "
+            "If you expected groups, try lowering the similarity_threshold (currently %.2f).",
+            threshold,
+        )
         logger.info(
             "Run summary: total=%d moved=%d skipped=%d errors=%d",
             total, moved, skipped, errors,
