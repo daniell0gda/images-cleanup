@@ -1028,8 +1028,8 @@ def test_system_exit_when_unclassified_dest_same_as_source_enabled(tmp_path):
         tag_groups=[],
         unclassified=Unclassified(
             enabled=True,
-            folder_name="others",
-            destination=str(src),  # same as source_folder
+            folder_name=src.name,       # folder_name = "src"
+            destination=str(src.parent),  # destination/folder_name = tmp_path/src == source
             group_by_year=False,
             group_by_month=False,
         ),
@@ -1261,3 +1261,84 @@ def test_duplicate_include_formats_processes_image_once(tmp_path, caplog):
     assert summary_msgs, "Expected a run summary log"
     summary = summary_msgs[-1]
     assert "total=1" in summary, f"Expected total=1 in summary (processed once), got: {summary}"
+
+
+# ── AC2: destination/folder_name != source → no startup SystemExit ────────────
+
+def test_unclassified_dest_with_subfolder_does_not_raise(tmp_path):
+    """destination=src and folder_name='others' → full path src/others != src → no startup error."""
+    from imagesorter.config import Config, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[],
+        unclassified=Unclassified(
+            enabled=True,
+            folder_name="others",
+            destination=str(src),  # destination == source, but folder_name adds a subdirectory
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = []
+
+    # Must NOT raise SystemExit at startup validation
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        try:
+            run(config)
+        except SystemExit as exc:
+            # Only fail if it's the startup validation error, not some later error
+            msg = str(exc)
+            if "unclassified.destination" in msg and "source_folder" in msg:
+                raise AssertionError(
+                    f"Unexpected startup validation SystemExit: {msg}"
+                ) from exc
+
+
+# ── AC3: destination/folder_name == source (empty folder_name) → SystemExit ──
+
+def test_unclassified_empty_folder_name_raises_system_exit(tmp_path):
+    """destination=src and folder_name='' → full path src == source → startup error."""
+    from imagesorter.config import Config, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[],
+        unclassified=Unclassified(
+            enabled=True,
+            folder_name="",  # empty → destination / "" resolves to destination itself
+            destination=str(src),
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    with pytest.raises(SystemExit):
+        run(config)

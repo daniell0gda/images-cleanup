@@ -112,10 +112,11 @@ def run(config: Config) -> None:
             )
 
     if config.unclassified.enabled:
-        uncl_dest = Path(config.unclassified.destination).resolve()
+        uncl_dest = (Path(config.unclassified.destination) / config.unclassified.folder_name).resolve()
         if uncl_dest == source:
+            full_path = Path(config.unclassified.destination) / config.unclassified.folder_name
             raise SystemExit(
-                f"Error: unclassified.destination '{config.unclassified.destination}' "
+                f"Error: unclassified.destination '{full_path}' "
                 f"resolves to the same path as source_folder '{config.source_folder}'"
             )
 
