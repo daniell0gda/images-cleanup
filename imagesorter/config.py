@@ -36,6 +36,7 @@ log_file: ./imagesorter.log  # Path to log file. null = console only
 
 batch_size: 16               # Number of images per YOLO inference batch
 confidence_threshold: 0.5    # Minimum YOLO detection confidence (0.0-1.0)
+max_image_dimension: 1920    # resize images to this max dimension before YOLO inference (0 = disabled)
 
 tag_groups:
   - name: Family             # Human-readable label (used in logs)
@@ -100,6 +101,7 @@ class Config:
     batch_size: int = 16
     confidence_threshold: float = 0.5
     on_collision: str = "rename"
+    max_image_dimension: int = 1920
 
 
 def _default_threads() -> int:
@@ -150,6 +152,10 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
     if on_collision not in {"rename", "skip"}:
         raise ValueError(f"on_collision must be 'rename' or 'skip', got {on_collision!r}")
 
+    max_image_dimension = int(raw.get("max_image_dimension", 1920))
+    if max_image_dimension < 0:
+        raise ValueError(f"max_image_dimension must be >= 0, got {max_image_dimension}")
+
     return Config(
         mode=raw.get("mode", "GroupByTags"),
         source_folder=raw.get("source_folder", "./photos"),
@@ -165,4 +171,5 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
         batch_size=batch_size,
         confidence_threshold=confidence_threshold,
         on_collision=on_collision,
+        max_image_dimension=max_image_dimension,
     )

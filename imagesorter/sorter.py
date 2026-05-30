@@ -7,12 +7,24 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from PIL import Image as _PILImage
 from ultralytics import YOLO
 
 from .config import Config, TagGroup
 from .file_ops import transfer
 
 logger = logging.getLogger(__name__)
+
+
+def _resize_if_needed(img: "_PILImage.Image", max_dim: int) -> "_PILImage.Image":
+    if max_dim <= 0:
+        return img
+    w, h = img.size
+    longest = max(w, h)
+    if longest <= max_dim:
+        return img
+    scale = max_dim / longest
+    return img.resize((int(w * scale), int(h * scale)), _PILImage.LANCZOS)
 
 
 def _transfer_with_policy(src: Path, dest_dir: Path, copy: bool, on_collision: str) -> Path | None:
@@ -132,12 +144,23 @@ def run(config: Config) -> None:
             batch_idx + 1, num_batches, start + 1, end, total,
         )
         try:
-            chunk_results = model(chunk, conf=config.confidence_threshold, verbose=False)
+            chunk_imgs = []
+            for img_path in chunk:
+                with _PILImage.open(img_path) as pil:
+                    pil = _resize_if_needed(pil, config.max_image_dimension)
+                    chunk_imgs.append(pil.copy())
+            chunk_results = model(chunk_imgs, conf=config.confidence_threshold, verbose=False)
             paired.extend(zip(chunk, chunk_results))
         except Exception:
             for img in chunk:
                 try:
-                    res = model([img], conf=config.confidence_threshold, verbose=False)
+                    try:
+                        with _PILImage.open(img) as pil:
+                            pil = _resize_if_needed(pil, config.max_image_dimension)
+                            model_input = [pil.copy()]
+                    except Exception:
+                        model_input = [img]
+                    res = model(model_input, conf=config.confidence_threshold, verbose=False)
                     paired.append((img, res[0]))
                 except Exception as exc:
                     logger.error("Skipping unreadable image %s: %s", img.name, exc)

@@ -1224,3 +1224,75 @@ def test_discovery_info_logged_before_processing_batch(tmp_path, caplog):
         "Expected at least one INFO record mentioning discovery or model loading "
         "before the first 'Processing batch' record"
     )
+
+
+# ── E1-AC1: _resize_if_needed unit tests ─────────────────────────────────────
+
+def test_resize_wide_image_longest_side_becomes_max_dim():
+    """Wide image (3000×2000) with max_dim=1920 → longest side becomes 1920."""
+    from imagesorter.sorter import _resize_if_needed
+    img = Image.new("RGB", (3000, 2000))
+    result = _resize_if_needed(img, 1920)
+    w, h = result.size
+    assert w == 1920
+    assert h == int(2000 * 1920 / 3000)
+
+
+def test_resize_small_image_returned_unchanged():
+    """Small image (100×80) with max_dim=1920 → returned unchanged."""
+    from imagesorter.sorter import _resize_if_needed
+    img = Image.new("RGB", (100, 80))
+    result = _resize_if_needed(img, 1920)
+    assert result.size == (100, 80)
+
+
+def test_resize_tall_portrait_longest_side_becomes_max_dim():
+    """Tall portrait (2000×3000) with max_dim=1920 → height becomes 1920, width scaled."""
+    from imagesorter.sorter import _resize_if_needed
+    img = Image.new("RGB", (2000, 3000))
+    result = _resize_if_needed(img, 1920)
+    w, h = result.size
+    assert h == 1920
+    assert w == int(2000 * 1920 / 3000)
+
+
+def test_resize_zero_max_dim_returns_image_unchanged():
+    """max_dim=0 (disabled) must return the image without raising."""
+    from imagesorter.sorter import _resize_if_needed
+    img = Image.new("RGB", (3000, 2000))
+    result = _resize_if_needed(img, 0)
+    assert result.size == (3000, 2000)
+
+
+# ── E1-AC3: config.load() validates max_image_dimension ──────────────────────
+
+def test_config_load_raises_for_negative_max_image_dimension(tmp_path):
+    """config.load() raises ValueError for negative max_image_dimension."""
+    import yaml
+    from imagesorter import config as cfg
+
+    conf_path = tmp_path / "config.yaml"
+    conf_path.write_text(yaml.dump({
+        "mode": "GroupByTags",
+        "source_folder": "./photos",
+        "max_image_dimension": -1,
+    }))
+
+    with pytest.raises(ValueError, match="max_image_dimension"):
+        cfg.load(str(conf_path))
+
+
+def test_config_load_accepts_zero_max_image_dimension(tmp_path):
+    """config.load() accepts max_image_dimension=0 (disabled) without error."""
+    import yaml
+    from imagesorter import config as cfg
+
+    conf_path = tmp_path / "config.yaml"
+    conf_path.write_text(yaml.dump({
+        "mode": "GroupByTags",
+        "source_folder": "./photos",
+        "max_image_dimension": 0,
+    }))
+
+    loaded = cfg.load(str(conf_path))
+    assert loaded.max_image_dimension == 0
