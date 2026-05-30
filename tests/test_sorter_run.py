@@ -1,4 +1,4 @@
-"""Tests for GroupByTags sorter."""
+"""Integration tests for sorter.run()."""
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -316,22 +316,6 @@ def test_exif_date_used_when_present(tmp_path):
         sorter.run(config)
 
     assert (dest / "2020" / "03" / "photo.jpg").exists()
-
-
-def test_mtime_fallback_when_no_exif(tmp_path):
-    """_get_image_date should return mtime when EXIF is absent."""
-    from imagesorter.sorter import _get_image_date
-    from datetime import datetime
-    import os
-
-    img_path = make_jpeg(tmp_path / "photo.jpg")
-    # Set a known mtime
-    known_ts = datetime(2019, 6, 1, 0, 0, 0).timestamp()
-    os.utime(str(img_path), (known_ts, known_ts))
-
-    dt = _get_image_date(img_path)
-    assert dt.year == 2019
-    assert dt.month == 6
 
 
 # ── Criterion 9: unclassified images ──────────────────────────────────────────
@@ -738,7 +722,7 @@ def test_copy_instead_of_move_keeps_source_files(tmp_path):
 # ── Criterion: YOLO batch call (model called once per run()) ─────────────────
 
 def test_yolo_called_once_with_full_list(tmp_path):
-    """YOLO model must be called exactly once with a list of all images."""
+    """YOLO model must be called exactly once with a list of all images (default batch_size=16, 5 images)."""
     from imagesorter.config import TagGroup
     from imagesorter.sorter import run
 
@@ -770,44 +754,6 @@ def test_yolo_called_once_with_full_list(tmp_path):
     batch_arg = call_args[0][0]
     assert isinstance(batch_arg, list), f"Expected list argument, got {type(batch_arg)}"
     assert len(batch_arg) == 5, f"Expected 5 images in batch, got {len(batch_arg)}"
-
-
-# ── Criterion 10: source == destination error ──────────────────────────────────
-
-def test_error_when_destination_same_as_source(tmp_path):
-    from imagesorter.config import TagGroup
-    from imagesorter.sorter import run
-
-    src = tmp_path / "src"
-    src.mkdir()
-    make_jpeg(src / "photo.jpg")
-
-    tag_groups = [
-        TagGroup(name="All", tags=["person"], destination=str(src),
-                 group_by_year=False, group_by_month=False),
-    ]
-    config = _make_config(tmp_path, tag_groups)
-    config = config.__class__(
-        mode=config.mode,
-        source_folder=str(src),
-        recursive=config.recursive,
-        copy_instead_of_move=config.copy_instead_of_move,
-        include_formats=config.include_formats,
-        threads=config.threads,
-        log_level=config.log_level,
-        log_file=config.log_file,
-        tag_groups=tag_groups,
-        unclassified=config.unclassified,
-        similarity_threshold=config.similarity_threshold,
-    )
-
-    mock_model = MagicMock()
-    mock_model.names = COCO_NAMES
-    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
-
-    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
-        with pytest.raises(SystemExit):
-            run(config)
 
 
 # ── Criterion: chunked YOLO calls with batch_size ─────────────────────────────
@@ -911,7 +857,7 @@ def test_conf_kwarg_forwarded_to_yolo(tmp_path):
 # ── Criterion: INFO log per batch ─────────────────────────────────────────────
 
 def test_info_log_emitted_per_batch(tmp_path, caplog):
-    """INFO log 'Processing batch N/M (images S–E of T)' emitted per batch."""
+    """INFO log 'Processing batch N (images A–B)' emitted per batch."""
     import logging
     from imagesorter.config import Config, TagGroup, Unclassified
     from imagesorter.sorter import run
@@ -955,11 +901,10 @@ def test_info_log_emitted_per_batch(tmp_path, caplog):
 
     batch_logs = [r.message for r in caplog.records if "Processing batch" in r.message]
     assert len(batch_logs) == 3, f"Expected 3 batch log lines, got {len(batch_logs)}: {batch_logs}"
-    # Check the pattern: "Processing batch N/M (images S–E of T)"
-    assert "Processing batch 1/3 (images 1" in batch_logs[0]
-    assert "of 5)" in batch_logs[0]
-    assert "Processing batch 2/3" in batch_logs[1]
-    assert "Processing batch 3/3" in batch_logs[2]
+    # Check the new streaming format: "Processing batch N (images A–B)"
+    assert "Processing batch 1 (images 1" in batch_logs[0]
+    assert "Processing batch 2 " in batch_logs[1]
+    assert "Processing batch 3 " in batch_logs[2]
 
 
 # ── Criterion: result.boxes is None → zero detections, no error ──────────────
@@ -1021,6 +966,44 @@ def test_debug_log_with_detections(tmp_path, caplog):
     assert "photo.jpg" in log
     assert "person" in log
     assert "dog" in log
+
+
+# ── Criterion 10: source == destination error ──────────────────────────────────
+
+def test_error_when_destination_same_as_source(tmp_path):
+    from imagesorter.config import TagGroup
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    make_jpeg(src / "photo.jpg")
+
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(src),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = _make_config(tmp_path, tag_groups)
+    config = config.__class__(
+        mode=config.mode,
+        source_folder=str(src),
+        recursive=config.recursive,
+        copy_instead_of_move=config.copy_instead_of_move,
+        include_formats=config.include_formats,
+        threads=config.threads,
+        log_level=config.log_level,
+        log_file=config.log_file,
+        tag_groups=tag_groups,
+        unclassified=config.unclassified,
+        similarity_threshold=config.similarity_threshold,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        with pytest.raises(SystemExit):
+            run(config)
 
 
 # ── AC4: SystemExit when unclassified.destination == source_folder and enabled=True ─
@@ -1226,73 +1209,55 @@ def test_discovery_info_logged_before_processing_batch(tmp_path, caplog):
     )
 
 
-# ── E1-AC1: _resize_if_needed unit tests ─────────────────────────────────────
+# ── AC8: duplicate include_formats entry → image processed exactly once ───────
 
-def test_resize_wide_image_longest_side_becomes_max_dim():
-    """Wide image (3000×2000) with max_dim=1920 → longest side becomes 1920."""
-    from imagesorter.sorter import _resize_if_needed
-    img = Image.new("RGB", (3000, 2000))
-    result = _resize_if_needed(img, 1920)
-    w, h = result.size
-    assert w == 1920
-    assert h == int(2000 * 1920 / 3000)
+def test_duplicate_include_formats_processes_image_once(tmp_path, caplog):
+    """include_formats=['.jpg', '.jpg'] must not cause the same image to be processed twice."""
+    import logging
+    from imagesorter.config import Config, TagGroup, Unclassified
+    from imagesorter.sorter import run
 
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+    dest = tmp_path / "out"
 
-def test_resize_small_image_returned_unchanged():
-    """Small image (100×80) with max_dim=1920 → returned unchanged."""
-    from imagesorter.sorter import _resize_if_needed
-    img = Image.new("RGB", (100, 80))
-    result = _resize_if_needed(img, 1920)
-    assert result.size == (100, 80)
+    tag_groups = [
+        TagGroup(name="All", tags=["person"], destination=str(dest),
+                 group_by_year=False, group_by_month=False),
+    ]
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg", ".jpg"],  # duplicate entry
+        threads=1,
+        log_level="INFO",
+        log_file=None,
+        tag_groups=tag_groups,
+        unclassified=Unclassified(
+            enabled=False, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
 
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result(["person"], COCO_NAMES)]
 
-def test_resize_tall_portrait_longest_side_becomes_max_dim():
-    """Tall portrait (2000×3000) with max_dim=1920 → height becomes 1920, width scaled."""
-    from imagesorter.sorter import _resize_if_needed
-    img = Image.new("RGB", (2000, 3000))
-    result = _resize_if_needed(img, 1920)
-    w, h = result.size
-    assert h == 1920
-    assert w == int(2000 * 1920 / 3000)
+    with caplog.at_level(logging.INFO, logger="imagesorter.sorter"):
+        with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+            run(config)
 
+    # Image must be moved exactly once — it should exist at dest and not at source
+    assert (dest / "photo.jpg").exists(), "Image should have been moved to destination"
+    assert not img.exists(), "Source image should no longer exist (moved, not duplicated)"
 
-def test_resize_zero_max_dim_returns_image_unchanged():
-    """max_dim=0 (disabled) must return the image without raising."""
-    from imagesorter.sorter import _resize_if_needed
-    img = Image.new("RGB", (3000, 2000))
-    result = _resize_if_needed(img, 0)
-    assert result.size == (3000, 2000)
-
-
-# ── E1-AC3: config.load() validates max_image_dimension ──────────────────────
-
-def test_config_load_raises_for_negative_max_image_dimension(tmp_path):
-    """config.load() raises ValueError for negative max_image_dimension."""
-    import yaml
-    from imagesorter import config as cfg
-
-    conf_path = tmp_path / "config.yaml"
-    conf_path.write_text(yaml.dump({
-        "mode": "GroupByTags",
-        "source_folder": "./photos",
-        "max_image_dimension": -1,
-    }))
-
-    with pytest.raises(ValueError, match="max_image_dimension"):
-        cfg.load(str(conf_path))
-
-
-def test_config_load_accepts_zero_max_image_dimension(tmp_path):
-    """config.load() accepts max_image_dimension=0 (disabled) without error."""
-    import yaml
-    from imagesorter import config as cfg
-
-    conf_path = tmp_path / "config.yaml"
-    conf_path.write_text(yaml.dump({
-        "mode": "GroupByTags",
-        "source_folder": "./photos",
-        "max_image_dimension": 0,
-    }))
-
-    loaded = cfg.load(str(conf_path))
-    assert loaded.max_image_dimension == 0
+    # Summary must show total=1 (processed once, not twice)
+    summary_msgs = [r.message for r in caplog.records if "Run summary" in r.message]
+    assert summary_msgs, "Expected a run summary log"
+    summary = summary_msgs[-1]
+    assert "total=1" in summary, f"Expected total=1 in summary (processed once), got: {summary}"
