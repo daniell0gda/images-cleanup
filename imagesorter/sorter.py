@@ -80,25 +80,6 @@ def _select_group(detected_labels: set[str], tag_groups: list[TagGroup]) -> TagG
     return matches[0][2]
 
 
-def _iter_batches(source: Path, pattern: str, include_formats: list[str], batch_size: int):
-    """Yield lists of Path objects in batch_size chunks, deduplicating via seen set."""
-    seen: set[Path] = set()
-    formats = set(include_formats)
-    batch: list[Path] = []
-    for p in source.glob(pattern):
-        if p.suffix.lower() not in formats:
-            continue
-        if p in seen:
-            continue
-        seen.add(p)
-        batch.append(p)
-        if len(batch) == batch_size:
-            yield batch
-            batch = []
-    if batch:
-        yield batch
-
-
 def run(config: Config) -> None:
     """Run GroupByTags mode."""
     source = Path(config.source_folder).resolve()
@@ -122,11 +103,24 @@ def run(config: Config) -> None:
 
     pattern = "**/*" if config.recursive else "*"
     logger.info("Discovering images in %s ...", source)
+    images: list[Path] = []
+    seen: set[Path] = set()
+    formats = set(config.include_formats)
+    for p in source.glob(pattern):
+        if p.suffix.lower() not in formats or p in seen:
+            continue
+        seen.add(p)
+        images.append(p)
+        if len(images) % 500 == 0:
+            logger.info("  ... %d images found so far", len(images))
+    logger.info("Found %d images", len(images))
 
     logger.info("Loading YOLO model ...")
     model = YOLO()  # default model
     logger.info("Model ready")
 
+    batch_size = config.batch_size
+    num_batches = max(1, (len(images) + batch_size - 1) // batch_size) if images else 0
     total = 0
     moved = 0
     skipped = 0
@@ -176,7 +170,10 @@ def run(config: Config) -> None:
                 errors += 1
 
     with ThreadPoolExecutor(max_workers=config.threads) as pool:
-        for batch_idx, chunk in enumerate(_iter_batches(source, pattern, config.include_formats, config.batch_size)):
+        for batch_idx in range(num_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, len(images))
+            chunk = images[start:end]
             batch_start = total + 1
             batch_end = total + len(chunk)
             total += len(chunk)

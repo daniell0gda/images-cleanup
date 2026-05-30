@@ -1310,6 +1310,50 @@ def test_unclassified_dest_with_subfolder_does_not_raise(tmp_path):
                 ) from exc
 
 
+# ── AC3 (rescan fix): unclassified dest inside source is not re-processed ─────
+
+def test_unclassified_inside_source_not_reprocessed(tmp_path):
+    """With recursive=True and unclassified dest inside source, image is processed exactly once."""
+    from imagesorter.config import Config, Unclassified
+    from imagesorter.sorter import run
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = make_jpeg(src / "photo.jpg")
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=True,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[],
+        unclassified=Unclassified(
+            enabled=True,
+            folder_name="others",
+            destination=str(src),  # destination == source; full path = source/others
+            group_by_year=False,
+            group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+    mock_model = MagicMock()
+    mock_model.names = COCO_NAMES
+    mock_model.return_value = [_make_yolo_result([], COCO_NAMES)]
+
+    with patch("imagesorter.sorter.YOLO", return_value=mock_model):
+        run(config)
+
+    assert (src / "others" / "photo.jpg").exists(), "Image should be in source/others/"
+    assert not (src / "photo.jpg").exists(), "Original image should be moved, not copied"
+    assert not (src / "others" / "photo_1.jpg").exists(), "Image must not be re-processed"
+    assert not (src / "others" / "photo_2.jpg").exists(), "Image must not be re-processed multiple times"
+
+
 # ── AC3: destination/folder_name == source (empty folder_name) → SystemExit ──
 
 def test_unclassified_empty_folder_name_raises_system_exit(tmp_path):
