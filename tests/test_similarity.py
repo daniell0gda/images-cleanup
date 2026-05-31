@@ -427,6 +427,39 @@ def test_similarity_get_image_date_warns_on_exif_failure(tmp_path, caplog):
 
 # ── Pending: similarity._get_image_date uses st_mtime (not st_ctime) ──────────
 
+def test_web_ui_false_moves_files_normally(tmp_path):
+    """When config.web_ui is False, similarity.run() must behave like the pre-feature implementation."""
+    from imagesorter.similarity import run
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+    make_jpeg(src / "b.jpg")
+
+    config = _make_config(tmp_path, threshold=0.96)
+    assert config.web_ui is False
+
+    same_hash = FakeHash(0)
+    from datetime import datetime
+
+    def fake_date(path: Path) -> datetime:
+        if path.name == "a.jpg":
+            return datetime(2020, 1, 1)
+        return datetime(2021, 1, 1)
+
+    with patch("imagesorter.similarity._hash_image", return_value=same_hash), \
+         patch("imagesorter.similarity._get_image_date", side_effect=fake_date):
+        run(config)
+
+    # Files should be moved into a subfolder (normal SimilaritySearch behavior)
+    subfolder = src / "a"
+    assert subfolder.is_dir()
+    assert (subfolder / "a.jpg").exists()
+    assert (subfolder / "b.jpg").exists()
+    # Originals must NOT remain (move, not copy)
+    assert not (src / "a.jpg").exists()
+    assert not (src / "b.jpg").exists()
+
+
 def test_similarity_get_image_date_uses_mtime_for_fallback(tmp_path):
     """When EXIF is absent, _get_image_date falls back to st_mtime, not st_ctime."""
     from imagesorter.similarity import _get_image_date

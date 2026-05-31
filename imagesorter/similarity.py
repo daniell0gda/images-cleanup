@@ -33,6 +33,31 @@ def _hash_image(path: Path):
     return imagehash.phash(Image.open(path))
 
 
+def _discover_images(config: Config) -> list[Path]:
+    """Return image paths in `config.source_folder` matching `include_formats`.
+
+    Filters out symlinks that resolve outside `source_folder` and deduplicates
+    the result. Shared by `similarity.run()` and `web.scan_images()`.
+    """
+    source = Path(config.source_folder).resolve()
+    pattern = "**/*" if config.recursive else "*"
+    images: list[Path] = []
+    for fmt in config.include_formats:
+        for p in source.glob(pattern):
+            if p.suffix.lower() != fmt:
+                continue
+            if p.is_symlink():
+                try:
+                    p.resolve().relative_to(source)
+                except ValueError:
+                    logger.warning(
+                        "Skipping symlink %s: target is outside source_folder", p
+                    )
+                    continue
+            images.append(p)
+    return list(dict.fromkeys(images))
+
+
 def _transitive_groups(pairs: list[tuple[int, int]]) -> list[list[int]]:
     """Union-Find transitive grouping."""
     parent: dict[int, int] = {}
@@ -60,24 +85,15 @@ def _transitive_groups(pairs: list[tuple[int, int]]) -> list[list[int]]:
 
 
 def run(config: Config) -> None:
+    if config.web_ui:
+        from .web import serve
+        serve(config)
+        return
+
     source = Path(config.source_folder).resolve()
 
-    pattern = "**/*" if config.recursive else "*"
     logger.info("Discovering images in %s ...", source)
-    images: list[Path] = []
-    for fmt in config.include_formats:
-        for p in source.glob(pattern):
-            if p.suffix.lower() == fmt:
-                if p.is_symlink():
-                    try:
-                        p.resolve().relative_to(source.resolve())
-                    except ValueError:
-                        logger.warning("Skipping symlink %s: target is outside source_folder", p)
-                        continue
-                images.append(p)
-                if len(images) % 500 == 0:
-                    logger.info("  ... %d images found so far", len(images))
-    images = list(dict.fromkeys(images))
+    images = _discover_images(config)
     logger.info("Found %d images", len(images))
 
     if not images:
