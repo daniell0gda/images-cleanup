@@ -103,6 +103,8 @@ unclassified:
 # ── SimilaritySearch mode ──────────────────────────────────────────────────────
 
 similarity_threshold: 0.96   # 0.0–1.0. Images at or above this similarity are grouped
+similarity_time_window_minutes: 5   # Only compare images whose timestamps are within this many minutes
+web_ui: false                # If true, run the interactive web UI instead of moving files
 ```
 
 ### `on_collision` Policy
@@ -188,6 +190,38 @@ Images with no similar counterparts above the threshold are **left in place**. N
 Controlled by the `on_collision` config key:
 - `rename` — the incoming file is renamed with an incrementing numeric suffix: `image.jpg` → `image_1.jpg` → `image_2.jpg`. The collision is logged as a WARNING.
 - `skip` — the source file is left untouched and the transfer is skipped. The collision is logged as a WARNING.
+
+### Time-Window Pre-Filter
+
+Before any pHash comparison, images are paired only when their timestamps differ by no more than `similarity_time_window_minutes` (default `5`). Timestamps are sourced from EXIF `DateTimeOriginal`, falling back to file `mtime`. Images outside that window are never compared and never produce a pair regardless of visual similarity. Setting a larger window broadens comparisons at the cost of more pairwise work.
+
+### Web UI Mode
+
+Set `web_ui: true` in the config (and `mode: SimilaritySearch`) to launch an interactive web interface instead of moving files. Behavior:
+
+- The CLI starts a FastAPI server bound to `127.0.0.1`, default port `8080`. If the port is taken, the next free port is used and the chosen port is logged at INFO.
+- The server requires a pre-built frontend at `frontend/dist/`. If that directory does not exist the process exits non-zero with a message instructing the user to build the frontend (`cd frontend && npm install && npm run build`).
+- Scanning begins automatically in a background thread the moment the server starts; the user's default browser is opened to the server URL.
+- The frontend is a React + TypeScript SPA scaffolded with Vite, using Mantine as the UI component library.
+- Each discovered similarity group is rendered as one row of ~100 px thumbnails. Clicking any thumbnail opens a Mantine modal with all images in that group at a larger size. Checkboxes on thumbnails (both in the grid and in the modal) share a single selection state.
+- A "Delete X selected" button shows the current count and requires confirmation before sending the request. Confirmed deletions go through the API and use `send2trash` so files are moved to the system recycle bin and never permanently deleted by the tool.
+
+### SSE Streaming Contract
+
+Endpoint: `GET /api/stream` — `text/event-stream`.
+
+- One event named `group` is emitted per discovered similarity group as soon as the pair is found.
+- The event payload is JSON: `{"id": <int>, "paths": [<absolute-path>, ...]}`.
+- A group's `id` is stable for the lifetime of the scan; subsequent events for the same group carry the same `id` and an expanded `paths` list (transitive grouping grows monotonically — previously emitted groups are never retracted).
+- When the scan finishes a single `complete` event is emitted and the stream closes.
+
+### HTTP API
+
+| Method | Path | Behavior |
+|---|---|---|
+| GET | `/api/images/{encoded_path}` | Serves the image file at `encoded_path`. Returns HTTP 403 if the resolved path is outside `source_folder`. |
+| DELETE | `/api/images` | Body: JSON list of file paths. If any path resolves outside `source_folder` returns HTTP 403 before touching any file. Otherwise calls `send2trash.send2trash()` on each path. Response body: `{"trashed": [...], "failed": [{"path": ..., "error": ...}]}`. |
+| GET | `/api/stream` | Server-Sent Events stream described above. |
 
 ---
 
