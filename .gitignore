@@ -23,6 +23,11 @@ htmlcov/
 .idea/
 *.swp
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
 # User config
 config.yaml
 quick-start.md
