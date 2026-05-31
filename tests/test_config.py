@@ -370,3 +370,93 @@ def test_template_unclassified_enabled_is_true():
     assert parsed["unclassified"]["enabled"] is True, (
         f"Expected TEMPLATE unclassified.enabled=True, got {parsed['unclassified']['enabled']}"
     )
+
+
+# ── web_ui and similarity_time_window_minutes config keys ─────────────────────
+
+def test_load_web_ui_default_is_false(tmp_path):
+    """When web_ui is absent from config, Config.web_ui defaults to False."""
+    from imagesorter.config import load
+    config_data = {
+        "mode": "SimilaritySearch",
+        "source_folder": str(tmp_path),
+        "threads": 1,
+        "tag_groups": [],
+        "unclassified": {"enabled": False, "folder_name": "others",
+                         "destination": str(tmp_path)},
+    }
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(yaml.dump(config_data))
+    config = load(str(cfg_file))
+    assert config.web_ui is False
+
+
+def test_load_web_ui_true(tmp_path):
+    """When web_ui: true is set, Config.web_ui is True."""
+    from imagesorter.config import load
+    config_data = {
+        "mode": "SimilaritySearch",
+        "source_folder": str(tmp_path),
+        "threads": 1,
+        "web_ui": True,
+        "tag_groups": [],
+        "unclassified": {"enabled": False, "folder_name": "others",
+                         "destination": str(tmp_path)},
+    }
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(yaml.dump(config_data))
+    config = load(str(cfg_file))
+    assert config.web_ui is True
+
+
+def test_load_similarity_time_window_default_is_5(tmp_path):
+    """When similarity_time_window_minutes is absent, default is 5."""
+    from imagesorter.config import load
+    config_data = {
+        "mode": "SimilaritySearch",
+        "source_folder": str(tmp_path),
+        "threads": 1,
+        "tag_groups": [],
+        "unclassified": {"enabled": False, "folder_name": "others",
+                         "destination": str(tmp_path)},
+    }
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(yaml.dump(config_data))
+    config = load(str(cfg_file))
+    assert config.similarity_time_window_minutes == 5
+
+
+def test_load_similarity_time_window_custom(tmp_path):
+    """similarity_time_window_minutes is read from yaml."""
+    from imagesorter.config import load
+    config_data = {
+        "mode": "SimilaritySearch",
+        "source_folder": str(tmp_path),
+        "threads": 1,
+        "similarity_time_window_minutes": 10,
+        "tag_groups": [],
+        "unclassified": {"enabled": False, "folder_name": "others",
+                         "destination": str(tmp_path)},
+    }
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(yaml.dump(config_data))
+    config = load(str(cfg_file))
+    assert config.similarity_time_window_minutes == 10
+
+
+def test_load_raises_for_similarity_time_window_negative(tmp_path):
+    """Negative similarity_time_window_minutes must raise ValueError at load time."""
+    from imagesorter.config import load
+    config_data = {
+        "mode": "SimilaritySearch",
+        "source_folder": str(tmp_path),
+        "threads": 1,
+        "similarity_time_window_minutes": -1,
+        "tag_groups": [],
+        "unclassified": {"enabled": False, "folder_name": "others",
+                         "destination": str(tmp_path)},
+    }
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(yaml.dump(config_data))
+    with pytest.raises(ValueError, match="similarity_time_window_minutes"):
+        load(str(cfg_file))

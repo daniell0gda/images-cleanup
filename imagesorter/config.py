@@ -102,6 +102,8 @@ class Config:
     confidence_threshold: float = 0.5
     on_collision: str = "rename"
     max_image_dimension: int = 1920
+    web_ui: bool = False
+    similarity_time_window_minutes: int = 5
 
 
 def _default_threads() -> int:
@@ -156,6 +158,12 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
     if max_image_dimension < 0:
         raise ValueError(f"max_image_dimension must be >= 0, got {max_image_dimension}")
 
+    similarity_time_window_minutes = int(raw.get("similarity_time_window_minutes", 5))
+    if similarity_time_window_minutes < 0:
+        raise ValueError(
+            f"similarity_time_window_minutes must be >= 0, got {similarity_time_window_minutes}"
+        )
+
     return Config(
         mode=raw.get("mode", "GroupByTags"),
         source_folder=raw.get("source_folder", "./photos"),
@@ -172,4 +180,6 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
         confidence_threshold=confidence_threshold,
         on_collision=on_collision,
         max_image_dimension=max_image_dimension,
+        web_ui=bool(raw.get("web_ui", False)),
+        similarity_time_window_minutes=similarity_time_window_minutes,
     )
