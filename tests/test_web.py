@@ -5,6 +5,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from PIL import Image
+from imagesorter import scanner
 
 
 def _make_config(tmp_path, *, web_ui=True, threshold=0.96, time_window=5):
@@ -119,7 +120,7 @@ def test_serve_logs_bound_port(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
 
     # Avoid the scan thread doing real work
-    monkeypatch.setattr(web, "scan_images", lambda cfg, state: None)
+    monkeypatch.setattr(web, "run_scan_safely", lambda cfg, state: None)
 
     with caplog.at_level(logging.INFO, logger="imagesorter.web"):
         web.serve(config)
@@ -153,7 +154,7 @@ def test_serve_starts_scan_thread_and_opens_browser(tmp_path, monkeypatch):
 
     scan_called = []
     monkeypatch.setattr(
-        web, "scan_images",
+        web, "run_scan_safely",
         lambda cfg, state: scan_called.append(cfg),
     )
 
@@ -180,7 +181,7 @@ def test_scan_emits_group_event_per_pair(tmp_path, monkeypatch):
 
     config = _make_config(tmp_path, web_ui=True, threshold=0.9)
 
-    state = web.ScanState()
+    state = scanner.ScanState()
     # Provide an event loop so emit_group can schedule queue puts.
     loop = asyncio.new_event_loop()
     state.loop = loop
@@ -188,15 +189,15 @@ def test_scan_emits_group_event_per_pair(tmp_path, monkeypatch):
 
     same_hash = FakeHash(0)
     from datetime import datetime
-    monkeypatch.setattr(web, "_hash_image", lambda p: same_hash)
-    monkeypatch.setattr(web, "_get_image_date", lambda p: datetime(2020, 1, 1))
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: same_hash)
+    monkeypatch.setattr(scanner, "_get_image_date", lambda p: datetime(2020, 1, 1))
 
     # Run scan on the loop's thread by scheduling it
     import threading
     done = threading.Event()
 
     def run_scan():
-        web.scan_images(config, state)
+        scanner.scan_images(config, state)
         done.set()
 
     threading.Thread(target=run_scan, daemon=True).start()
@@ -240,20 +241,20 @@ def test_scan_skips_pairs_outside_time_window(tmp_path, monkeypatch):
 
     config = _make_config(tmp_path, web_ui=True, threshold=0.9, time_window=5)
 
-    state = web.ScanState()
+    state = scanner.ScanState()
     loop = asyncio.new_event_loop()
     state.loop = loop
 
-    monkeypatch.setattr(web, "_hash_image", lambda p: FakeHash(0))  # identical
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: FakeHash(0))  # identical
 
     def fake_date(path):
         if path.name == "early.jpg":
             return datetime(2020, 1, 1, 12, 0, 0)
         return datetime(2020, 1, 1, 12, 30, 0)  # 30 minutes later — outside 5-min window
 
-    monkeypatch.setattr(web, "_get_image_date", fake_date)
+    monkeypatch.setattr(scanner, "_get_image_date", fake_date)
 
-    web.scan_images(config, state)
+    scanner.scan_images(config, state)
     loop.close()
 
     # No group should have formed
@@ -274,7 +275,7 @@ def test_get_image_serves_file_within_source(tmp_path):
     img = make_jpeg(src / "a.jpg")
 
     config = _make_config(tmp_path, web_ui=True)
-    state = web.ScanState()
+    state = scanner.ScanState()
     app = web.create_app(config, state)
 
     client = TestClient(app)
@@ -335,7 +336,7 @@ def test_get_image_returns_403_outside_source(tmp_path):
     outside_img = make_jpeg(outside / "x.jpg")
 
     config = _make_config(tmp_path, web_ui=True)
-    state = web.ScanState()
+    state = scanner.ScanState()
     app = web.create_app(config, state)
 
     client = TestClient(app)
@@ -356,7 +357,7 @@ def test_delete_images_calls_send2trash_and_returns_result(tmp_path, monkeypatch
     img_b = make_jpeg(src / "b.jpg")
 
     config = _make_config(tmp_path, web_ui=True)
-    state = web.ScanState()
+    state = scanner.ScanState()
     app = web.create_app(config, state)
 
     trashed_paths = []
@@ -394,7 +395,7 @@ def test_delete_images_returns_403_when_any_path_outside(tmp_path, monkeypatch):
     outside_img = make_jpeg(outside / "x.jpg")
 
     config = _make_config(tmp_path, web_ui=True)
-    state = web.ScanState()
+    state = scanner.ScanState()
     app = web.create_app(config, state)
 
     trashed = []
@@ -423,20 +424,20 @@ def test_scan_pairs_inside_time_window(tmp_path, monkeypatch):
 
     config = _make_config(tmp_path, web_ui=True, threshold=0.9, time_window=5)
 
-    state = web.ScanState()
+    state = scanner.ScanState()
     loop = asyncio.new_event_loop()
     state.loop = loop
 
-    monkeypatch.setattr(web, "_hash_image", lambda p: FakeHash(0))
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: FakeHash(0))
 
     def fake_date(path):
         if path.name == "a.jpg":
             return datetime(2020, 1, 1, 12, 0, 0)
         return datetime(2020, 1, 1, 12, 2, 0)  # 2 min — inside window
 
-    monkeypatch.setattr(web, "_get_image_date", fake_date)
+    monkeypatch.setattr(scanner, "_get_image_date", fake_date)
 
-    web.scan_images(config, state)
+    scanner.scan_images(config, state)
     loop.close()
 
     assert state.groups, "Expected a group when images are inside time window"
@@ -447,14 +448,14 @@ def test_hash_image_and_get_image_date_are_not_duplicated():
     """`_hash_image` and `_get_image_date` must have one canonical implementation
     shared by `imagesorter.similarity` and `imagesorter.web` (no verbatim copies).
     """
-    from imagesorter import similarity, web
+    from imagesorter import similarity
 
-    assert web._hash_image is similarity._hash_image, (
-        "imagesorter.web._hash_image must reference the same callable as "
+    assert scanner._hash_image is similarity._hash_image, (
+        "imagesorter.scanner._hash_image must reference the same callable as "
         "imagesorter.similarity._hash_image (no duplicated definition)"
     )
-    assert web._get_image_date is similarity._get_image_date, (
-        "imagesorter.web._get_image_date must reference the same callable as "
+    assert scanner._get_image_date is similarity._get_image_date, (
+        "imagesorter.scanner._get_image_date must reference the same callable as "
         "imagesorter.similarity._get_image_date (no duplicated definition)"
     )
 
@@ -476,7 +477,7 @@ def test_scan_merge_of_two_groups_keeps_ids_disjoint(tmp_path, monkeypatch):
 
     config = _make_config(tmp_path, web_ui=True, threshold=0.9, time_window=60)
 
-    state = web.ScanState()
+    state = scanner.ScanState()
     loop = asyncio.new_event_loop()
     state.loop = loop
 
@@ -491,13 +492,13 @@ def test_scan_merge_of_two_groups_keeps_ids_disjoint(tmp_path, monkeypatch):
         "c.jpg": FakeHash(0),  # b≈c (and c≈d)
         "d.jpg": FakeHash(0),  # c≈d
     }
-    monkeypatch.setattr(web, "_hash_image", lambda p: hash_map[p.name])
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: hash_map[p.name])
 
     base = datetime(2020, 1, 1, 12, 0, 0)
     # All within the time window so every pair is considered.
-    monkeypatch.setattr(web, "_get_image_date", lambda p: base + timedelta(seconds=0))
+    monkeypatch.setattr(scanner, "_get_image_date", lambda p: base + timedelta(seconds=0))
 
-    web.scan_images(config, state)
+    scanner.scan_images(config, state)
     loop.close()
 
     # Collect, per id, the *last* set of paths emitted for that id.
@@ -541,15 +542,15 @@ def test_scan_never_retracts_previously_emitted_groups(tmp_path, monkeypatch):
 
     config = _make_config(tmp_path, web_ui=True, threshold=0.9)
 
-    state = web.ScanState()
+    state = scanner.ScanState()
     loop = asyncio.new_event_loop()
     state.loop = loop
 
-    monkeypatch.setattr(web, "_hash_image", lambda p: FakeHash(0))
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: FakeHash(0))
     from datetime import datetime
-    monkeypatch.setattr(web, "_get_image_date", lambda p: datetime(2020, 1, 1))
+    monkeypatch.setattr(scanner, "_get_image_date", lambda p: datetime(2020, 1, 1))
 
-    web.scan_images(config, state)
+    scanner.scan_images(config, state)
     loop.close()
 
     # Collect every id that was ever emitted (via state.groups history)
@@ -600,7 +601,7 @@ def test_stream_closes_when_scan_completes_before_client_connects(tmp_path):
     config = _make_config(tmp_path, web_ui=True)
 
     # Simulate a scan that ran to completion before any client was around.
-    state = web.ScanState()
+    state = scanner.ScanState()
     state.groups.append({"id": 0, "paths": [str(src / "a.jpg"), str(src / "b.jpg")]})
     state.mark_complete()  # state.loop is None here — same as production race
 
@@ -657,7 +658,7 @@ def test_two_sse_clients_both_receive_every_group_event(tmp_path):
     src.mkdir()
     config = _make_config(tmp_path, web_ui=True)
 
-    state = web.ScanState()
+    state = scanner.ScanState()
     app = web.create_app(config, state)
     stream_route = next(
         r for r in app.router.routes if getattr(r, "path", "") == "/api/stream"
@@ -723,7 +724,7 @@ def test_stream_terminates_when_scan_raises_unexpectedly(tmp_path, monkeypatch):
     src.mkdir()
     config = _make_config(tmp_path, web_ui=True)
 
-    state = web.ScanState()
+    state = scanner.ScanState()
     app = web.create_app(config, state)
     stream_route = next(
         r for r in app.router.routes if getattr(r, "path", "") == "/api/stream"
@@ -734,7 +735,7 @@ def test_stream_terminates_when_scan_raises_unexpectedly(tmp_path, monkeypatch):
     def crashing_scan(cfg, st):
         raise RuntimeError("boom: simulated scan crash")
 
-    monkeypatch.setattr(web, "scan_images", crashing_scan)
+    monkeypatch.setattr(scanner, "scan_images", crashing_scan)
 
     async def scenario():
         state.loop = asyncio.get_event_loop()
@@ -744,7 +745,7 @@ def test_stream_terminates_when_scan_raises_unexpectedly(tmp_path, monkeypatch):
         # Start the scan in a background thread, *after* the client is set up,
         # so the production code path (try/finally around scan_images) is exercised.
         def run_scan():
-            web.run_scan_safely(config, state)
+            scanner.run_scan_safely(config, state)
 
         threading.Thread(target=run_scan, daemon=True).start()
 
@@ -783,7 +784,7 @@ def test_deleted_paths_excluded_from_subsequent_group_events(tmp_path, monkeypat
     img_c = make_jpeg(src / "c.jpg")
 
     config = _make_config(tmp_path, web_ui=True)
-    state = web.ScanState()
+    state = scanner.ScanState()
     app = web.create_app(config, state)
 
     # Stub send2trash to a no-op so the test doesn't depend on the OS recycle bin.
@@ -819,9 +820,9 @@ def test_discover_images_is_not_duplicated():
     """`_discover_images` must have one canonical implementation shared by both
     `imagesorter.similarity` and `imagesorter.web` (CLAUDE.md: no duplicated code).
     """
-    from imagesorter import similarity, web
+    from imagesorter import similarity
 
-    assert web._discover_images is similarity._discover_images, (
-        "imagesorter.web._discover_images must reference the same callable as "
+    assert scanner._discover_images is similarity._discover_images, (
+        "imagesorter.scanner._discover_images must reference the same callable as "
         "imagesorter.similarity._discover_images (no duplicated definition)"
     )
