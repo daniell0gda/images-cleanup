@@ -86,6 +86,10 @@ def create_app(config: Config, state: ScanState):
             try:
                 for g in state.groups:
                     yield {"event": "group", "data": json.dumps(g)}
+                if state.last_progress is not None:
+                    yield {"event": "progress", "data": json.dumps(state.last_progress)}
+                if state.last_comparing is not None:
+                    yield {"event": "comparing", "data": json.dumps(state.last_comparing)}
                 if state.scan_complete:
                     yield {"event": "complete", "data": "{}"}
                     return
@@ -94,6 +98,12 @@ def create_app(config: Config, state: ScanState):
                     if item.get("event") == "complete":
                         yield {"event": "complete", "data": "{}"}
                         break
+                    if item.get("event") == "progress":
+                        yield {"event": "progress", "data": json.dumps(item)}
+                        continue
+                    if item.get("event") == "comparing":
+                        yield {"event": "comparing", "data": json.dumps(item)}
+                        continue
                     yield {"event": "group", "data": json.dumps(item)}
             finally:
                 state.unsubscribe(queue)

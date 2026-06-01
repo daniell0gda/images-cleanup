@@ -27,6 +27,8 @@ class ScanState:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.scan_complete = False
         self.deleted_paths: set[str] = set()
+        self.last_progress: dict[str, Any] | None = None
+        self.last_comparing: dict[str, Any] | None = None
 
     def mark_deleted(self, path: str) -> None:
         self.deleted_paths.add(path)
@@ -53,6 +55,16 @@ class ScanState:
         self.groups.append(group)
         self._broadcast(group)
 
+    def emit_progress(self, scanned: int, total: int) -> None:
+        item = {"event": "progress", "scanned": scanned, "total": total}
+        self.last_progress = item
+        self._broadcast(item)
+
+    def emit_comparing(self, total: int) -> None:
+        item = {"event": "comparing", "total": total}
+        self.last_comparing = item
+        self._broadcast(item)
+
     def mark_complete(self) -> None:
         self.scan_complete = True
         self._broadcast({"event": "complete"})
@@ -69,18 +81,24 @@ def scan_images(config: Config, state: ScanState) -> None:
         state.mark_complete()
         return
 
+    total = len(images)
     hashes: list = []
     dates: list[datetime] = []
     valid: list[Path] = []
-    for img in images:
+    for i, img in enumerate(images):
         try:
             hashes.append(_hash_image(img))
             dates.append(_get_image_date(img))
             valid.append(img)
         except Exception as exc:
             logger.error("Error hashing %s: %s", img, exc)
+        state.emit_progress(i + 1, total)
 
     n = len(valid)
+    if n == 0:
+        state.mark_complete()
+        return
+    state.emit_comparing(n)
     threshold = config.similarity_threshold
     window = timedelta(minutes=config.similarity_time_window_minutes)
 

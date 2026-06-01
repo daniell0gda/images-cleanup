@@ -816,6 +816,210 @@ def test_deleted_paths_excluded_from_subsequent_group_events(tmp_path, monkeypat
     assert str(img_c.resolve()) in final["paths"]
 
 
+# ── scan-progress-counter criteria ────────────────────────────────────────────
+
+def test_emit_progress_broadcasts_event_to_subscribers(tmp_path):
+    """ScanState.emit_progress(scanned, total) broadcasts a progress event to subscribers."""
+    import asyncio
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+    queue = state.subscribe()
+
+    state.emit_progress(7, 42)
+
+    async def get_event():
+        return await asyncio.wait_for(queue.get(), timeout=2.0)
+
+    item = loop.run_until_complete(get_event())
+    loop.close()
+
+    assert item == {"event": "progress", "scanned": 7, "total": 42}
+
+
+def test_scan_calls_emit_progress_for_each_image(tmp_path, monkeypatch):
+    """scan_images calls state.emit_progress(i+1, n) after every image, even on hash errors."""
+    import asyncio
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+    make_jpeg(src / "b.jpg")
+    make_jpeg(src / "c.jpg")
+
+    config = _make_config(tmp_path, web_ui=True, threshold=0.9)
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+
+    progress_calls: list[tuple[int, int]] = []
+    original = state.emit_progress
+
+    def spy(scanned: int, total: int) -> None:
+        progress_calls.append((scanned, total))
+        original(scanned, total)
+
+    state.emit_progress = spy  # type: ignore[method-assign]
+
+    # One image raises on hash — its progress tick must still fire.
+    def fake_hash(p):
+        if p.name == "b.jpg":
+            raise RuntimeError("simulated decode failure")
+        return FakeHash(0)
+
+    monkeypatch.setattr(scanner, "_hash_image", fake_hash)
+    monkeypatch.setattr(scanner, "_get_image_date", lambda p: datetime(2020, 1, 1))
+
+    scanner.scan_images(config, state)
+    loop.close()
+
+    # Every image (3 total) must have produced one progress tick with total=3.
+    assert len(progress_calls) == 3, f"Expected 3 progress ticks, got: {progress_calls}"
+    assert [c[0] for c in progress_calls] == [1, 2, 3]
+    assert all(c[1] == 3 for c in progress_calls)
+
+
+def test_stream_yields_progress_events(tmp_path):
+    """The /api/stream SSE endpoint must yield progress events as {"event": "progress", "data": json}."""
+    import asyncio
+    import json
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+    stream_route = next(
+        r for r in app.router.routes if getattr(r, "path", "") == "/api/stream"
+    )
+
+    async def scenario():
+        state.loop = asyncio.get_event_loop()
+        resp = await stream_route.endpoint()
+        body_iter = resp.body_iterator
+
+        next_chunk = asyncio.ensure_future(body_iter.__anext__())
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if state._subscribers:
+                break
+
+        state.emit_progress(5, 50)
+        chunk = await asyncio.wait_for(next_chunk, timeout=2.0)
+        return chunk
+
+    chunk = asyncio.run(scenario())
+    assert isinstance(chunk, dict)
+    assert chunk.get("event") == "progress"
+    payload = json.loads(chunk["data"])
+    assert payload == {"event": "progress", "scanned": 5, "total": 50}
+
+
+def test_late_joining_client_receives_synthetic_progress_event(tmp_path):
+    """A client connecting mid-scan must receive a synthetic progress event reflecting current count."""
+    import asyncio
+    import json
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    # Simulate scan already progressed before the client connects.
+    state.last_progress = {"event": "progress", "scanned": 12, "total": 100}
+
+    app = web.create_app(config, state)
+    stream_route = next(
+        r for r in app.router.routes if getattr(r, "path", "") == "/api/stream"
+    )
+
+    async def collect():
+        state.loop = asyncio.get_event_loop()
+        resp = await stream_route.endpoint()
+        body_iter = resp.body_iterator
+        # First chunk should be the replayed progress event.
+        chunk = await asyncio.wait_for(body_iter.__anext__(), timeout=2.0)
+        return chunk
+
+    chunk = asyncio.run(collect())
+    assert isinstance(chunk, dict)
+    assert chunk.get("event") == "progress"
+    payload = json.loads(chunk["data"])
+    assert payload == {"event": "progress", "scanned": 12, "total": 100}
+
+
+def test_late_joining_client_no_progress_when_none_emitted(tmp_path):
+    """If no progress has been emitted yet (e.g. empty folder), no synthetic progress is replayed."""
+    import asyncio
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    # No progress recorded; scan already completed (empty folder path).
+    state.mark_complete()
+
+    app = web.create_app(config, state)
+    stream_route = next(
+        r for r in app.router.routes if getattr(r, "path", "") == "/api/stream"
+    )
+
+    async def collect():
+        state.loop = asyncio.get_event_loop()
+        resp = await stream_route.endpoint()
+        body_iter = resp.body_iterator
+        chunks = []
+        for _ in range(10):
+            try:
+                chunk = await asyncio.wait_for(body_iter.__anext__(), timeout=2.0)
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                break
+            chunks.append(chunk)
+            if isinstance(chunk, dict) and chunk.get("event") == "complete":
+                break
+        return chunks
+
+    chunks = asyncio.run(collect())
+    # No progress event should appear.
+    progress_chunks = [c for c in chunks if isinstance(c, dict) and c.get("event") == "progress"]
+    assert progress_chunks == [], f"Did not expect any progress events, got: {progress_chunks}"
+
+
+def test_empty_folder_emits_no_progress(tmp_path, monkeypatch):
+    """When total is 0 (empty folder), scan_images emits zero progress events."""
+    import asyncio
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+
+    progress_calls: list[tuple[int, int]] = []
+    original = state.emit_progress
+
+    def spy(scanned: int, total: int) -> None:
+        progress_calls.append((scanned, total))
+        original(scanned, total)
+
+    state.emit_progress = spy  # type: ignore[method-assign]
+
+    scanner.scan_images(config, state)
+    loop.close()
+
+    assert progress_calls == [], f"Expected zero progress events for empty folder, got: {progress_calls}"
+    assert state.last_progress is None
+
+
 def test_discover_images_is_not_duplicated():
     """`_discover_images` must have one canonical implementation shared by both
     `imagesorter.similarity` and `imagesorter.web` (CLAUDE.md: no duplicated code).
@@ -825,4 +1029,254 @@ def test_discover_images_is_not_duplicated():
     assert scanner._discover_images is similarity._discover_images, (
         "imagesorter.scanner._discover_images must reference the same callable as "
         "imagesorter.similarity._discover_images (no duplicated definition)"
+    )
+
+
+def test_scan_emits_comparing_event_after_hashing_and_before_complete(tmp_path, monkeypatch):
+    """After the per-image hashing loop ends, scan_images must broadcast a `comparing`
+    event before entering the O(n^2) similarity-comparison phase, so the UI stops
+    showing "Scanning... N/N" while pair comparisons are still running.
+
+    Order must be: all `progress` ticks, then `comparing`, then any `group` events
+    (and finally `complete`).
+    """
+    import asyncio
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+    make_jpeg(src / "b.jpg")
+    make_jpeg(src / "c.jpg")
+
+    config = _make_config(tmp_path, web_ui=True, threshold=0.9)
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+    queue = state.subscribe()
+
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: FakeHash(0))
+    monkeypatch.setattr(scanner, "_get_image_date", lambda p: datetime(2020, 1, 1))
+
+    import threading
+    done = threading.Event()
+
+    def run_scan():
+        scanner.scan_images(config, state)
+        done.set()
+
+    threading.Thread(target=run_scan, daemon=True).start()
+
+    async def drain():
+        events = []
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                break
+            events.append(item)
+            if item.get("event") == "complete":
+                break
+        return events
+
+    events = loop.run_until_complete(drain())
+    loop.close()
+
+    event_types = [e.get("event") for e in events]
+    assert "comparing" in event_types, (
+        f"Expected a 'comparing' event after hashing finishes; got: {event_types}"
+    )
+
+    comparing_idx = event_types.index("comparing")
+    # Every progress tick must come before the comparing event.
+    progress_after_comparing = [
+        i for i, t in enumerate(event_types) if t == "progress" and i > comparing_idx
+    ]
+    assert not progress_after_comparing, (
+        f"No progress events may follow 'comparing'; got order: {event_types}"
+    )
+    # comparing must come before complete.
+    assert event_types.index("complete") > comparing_idx, (
+        f"'comparing' must precede 'complete'; got order: {event_types}"
+    )
+
+    # The comparing event must report the number of images that were hashed.
+    comparing_event = events[comparing_idx]
+    assert comparing_event.get("total") == 3, (
+        f"Expected comparing event to report total=3, got: {comparing_event}"
+    )
+
+
+def test_scan_does_not_emit_comparing_for_empty_folder(tmp_path):
+    """If there are no images, scan_images must not emit a comparing event."""
+    import asyncio
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+    queue = state.subscribe()
+
+    scanner.scan_images(config, state)
+
+    async def drain():
+        events = []
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                break
+            events.append(item)
+            if item.get("event") == "complete":
+                break
+        return events
+
+    events = loop.run_until_complete(drain())
+    loop.close()
+
+    event_types = [e.get("event") for e in events]
+    assert "comparing" not in event_types, (
+        f"Empty folder must not emit comparing; got: {event_types}"
+    )
+
+
+def test_stream_yields_comparing_event(tmp_path):
+    """The /api/stream SSE endpoint must forward comparing events as {"event": "comparing", "data": json}."""
+    import asyncio
+    import json
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+    stream_route = next(
+        r for r in app.router.routes if getattr(r, "path", "") == "/api/stream"
+    )
+
+    async def scenario():
+        state.loop = asyncio.get_event_loop()
+        resp = await stream_route.endpoint()
+        body_iter = resp.body_iterator
+
+        next_chunk = asyncio.ensure_future(body_iter.__anext__())
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if state._subscribers:
+                break
+
+        state.emit_comparing(42)
+        chunk = await asyncio.wait_for(next_chunk, timeout=2.0)
+        return chunk
+
+    chunk = asyncio.run(scenario())
+    assert isinstance(chunk, dict)
+    assert chunk.get("event") == "comparing"
+    payload = json.loads(chunk["data"])
+    assert payload == {"event": "comparing", "total": 42}
+
+
+def test_late_joining_client_receives_synthetic_comparing_event(tmp_path):
+    """A client connecting after the comparing phase has begun must receive a synthetic comparing event."""
+    import asyncio
+    import json
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    # Simulate hashing has finished and comparing phase started before the client connects.
+    state.last_progress = {"event": "progress", "scanned": 100, "total": 100}
+    state.emit_comparing(100)  # records state; broadcast is a no-op when loop is None
+
+    app = web.create_app(config, state)
+    stream_route = next(
+        r for r in app.router.routes if getattr(r, "path", "") == "/api/stream"
+    )
+
+    async def collect():
+        state.loop = asyncio.get_event_loop()
+        resp = await stream_route.endpoint()
+        body_iter = resp.body_iterator
+        chunks = []
+        for _ in range(10):
+            try:
+                chunk = await asyncio.wait_for(body_iter.__anext__(), timeout=2.0)
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                break
+            chunks.append(chunk)
+            if isinstance(chunk, dict) and chunk.get("event") == "comparing":
+                break
+        return chunks
+
+    chunks = asyncio.run(collect())
+    comparing_chunks = [
+        c for c in chunks if isinstance(c, dict) and c.get("event") == "comparing"
+    ]
+    assert comparing_chunks, (
+        f"Late-joining client must receive a synthetic comparing event; got: {chunks!r}"
+    )
+    payload = json.loads(comparing_chunks[0]["data"])
+    assert payload == {"event": "comparing", "total": 100}
+
+
+def test_scan_does_not_emit_comparing_when_all_images_fail_to_hash(tmp_path, monkeypatch):
+    """When total > 0 but every image fails to hash (n == 0), scan_images must not
+    emit a misleading `comparing` event (which would render as "Comparing 0 images...").
+    """
+    import asyncio
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+    make_jpeg(src / "b.jpg")
+
+    config = _make_config(tmp_path, web_ui=True)
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+    queue = state.subscribe()
+
+    def always_fail(path):
+        raise RuntimeError("simulated hash failure")
+
+    monkeypatch.setattr(scanner, "_hash_image", always_fail)
+
+    import threading
+    done = threading.Event()
+
+    def run_scan():
+        scanner.scan_images(config, state)
+        done.set()
+
+    threading.Thread(target=run_scan, daemon=True).start()
+
+    async def drain():
+        events = []
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                break
+            events.append(item)
+            if item.get("event") == "complete":
+                break
+        return events
+
+    events = loop.run_until_complete(drain())
+    loop.close()
+
+    event_types = [e.get("event") for e in events]
+    assert "comparing" not in event_types, (
+        f"No comparing event should be emitted when n == 0; got: {event_types}"
+    )
+    assert state.last_comparing is None, (
+        f"state.last_comparing should remain None when all images fail to hash; got: {state.last_comparing}"
     )
