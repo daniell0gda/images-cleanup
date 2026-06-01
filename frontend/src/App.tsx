@@ -20,6 +20,15 @@ interface SimilarityGroup {
   paths: string[];
 }
 
+interface ScanProgress {
+  scanned: number;
+  total: number;
+}
+
+interface ComparingState {
+  total: number;
+}
+
 const THUMB_SIZE = 100;
 const MODAL_IMAGE_HEIGHT = 360;
 
@@ -31,6 +40,8 @@ export default function App() {
   const [groups, setGroups] = useState<SimilarityGroup[]>([]);
   const [scanComplete, setScanComplete] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ScanProgress | null>(null);
+  const [comparing, setComparing] = useState<ComparingState | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeGroup, setActiveGroup] = useState<SimilarityGroup | null>(null);
   const [modalOpen, modalHandlers] = useDisclosure(false);
@@ -52,6 +63,14 @@ export default function App() {
         next[idx] = data;
         return next;
       });
+    });
+    es.addEventListener("progress", (evt: MessageEvent) => {
+      const data: { scanned: number; total: number } = JSON.parse(evt.data);
+      setProgress({ scanned: data.scanned, total: data.total });
+    });
+    es.addEventListener("comparing", (evt: MessageEvent) => {
+      const data: { total: number } = JSON.parse(evt.data);
+      setComparing({ total: data.total });
     });
     es.addEventListener("complete", () => {
       setScanComplete(true);
@@ -152,7 +171,11 @@ export default function App() {
               <Group gap="xs">
                 <Loader size="sm" />
                 <Text size="sm" c="dimmed">
-                  Scanning...
+                  {comparing
+                    ? `Comparing ${comparing.total.toLocaleString()} images...`
+                    : progress
+                    ? `Scanning... ${progress.scanned.toLocaleString()} / ${progress.total.toLocaleString()} images`
+                    : "Scanning..."}
                 </Text>
               </Group>
             )}
