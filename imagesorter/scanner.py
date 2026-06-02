@@ -112,12 +112,14 @@ def scan_images(config: Config, state: ScanState) -> None:
         return x
 
     group_id_for_root: dict[int, int] = {}
+    group_min_similarity: dict[int, float] = {}
     next_group_id = 0
 
     def emit(group_id: int, members: list[Path]) -> None:
         state.emit_group({
             "id": group_id,
             "paths": [str(p) for p in members],
+            "similarity": group_min_similarity.get(group_id, 1.0),
         })
 
     def members_of(root: int) -> list[Path]:
@@ -148,13 +150,22 @@ def scan_images(config: Config, state: ScanState) -> None:
             if id_a is None and id_b is None:
                 group_id = next_group_id
                 next_group_id += 1
+                group_min_similarity[group_id] = similarity
             elif id_a is not None and id_b is None:
                 group_id = id_a
+                group_min_similarity[group_id] = min(group_min_similarity.get(group_id, 1.0), similarity)
             elif id_a is None and id_b is not None:
                 group_id = id_b
+                group_min_similarity[group_id] = min(group_min_similarity.get(group_id, 1.0), similarity)
             else:
                 keep_id, drop_id = (id_a, id_b) if id_a <= id_b else (id_b, id_a)
                 group_id = keep_id
+                merged_similarity = min(
+                    group_min_similarity.get(keep_id, 1.0),
+                    group_min_similarity.get(drop_id, 1.0),
+                    similarity,
+                )
+                group_min_similarity[group_id] = merged_similarity
                 emit(drop_id, [])
 
             group_id_for_root.pop(other_root, None)

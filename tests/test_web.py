@@ -1280,3 +1280,139 @@ def test_scan_does_not_emit_comparing_when_all_images_fail_to_hash(tmp_path, mon
     assert state.last_comparing is None, (
         f"state.last_comparing should remain None when all images fail to hash; got: {state.last_comparing}"
     )
+
+
+# ── Criterion: per-group similarity score ────────────────────────────────────
+
+def test_scan_emits_similarity_score_in_group_event(tmp_path, monkeypatch):
+    """scan_images must include a 'similarity' field in each emitted group event."""
+    import asyncio
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    make_jpeg(src / "a.jpg")
+    make_jpeg(src / "b.jpg")
+
+    config = _make_config(tmp_path, threshold=0.9)
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: FakeHash(0))
+    monkeypatch.setattr(scanner, "_get_image_date", lambda p: datetime(2020, 1, 1))
+
+    scanner.scan_images(config, state)
+    loop.close()
+
+    assert state.groups, "Expected at least one group"
+    final = state.groups[-1]
+    assert "similarity" in final, f"Group event must include 'similarity' field: {final}"
+    assert isinstance(final["similarity"], float), (
+        f"similarity must be a float, got {type(final['similarity'])}"
+    )
+    assert 0.0 <= final["similarity"] <= 1.0, (
+        f"similarity must be in [0.0, 1.0], got {final['similarity']}"
+    )
+
+
+# ── Criterion: /api/config endpoint ──────────────────────────────────────────
+
+# ── Criterion: else-branch merge similarity ──────────────────────────────────
+
+def test_scan_merge_else_branch_similarity_is_minimum_of_all_pairs(tmp_path, monkeypatch):
+    """When two previously-separate groups merge (else branch in scan_images), the merged
+    group's similarity must equal the minimum of both groups' prior minimums and the
+    current pair's similarity.
+
+    Scenario using 4 images (a=idx0, b=idx1, c=idx2, d=idx3).
+    Pair iteration order: (0,1),(0,2),(0,3),(1,2),(1,3),(2,3).
+    Hash values a=0, b=8, c=11, d=2 ensure:
+      - (0,3) matches → G0={a,d}, sim=0.96875         (diff 2, the if-branch)
+      - (1,2) matches → G1={b,c}, sim=0.953125        (diff 3, the if-branch)
+      - (1,3) matches → bridge merges G0+G1, sim=0.90625 (diff 6, the ELSE branch)
+      - all other pairs below threshold 0.9 (diffs 8, 11, 9)
+    Merged similarity = min(0.96875, 0.953125, 0.90625) = 0.90625.
+    """
+    import asyncio
+    from datetime import datetime
+
+    src = tmp_path / "src"
+    # Create four images: a, b, c, d
+    for name in ("a", "b", "c", "d"):
+        make_jpeg(src / f"{name}.jpg")
+
+    # threshold low so all pairs pass the threshold check
+    config = _make_config(tmp_path, web_ui=True, threshold=0.9, time_window=60)
+
+    state = scanner.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+
+    # a=0, b=8, c=11, d=2  (max_bits = 8*8 = 64)
+    # diff(a,d)=2 → s=0.96875  pair(0,3) ✓ G0 seed
+    # diff(b,c)=3 → s=0.953125 pair(1,2) ✓ G1 seed
+    # diff(b,d)=6 → s=0.90625  pair(1,3) ✓ bridge (ELSE branch)
+    # diff(a,b)=8 → s=0.875 <0.9 skip; diff(a,c)=11 skip; diff(c,d)=9 skip
+    hash_values = {
+        "a.jpg": 0,   # index 0
+        "b.jpg": 8,   # index 1
+        "c.jpg": 11,  # index 2
+        "d.jpg": 2,   # index 3
+    }
+
+    class IndexedHash:
+        def __init__(self, value: int):
+            self.value = value
+
+        def __sub__(self, other: "IndexedHash") -> int:
+            return abs(self.value - other.value)
+
+        @property
+        def hash(self):
+            import numpy as np
+            return np.zeros((8, 8))
+
+    monkeypatch.setattr(scanner, "_hash_image", lambda p: IndexedHash(hash_values[p.name]))
+
+    base = datetime(2020, 1, 1, 12, 0, 0)
+    monkeypatch.setattr(scanner, "_get_image_date", lambda p: base)
+
+    scanner.scan_images(config, state)
+    loop.close()
+
+    # Merged similarity = min(G0.sim=0.96875, G1.sim=0.953125, bridge.sim=0.90625) = 0.90625
+    assert state.groups, "Expected at least one group"
+
+    all_paths = {str(src / f"{n}.jpg") for n in ("a", "b", "c", "d")}
+    merged_events = [g for g in state.groups if set(g.get("paths", [])) == all_paths]
+    assert merged_events, (
+        f"Expected a group event containing all 4 paths {all_paths}; "
+        f"got: {[g['paths'] for g in state.groups]}"
+    )
+    final_merged = merged_events[-1]
+    assert "similarity" in final_merged, "Merged group must have a 'similarity' field"
+    expected_sim = 1.0 - 6 / 64  # = 0.90625, the minimum of all three pair similarities
+    assert abs(final_merged["similarity"] - expected_sim) < 1e-9, (
+        f"Merged group similarity must be {expected_sim} (min of all pairs), "
+        f"got: {final_merged['similarity']}"
+    )
+
+
+def test_api_config_returns_similarity_threshold(tmp_path):
+    """GET /api/config must return {'similarity_threshold': <value>}."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path, threshold=0.92)
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert "similarity_threshold" in body
+    assert body["similarity_threshold"] == pytest.approx(0.92)

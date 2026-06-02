@@ -78,6 +78,10 @@ def create_app(config: Config, state: ScanState):
                 failed.append({"path": p, "error": str(exc)})
         return {"trashed": trashed, "failed": failed}
 
+    @app.get("/api/config")
+    async def get_config():
+        return {"similarity_threshold": config.similarity_threshold}
+
     @app.get("/api/stream")
     async def stream():
         async def event_generator():
