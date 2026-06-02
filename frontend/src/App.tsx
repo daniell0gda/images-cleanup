@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  ActionIcon,
   AppShell,
   Button,
   Checkbox,
@@ -121,15 +122,53 @@ export default function App() {
 
   const selectedCount = selected.size;
 
+  const visibleGroups = useMemo(
+    () => groups.filter((g) => g.paths.length >= 2 && g.similarity >= sliderValue),
+    [groups, sliderValue]
+  );
+
   const selectVisiblePhotos = () => {
     const paths = visibleGroups.flatMap((g) => g.paths);
     setSelected(new Set(paths));
   };
 
-  const visibleGroups = useMemo(
-    () => groups.filter((g) => g.paths.length >= 2 && g.similarity >= sliderValue),
-    [groups, sliderValue]
+  const activeIndex = useMemo(
+    () => (activeGroup ? visibleGroups.findIndex((g) => g.id === activeGroup.id) : -1),
+    [activeGroup, visibleGroups]
   );
+
+  const goNext = () => {
+    if (activeIndex < visibleGroups.length - 1) {
+      setActiveGroup(visibleGroups[activeIndex + 1]);
+    }
+  };
+
+  const goPrev = () => {
+    if (activeIndex > 0) {
+      setActiveGroup(visibleGroups[activeIndex - 1]);
+    }
+  };
+
+  const maxCols = useMemo(
+    () => (visibleGroups.length === 0 ? 0 : Math.max(...visibleGroups.map((g) => g.paths.length))),
+    [visibleGroups]
+  );
+
+  const toggleColumn = (n: number) => {
+    const nthPaths = visibleGroups
+      .filter((g) => g.paths.length >= n)
+      .map((g) => g.paths[n - 1]);
+    const allSelected = nthPaths.every((p) => selected.has(p));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        nthPaths.forEach((p) => next.delete(p));
+      } else {
+        nthPaths.forEach((p) => next.add(p));
+      }
+      return next;
+    });
+  };
 
   const scrollParentRef = useRef<HTMLDivElement>(null);
 
@@ -235,6 +274,14 @@ export default function App() {
               Select Visible Photos
             </Button>
             <Button
+              variant="default"
+              data-testid="deselect-all"
+              disabled={selectedCount === 0}
+              onClick={() => setSelected(new Set())}
+            >
+              Deselect All
+            </Button>
+            <Button
               color="red"
               disabled={selectedCount === 0 || deleting}
               onClick={() => confirmHandlers.open()}
@@ -263,6 +310,16 @@ export default function App() {
           <Stack align="center" mt="xl">
             <Text c="dimmed">No similar image groups found.</Text>
           </Stack>
+        )}
+
+        {maxCols > 0 && (
+          <Group gap="xs" style={{ position: "sticky", top: 0, zIndex: 10, background: "var(--mantine-color-body)", padding: "4px 0" }}>
+            {Array.from({ length: maxCols }, (_, i) => i + 1).map((n) => (
+              <Button key={n} variant="default" size="xs" data-testid={`col-btn-${n}`} onClick={() => toggleColumn(n)}>
+                {n}
+              </Button>
+            ))}
+          </Group>
         )}
 
         <div
@@ -315,6 +372,24 @@ export default function App() {
       >
         {activeGroup && (
           <Stack>
+            <Group justify="space-between">
+              <ActionIcon
+                data-testid="modal-prev"
+                variant="default"
+                onClick={goPrev}
+                disabled={activeIndex <= 0}
+              >
+                ‹
+              </ActionIcon>
+              <ActionIcon
+                data-testid="modal-next"
+                variant="default"
+                onClick={goNext}
+                disabled={activeIndex === -1 || activeIndex >= visibleGroups.length - 1}
+              >
+                ›
+              </ActionIcon>
+            </Group>
             <Group wrap="wrap" gap="md">
               {activeGroup.paths.map((path) => (
                 <Stack key={path} gap={4} align="center">

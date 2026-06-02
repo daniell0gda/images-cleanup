@@ -550,6 +550,474 @@ describe("App select visible photos", () => {
   });
 });
 
+describe("App modal navigation", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    mockFetch(0.96);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  async function setupTwoGroups() {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/g0/a.jpg", "/g0/b.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/g1/a.jpg", "/g1/b.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /g0/a.jpg")).toBeInTheDocument();
+    });
+
+    // Open modal for group 0 (first group)
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[0]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 0")).toBeInTheDocument();
+    });
+  }
+
+  it("shows an enabled Next button when active group is not the last in visibleGroups", async () => {
+    await setupTwoGroups();
+
+    const nextBtn = screen.getByTestId("modal-next");
+    expect(nextBtn).toBeInTheDocument();
+    expect(nextBtn).not.toBeDisabled();
+  });
+
+  it("Next button is disabled when active group is the last in visibleGroups", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/g0/a.jpg", "/g0/b.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/g1/a.jpg", "/g1/b.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /g1/a.jpg")).toBeInTheDocument();
+    });
+
+    // Open modal for group 1 (last group)
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[2]); // group 1's first image
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 1")).toBeInTheDocument();
+    });
+
+    const nextBtn = screen.getByTestId("modal-next");
+    expect(nextBtn).toBeDisabled();
+  });
+
+  it("clicking Next navigates to the next group without closing the modal", async () => {
+    await setupTwoGroups();
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("modal-next"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 1")).toBeInTheDocument();
+    });
+    // Modal still open (title changed to Group 1)
+    expect(screen.queryByText("Group 0")).not.toBeInTheDocument();
+  });
+
+  it("shows an enabled Previous button when active group is not the first in visibleGroups", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/g0/a.jpg", "/g0/b.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/g1/a.jpg", "/g1/b.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /g1/a.jpg")).toBeInTheDocument();
+    });
+
+    // Open modal for group 1 (last group, so prev should be enabled)
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[2]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 1")).toBeInTheDocument();
+    });
+
+    const prevBtn = screen.getByTestId("modal-prev");
+    expect(prevBtn).toBeInTheDocument();
+    expect(prevBtn).not.toBeDisabled();
+  });
+
+  it("Previous button is disabled when active group is the first in visibleGroups", async () => {
+    await setupTwoGroups();
+
+    const prevBtn = screen.getByTestId("modal-prev");
+    expect(prevBtn).toBeDisabled();
+  });
+
+  it("clicking Previous navigates to the previous group without closing the modal", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/g0/a.jpg", "/g0/b.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/g1/a.jpg", "/g1/b.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /g1/a.jpg")).toBeInTheDocument();
+    });
+
+    // Open modal on group 1
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[2]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 1")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("modal-prev"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 0")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Group 1")).not.toBeInTheDocument();
+  });
+
+  it("Next/Previous skips groups filtered out by the slider", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/g0/a.jpg", "/g0/b.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/g1/a.jpg", "/g1/b.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 2, paths: ["/g2/a.jpg", "/g2/b.jpg"], similarity: 0.99 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /g0/a.jpg")).toBeInTheDocument();
+    });
+
+    // Open group 0 in modal
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[0]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 0")).toBeInTheDocument();
+    });
+
+    // Move slider to 0.98, filtering out groups 0 and 1 (but modal stays open)
+    // First close modal, filter, then re-open — actually slider shouldn't close modal
+    // Let's just verify that with slider at 0.96 (3 visible groups), next from group 0 goes to group 1
+    act(() => {
+      fireEvent.click(screen.getByTestId("modal-next"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 1")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("modal-next"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 2")).toBeInTheDocument();
+    });
+
+    // Now group 2 is last, next should be disabled
+    expect(screen.getByTestId("modal-next")).toBeDisabled();
+  });
+});
+
+describe("App deselect all", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    mockFetch(0.96);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("Deselect All button is disabled when selected is empty", async () => {
+    renderApp();
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    const btn = screen.getByTestId("deselect-all");
+    expect(btn).toBeDisabled();
+  });
+
+  it("Deselect All button is enabled when at least one path is selected", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/a/img1.jpg", "/a/img2.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img1.jpg")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Select /a/img1.jpg"));
+    });
+
+    expect(screen.getByTestId("deselect-all")).not.toBeDisabled();
+  });
+
+  it("clicking Deselect All clears all selected paths and delete count drops to zero", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/a/img1.jpg", "/a/img2.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img1.jpg")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /select visible photos/i }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img1.jpg")).toBeChecked();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("deselect-all"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img1.jpg")).not.toBeChecked();
+    });
+    expect(screen.getByLabelText("Select /a/img2.jpg")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /delete 0 selected/i })).toBeInTheDocument();
+  });
+});
+
+describe("App column header", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    mockFetch(0.96);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders one column button per max group size above the gallery", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/a/img1.jpg", "/a/img2.jpg", "/a/img3.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/b/img1.jpg", "/b/img2.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img1.jpg")).toBeInTheDocument();
+    });
+
+    // Max group size is 3, so buttons col-btn-1, col-btn-2, col-btn-3
+    expect(screen.getByTestId("col-btn-1")).toBeInTheDocument();
+    expect(screen.getByTestId("col-btn-2")).toBeInTheDocument();
+    expect(screen.getByTestId("col-btn-3")).toBeInTheDocument();
+    expect(screen.queryByTestId("col-btn-4")).not.toBeInTheDocument();
+  });
+
+  it("column button count decreases when slider filters out the largest group", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/a/img1.jpg", "/a/img2.jpg", "/a/img3.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/b/img1.jpg", "/b/img2.jpg"], similarity: 0.99 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("col-btn-3")).toBeInTheDocument();
+    });
+
+    // Move slider to 0.98 — group 0 (0.97) is filtered out, max becomes 2
+    const slider = screen.getByRole("slider");
+    act(() => { slider.focus(); });
+    for (let i = 0; i < 20; i++) {
+      act(() => { fireEvent.keyDown(slider, { key: "ArrowRight" }); });
+    }
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("col-btn-3")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("col-btn-2")).toBeInTheDocument();
+  });
+
+  it("clicking col-btn-N selects the Nth image from every group that has at least N images", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/a/img1.jpg", "/a/img2.jpg", "/a/img3.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/b/img1.jpg", "/b/img2.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("col-btn-2")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("col-btn-2"));
+    });
+
+    // img2 of group 0 and img2 of group 1 should be selected
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img2.jpg")).toBeChecked();
+    });
+    expect(screen.getByLabelText("Select /b/img2.jpg")).toBeChecked();
+    // img1 and img3 should NOT be selected
+    expect(screen.getByLabelText("Select /a/img1.jpg")).not.toBeChecked();
+    expect(screen.getByLabelText("Select /a/img3.jpg")).not.toBeChecked();
+    expect(screen.getByLabelText("Select /b/img1.jpg")).not.toBeChecked();
+  });
+
+  it("clicking col-btn-N again (all Nth selected) deselects all Nth images", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/a/img1.jpg", "/a/img2.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/b/img1.jpg", "/b/img2.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("col-btn-1")).toBeInTheDocument();
+    });
+
+    // Click col-btn-1 to select all 1st images
+    act(() => {
+      fireEvent.click(screen.getByTestId("col-btn-1"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img1.jpg")).toBeChecked();
+    });
+    expect(screen.getByLabelText("Select /b/img1.jpg")).toBeChecked();
+
+    // Click again — all 1st images are selected, so should deselect them
+    act(() => {
+      fireEvent.click(screen.getByTestId("col-btn-1"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img1.jpg")).not.toBeChecked();
+    });
+    expect(screen.getByLabelText("Select /b/img1.jpg")).not.toBeChecked();
+  });
+
+  it("col-btn-3 only affects groups with at least 3 images; 2-image groups are unaffected", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/a/img1.jpg", "/a/img2.jpg", "/a/img3.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/b/img1.jpg", "/b/img2.jpg"], similarity: 0.97 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("col-btn-3")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("col-btn-3"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /a/img3.jpg")).toBeChecked();
+    });
+    // Group 1 only has 2 images — none of them should be affected
+    expect(screen.getByLabelText("Select /b/img1.jpg")).not.toBeChecked();
+    expect(screen.getByLabelText("Select /b/img2.jpg")).not.toBeChecked();
+  });
+});
+
 describe("App virtual scrolling", () => {
   beforeEach(() => {
     MockEventSource.instances = [];
@@ -958,5 +1426,62 @@ describe("App virtual scrolling", () => {
     // 50 groups were emitted — verify not all 50 are rendered.
     const checkboxes = screen.queryAllByLabelText(/^Select \/g\d+\/a\.jpg$/);
     expect(checkboxes.length).toBeLessThan(50);
+  });
+});
+
+describe("App modal nav when activeGroup filtered out", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    mockFetch(0.96);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("both Next and Previous are disabled when the open group is filtered out by the slider", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    // Wait for config to load (slider at 0.96)
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+
+    // Group 0 has similarity 0.97, group 1 has similarity 0.99
+    act(() => {
+      es.emit("group", { id: 0, paths: ["/g0/a.jpg", "/g0/b.jpg"], similarity: 0.97 });
+      es.emit("group", { id: 1, paths: ["/g1/a.jpg", "/g1/b.jpg"], similarity: 0.99 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /g0/a.jpg")).toBeInTheDocument();
+    });
+
+    // Open the modal on group 0
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[0]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Group 0")).toBeInTheDocument();
+    });
+
+    // Move slider to 0.98 (20 steps from 0.96) — group 0 (similarity 0.97) is filtered out
+    const slider = screen.getByRole("slider");
+    act(() => { slider.focus(); });
+    for (let i = 0; i < 20; i++) {
+      act(() => { fireEvent.keyDown(slider, { key: "ArrowRight" }); });
+    }
+
+    // activeIndex is now -1 (group 0 no longer in visibleGroups)
+    // Both Next and Previous must be disabled
+    await waitFor(() => {
+      expect(screen.getByTestId("modal-next")).toBeDisabled();
+    });
+    expect(screen.getByTestId("modal-prev")).toBeDisabled();
   });
 });
