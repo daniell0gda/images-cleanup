@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AppShell,
   Button,
@@ -8,6 +9,7 @@ import {
   Loader,
   Modal,
   Notification,
+  Slider,
   Stack,
   Text,
   Title,
@@ -18,6 +20,7 @@ import { notifications } from "@mantine/notifications";
 interface SimilarityGroup {
   id: number;
   paths: string[];
+  similarity: number;
 }
 
 interface ScanProgress {
@@ -47,6 +50,21 @@ export default function App() {
   const [modalOpen, modalHandlers] = useDisclosure(false);
   const [confirmOpen, confirmHandlers] = useDisclosure(false);
   const [deleting, setDeleting] = useState(false);
+  const [similarityMin, setSimilarityMin] = useState<number | null>(null);
+  const [sliderValue, setSliderValue] = useState<number>(0.0);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((cfg: { similarity_threshold: number }) => {
+        setSimilarityMin(cfg.similarity_threshold);
+        setSliderValue(cfg.similarity_threshold);
+      })
+      .catch(() => {
+        setSimilarityMin(0.0);
+        setSliderValue(0.0);
+      });
+  }, []);
 
   useEffect(() => {
     const es = new EventSource("/api/stream");
@@ -103,10 +121,24 @@ export default function App() {
 
   const selectedCount = selected.size;
 
+  const selectVisiblePhotos = () => {
+    const paths = visibleGroups.flatMap((g) => g.paths);
+    setSelected(new Set(paths));
+  };
+
   const visibleGroups = useMemo(
-    () => groups.filter((g) => g.paths.length >= 2),
-    [groups]
+    () => groups.filter((g) => g.paths.length >= 2 && g.similarity >= sliderValue),
+    [groups, sliderValue]
   );
+
+  const scrollParentRef = useRef<HTMLDivElement>(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: visibleGroups.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => 130,
+    overscan: 3,
+  });
 
   const handleConfirmDelete = async () => {
     setDeleting(true);
@@ -167,6 +199,21 @@ export default function App() {
         <Group justify="space-between" align="center">
           <Title order={3}>Similarity Search</Title>
           <Group>
+            {similarityMin !== null && (
+              <Group gap="xs" align="center">
+                <Text size="sm">Min similarity:</Text>
+                <Slider
+                  min={similarityMin}
+                  max={1}
+                  step={0.001}
+                  value={sliderValue}
+                  onChange={setSliderValue}
+                  label={(v) => `${Math.round(v * 100)}%`}
+                  w={200}
+                />
+                <Text size="sm">{Math.round(sliderValue * 100)}%</Text>
+              </Group>
+            )}
             {!scanComplete && (
               <Group gap="xs">
                 <Loader size="sm" />
@@ -184,6 +231,9 @@ export default function App() {
                 Scan complete
               </Text>
             )}
+            <Button variant="default" onClick={selectVisiblePhotos}>
+              Select Visible Photos
+            </Button>
             <Button
               color="red"
               disabled={selectedCount === 0 || deleting}
@@ -215,30 +265,46 @@ export default function App() {
           </Stack>
         )}
 
-        <Stack gap="md">
-          {visibleGroups.map((group) => (
-            <Group key={group.id} gap="sm" wrap="wrap">
-              {group.paths.map((path) => (
-                <Stack key={path} gap={4} align="center">
-                  <Image
-                    src={imageUrl(path)}
-                    w={THUMB_SIZE}
-                    h={THUMB_SIZE}
-                    fit="cover"
-                    radius="sm"
-                    onClick={() => openGroup(group)}
-                    style={{ cursor: "pointer" }}
-                  />
-                  <Checkbox
-                    checked={selected.has(path)}
-                    onChange={() => toggleSelected(path)}
-                    aria-label={`Select ${path}`}
-                  />
-                </Stack>
-              ))}
-            </Group>
-          ))}
-        </Stack>
+        <div
+          ref={scrollParentRef}
+          data-virtual-scroll="true"
+          style={{ height: "calc(100vh - 60px - var(--mantine-spacing-md) * 2)", overflowY: "auto" }}
+        >
+          <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const group = visibleGroups[virtualRow.index];
+              return (
+                <div
+                  key={group.id}
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  style={{ position: "absolute", top: virtualRow.start, width: "100%" }}
+                >
+                  <Group gap="sm" wrap="wrap" pb="md">
+                    {group.paths.map((path) => (
+                      <Stack key={path} gap={4} align="center">
+                        <Image
+                          src={imageUrl(path)}
+                          w={THUMB_SIZE}
+                          h={THUMB_SIZE}
+                          fit="cover"
+                          radius="sm"
+                          onClick={() => openGroup(group)}
+                          style={{ cursor: "pointer" }}
+                        />
+                        <Checkbox
+                          checked={selected.has(path)}
+                          onChange={() => toggleSelected(path)}
+                          aria-label={`Select ${path}`}
+                        />
+                      </Stack>
+                    ))}
+                  </Group>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </AppShell.Main>
 
       <Modal
@@ -260,7 +326,12 @@ export default function App() {
                   <Checkbox
                     checked={selected.has(path)}
                     onChange={() => toggleSelected(path)}
-                    label={path.split(/[\\/]/).pop()}
+                    label={(() => {
+                      const parts = path.split(/[\\/]/);
+                      const filename = parts[parts.length - 1];
+                      const folder = parts[parts.length - 2] ?? "";
+                      return folder ? `${folder}/${filename}` : filename;
+                    })()}
                   />
                 </Stack>
               ))}
