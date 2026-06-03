@@ -1507,6 +1507,110 @@ describe("App source compliance", () => {
   });
 });
 
+// ── groupby-ui-fixes criteria ────────────────────────────────────────────────
+
+describe("groupby-ui-fixes: page title", () => {
+  it("index.html title does not contain 'Similarity'", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const html = fs.readFileSync(path.resolve(__dirname, "../index.html"), "utf-8");
+    expect(html).not.toMatch(/similarity/i);
+  });
+
+  it("index.html title is 'Image Sorter'", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const html = fs.readFileSync(path.resolve(__dirname, "../index.html"), "utf-8");
+    expect(html).toContain("<title>Image Sorter</title>");
+  });
+});
+
+describe("groupby-ui-fixes: slider visibility", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("slider is not in DOM before config loads (mode is unknown on initial render)", () => {
+    // Config fetch never resolves — slider must not appear during the loading state
+    vi.stubGlobal("fetch", () => new Promise(() => {}));
+    renderApp();
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+  });
+
+  it("slider is not in DOM when config returns GroupByTags", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({ mode: "GroupByTags", similarity_threshold: 0.96, tag_groups: [] }),
+      })
+    );
+    renderApp();
+    // After config loads, slider must still not appear
+    await waitFor(() => {
+      expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+    });
+  });
+
+  it("slider is in DOM when config returns SimilaritySearch", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ mode: "SimilaritySearch", similarity_threshold: 0.96 }),
+      })
+    );
+    renderApp();
+    await waitFor(() => {
+      expect(screen.getByRole("slider")).toBeInTheDocument();
+    });
+  });
+});
+
+describe("groupby-ui-fixes: heading", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("heading reads 'Group By Tags' when mode is GroupByTags", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({ mode: "GroupByTags", similarity_threshold: 0.96, tag_groups: [] }),
+      })
+    );
+    renderApp();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Group By Tags" })).toBeInTheDocument();
+    });
+  });
+
+  it("heading reads 'Similarity Search' when mode is SimilaritySearch", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ mode: "SimilaritySearch", similarity_threshold: 0.96 }),
+      })
+    );
+    renderApp();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Similarity Search" })).toBeInTheDocument();
+    });
+  });
+});
+
 // ── GroupByTags mode frontend tests ──────────────────────────────────────────
 
 function mockGroupByTagsFetch(tagGroups = [{ name: "Animals", destination: "/sorted/animals" }]) {
