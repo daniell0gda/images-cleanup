@@ -1,4 +1,4 @@
-"""FastAPI server providing the SimilaritySearch web UI."""
+"""FastAPI server providing the SimilaritySearch and GroupByTags web UI."""
 from __future__ import annotations
 
 import asyncio
@@ -8,11 +8,21 @@ import socket
 import sys
 import threading
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
+from pydantic import BaseModel
+
 from .config import Config
+from .file_ops import transfer
 from .scanner import ScanState, run_scan_safely
+from .sorter import _get_image_date as _get_file_date
+
+
+class MoveToGroupRequest(BaseModel):
+    paths: list[str]
+    group_name: str
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +50,7 @@ def _is_path_within(child: Path, parent: Path) -> bool:
         return False
 
 
+
 def create_app(config: Config, state: ScanState):
     """Build the FastAPI application."""
     from fastapi import Body, FastAPI, HTTPException
@@ -55,7 +66,11 @@ def create_app(config: Config, state: ScanState):
     async def get_image(encoded_path: str):
         decoded = unquote(encoded_path)
         target = Path(decoded)
-        if not _is_path_within(target, source):
+        allowed = _is_path_within(target, source)
+        if not allowed and config.mode == "GroupByTags":
+            unclassified_dest = Path(config.unclassified.destination).resolve()
+            allowed = _is_path_within(target, unclassified_dest)
+        if not allowed:
             raise HTTPException(status_code=403, detail="path outside source_folder")
         if not target.exists():
             raise HTTPException(status_code=404, detail="not found")
@@ -80,7 +95,42 @@ def create_app(config: Config, state: ScanState):
 
     @app.get("/api/config")
     async def get_config():
-        return {"similarity_threshold": config.similarity_threshold}
+        result: dict = {"mode": config.mode, "similarity_threshold": config.similarity_threshold}
+        if config.mode == "GroupByTags":
+            result["tag_groups"] = [
+                {"name": g.name, "destination": g.destination}
+                for g in config.tag_groups
+            ]
+        return result
+
+    @app.post("/api/move-to-group")
+    async def move_to_group(body: MoveToGroupRequest):
+        group = next((g for g in config.tag_groups if g.name == body.group_name), None)
+        if group is None:
+            raise HTTPException(status_code=404, detail="group not found")
+        unclassified_folder = Path(config.unclassified.destination) / config.unclassified.folder_name
+        for path_str in body.paths:
+            if not _is_path_within(Path(path_str), unclassified_folder):
+                raise HTTPException(status_code=400, detail=f"path outside unclassified folder: {path_str}")
+        results = []
+        for path_str in body.paths:
+            src = Path(path_str)
+            try:
+                dt = _get_file_date(src)
+            except Exception:
+                dt = datetime.now()
+            dst_dir = Path(group.destination)
+            if group.group_by_year:
+                dst_dir = dst_dir / f"{dt.year:04d}"
+            if group.group_by_month:
+                dst_dir = dst_dir / f"{dt.month:02d}"
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            result = transfer(src, dst_dir, False, config.on_collision)
+            ok = result is not None
+            if ok:
+                state.remove_image(path_str)
+            results.append({"path": path_str, "ok": ok})
+        return {"results": results}
 
     @app.get("/api/stream")
     async def stream():
@@ -88,8 +138,13 @@ def create_app(config: Config, state: ScanState):
             state.loop = asyncio.get_event_loop()
             queue = state.subscribe()
             try:
-                for g in state.groups:
-                    yield {"event": "group", "data": json.dumps(g)}
+                # Replay existing data
+                if config.mode == "GroupByTags":
+                    for path in list(state.images):
+                        yield {"event": "image", "data": json.dumps({"path": path})}
+                else:
+                    for g in state.groups:
+                        yield {"event": "group", "data": json.dumps(g)}
                 if state.last_progress is not None:
                     yield {"event": "progress", "data": json.dumps(state.last_progress)}
                 if state.last_comparing is not None:
@@ -107,6 +162,9 @@ def create_app(config: Config, state: ScanState):
                         continue
                     if item.get("event") == "comparing":
                         yield {"event": "comparing", "data": json.dumps(item)}
+                        continue
+                    if item.get("event") == "image":
+                        yield {"event": "image", "data": json.dumps({"path": item["path"]})}
                         continue
                     yield {"event": "group", "data": json.dumps(item)}
             finally:
@@ -135,9 +193,25 @@ def serve(config: Config) -> None:
     logger.info("Web UI listening on %s", url)
 
     state = ScanState()
-    scan_thread = threading.Thread(
-        target=run_scan_safely, args=(config, state), daemon=True
-    )
+    if config.mode == "GroupByTags":
+        from .scanner import scan_images_groupby
+
+        def _run_groupby_safely(cfg: Config, st: ScanState) -> None:
+            try:
+                scan_images_groupby(cfg, st)
+            except Exception:
+                logger.exception("scan_images_groupby crashed unexpectedly")
+            finally:
+                if not st.scan_complete:
+                    st.mark_complete()
+
+        scan_thread = threading.Thread(
+            target=_run_groupby_safely, args=(config, state), daemon=True
+        )
+    else:
+        scan_thread = threading.Thread(
+            target=run_scan_safely, args=(config, state), daemon=True
+        )
     scan_thread.start()
 
     webbrowser.open(url)

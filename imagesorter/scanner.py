@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from ultralytics import YOLO
+
 from .config import Config
 from .similarity import _discover_images, _get_image_date, _hash_image
 
@@ -23,6 +25,7 @@ class ScanState:
 
     def __init__(self) -> None:
         self.groups: list[dict[str, Any]] = []
+        self.images: list[str] = []
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self.loop: asyncio.AbstractEventLoop | None = None
         self.scan_complete = False
@@ -47,6 +50,16 @@ class ScanState:
             return
         for queue in list(self._subscribers):
             asyncio.run_coroutine_threadsafe(queue.put(item), self.loop)
+
+    def emit_image(self, path: str) -> None:
+        """Record a single unclassified-image path and broadcast it as an 'image' event."""
+        self.images.append(path)
+        self._broadcast({"event": "image", "path": path})
+
+    def remove_image(self, path: str) -> None:
+        """Remove a path from the images replay list (after a successful move-to-group)."""
+        if path in self.images:
+            self.images.remove(path)
 
     def emit_group(self, group: dict[str, Any]) -> None:
         if self.deleted_paths:
@@ -174,6 +187,103 @@ def scan_images(config: Config, state: ScanState) -> None:
             members = members_of(new_root)
             if len(members) >= 2:
                 emit(group_id, members)
+
+    state.mark_complete()
+
+
+def scan_images_groupby(config: Config, state: ScanState) -> None:
+    """Scan source_folder for GroupByTags web-UI mode.
+
+    - Pre-existing images in the unclassified folder are emitted first.
+    - Classified images (matched by YOLO) are moved immediately and silently.
+    - Unclassified images are moved to the unclassified folder and emitted as
+      SSE 'image' events so the web UI can show them.
+    - Emits 'progress' events; never emits 'comparing'.
+    """
+    from PIL import Image as _PILImage
+    from .sorter import _select_group, _get_image_date as _sorter_get_image_date, _build_dest_dir, _transfer_with_policy
+
+    # Emit pre-existing images already in the unclassified folder
+    unclassified_folder = Path(config.unclassified.destination) / config.unclassified.folder_name
+    if unclassified_folder.is_dir():
+        formats = set(config.include_formats)
+        for p in sorted(unclassified_folder.rglob("*")):
+            if p.suffix.lower() in formats and p.is_file():
+                state.emit_image(str(p))
+
+    images = _discover_images(config)
+    total = len(images)
+
+    if not images:
+        state.mark_complete()
+        return
+
+    logger.info("GroupByTags web scan: loading YOLO model ...")
+    model = YOLO("yolo11s.pt")
+    logger.info("GroupByTags web scan: model ready, processing %d images", total)
+
+    batch_size = config.batch_size
+    processed = 0
+
+    for batch_start in range(0, total, batch_size):
+        chunk = images[batch_start: batch_start + batch_size]
+
+        try:
+            chunk_imgs = []
+            for img_path in chunk:
+                with _PILImage.open(img_path) as pil:
+                    if pil.mode != "RGB":
+                        pil = pil.convert("RGB")
+                    chunk_imgs.append(pil.copy())
+            results = model(chunk_imgs, conf=config.confidence_threshold, verbose=False)
+        except Exception:
+            # Per-image fallback
+            results = []
+            for img_path in chunk:
+                try:
+                    with _PILImage.open(img_path) as pil:
+                        if pil.mode != "RGB":
+                            pil = pil.convert("RGB")
+                        res = model([pil.copy()], conf=config.confidence_threshold, verbose=False)
+                        results.append(res[0])
+                except Exception as exc:
+                    logger.error("Skipping unreadable image %s: %s", img_path.name, exc)
+                    results.append(None)
+
+        for img_path, result in zip(chunk, results):
+            processed += 1
+            try:
+                if result is None:
+                    pass
+                else:
+                    cls_tensor = result.boxes.cls if result.boxes is not None else []
+                    detected = {model.names[int(cls)].lower() for cls in cls_tensor}
+                    group = _select_group(detected, config.tag_groups)
+
+                    if group is not None:
+                        # Classified → move to group destination, no SSE
+                        dt = _sorter_get_image_date(img_path)
+                        dest_dir = _build_dest_dir(group.destination, dt, group.group_by_year, group.group_by_month)
+                        _transfer_with_policy(img_path, dest_dir, config.copy_instead_of_move, config.on_collision)
+                    else:
+                        # Unclassified → move to unclassified folder and emit SSE image event
+                        dt = _sorter_get_image_date(img_path)
+                        base = str(Path(config.unclassified.destination) / config.unclassified.folder_name)
+                        dest_dir = _build_dest_dir(
+                            base, dt,
+                            config.unclassified.group_by_year,
+                            config.unclassified.group_by_month,
+                        )
+                        transfer_result = _transfer_with_policy(img_path, dest_dir, config.copy_instead_of_move, config.on_collision)
+                        if transfer_result is not None:
+                            state.emit_image(str(transfer_result))
+                        else:
+                            # Collision-skipped: emit the would-be destination path
+                            state.emit_image(str(dest_dir / img_path.name))
+            except Exception as exc:
+                logger.error("Error processing %s: %s", img_path, exc)
+
+            state.emit_progress(processed, total)
 
     state.mark_complete()
 

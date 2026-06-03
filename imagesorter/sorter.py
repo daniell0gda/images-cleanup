@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -72,8 +73,24 @@ def _select_group(detected_labels: set[str], tag_groups: list[TagGroup]) -> TagG
     return matches[0][2]
 
 
+def _serve_web(config: Config) -> None:
+    """Delegate to the web UI server."""
+    from .web import serve
+    serve(config)
+
+
 def run(config: Config) -> None:
     """Run GroupByTags mode."""
+    if config.web_ui:
+        if not config.unclassified.enabled:
+            print(
+                "Error: web_ui requires unclassified.enabled=true in GroupByTags mode",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _serve_web(config)
+        return
+
     source = Path(config.source_folder).resolve()
 
     if not config.copy_instead_of_move:

@@ -1416,3 +1416,365 @@ def test_api_config_returns_similarity_threshold(tmp_path):
     body = response.json()
     assert "similarity_threshold" in body
     assert body["similarity_threshold"] == pytest.approx(0.92)
+
+
+# ── Criterion 6: /api/config returns mode field ───────────────────────────────
+
+def test_api_config_returns_mode_similarity_search(tmp_path):
+    """GET /api/config returns mode='SimilaritySearch' for SimilaritySearch config."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path)  # mode=SimilaritySearch
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("mode") == "SimilaritySearch"
+
+
+def test_api_config_returns_mode_groupbytags(tmp_path):
+    """GET /api/config returns mode='GroupByTags' when config has GroupByTags mode."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+    from imagesorter.config import Config, TagGroup, Unclassified
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[
+            TagGroup(name="Animals", tags=["dog"], destination=str(tmp_path / "animals"),
+                     group_by_year=False, group_by_month=False),
+        ],
+        unclassified=Unclassified(
+            enabled=True, folder_name="others",
+            destination=str(tmp_path / "sorted"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("mode") == "GroupByTags"
+
+
+# ── Criterion 7: /api/config returns tag_groups for GroupByTags ───────────────
+
+def test_api_config_returns_tag_groups_for_groupbytags(tmp_path):
+    """GET /api/config returns tag_groups array when mode=GroupByTags."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+    from imagesorter.config import Config, TagGroup, Unclassified
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[
+            TagGroup(name="Animals", tags=["dog"], destination="/dest/animals",
+                     group_by_year=False, group_by_month=False),
+            TagGroup(name="Vehicles", tags=["car"], destination="/dest/vehicles",
+                     group_by_year=False, group_by_month=False),
+        ],
+        unclassified=Unclassified(
+            enabled=True, folder_name="others",
+            destination=str(tmp_path / "sorted"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert "tag_groups" in body
+    assert body["tag_groups"] == [
+        {"name": "Animals", "destination": "/dest/animals"},
+        {"name": "Vehicles", "destination": "/dest/vehicles"},
+    ]
+
+
+def test_api_config_omits_tag_groups_for_similarity_search(tmp_path):
+    """GET /api/config does not include tag_groups when mode=SimilaritySearch."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path)  # SimilaritySearch
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert "tag_groups" not in body
+
+
+# ── Criteria 8 & 9: POST /api/move-to-group ──────────────────────────────────
+
+def _make_groupby_config(tmp_path):
+    """Build a GroupByTags config for move-to-group tests."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    return Config(
+        mode="GroupByTags",
+        source_folder=str(tmp_path / "src"),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[
+            TagGroup(name="Animals", tags=["dog"], destination=str(tmp_path / "animals"),
+                     group_by_year=False, group_by_month=False),
+        ],
+        unclassified=Unclassified(
+            enabled=True, folder_name="others",
+            destination=str(tmp_path / "sorted"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+
+def test_move_to_group_moves_files_to_destination(tmp_path):
+    """POST /api/move-to-group moves files to the named tag group's destination."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    unclassified_dir = tmp_path / "sorted" / "others"
+    img_a = make_jpeg(unclassified_dir / "a.jpg")
+    img_b = make_jpeg(unclassified_dir / "b.jpg")
+
+    config = _make_groupby_config(tmp_path)
+    state = scanner.ScanState()
+    state.images.extend([str(img_a), str(img_b)])
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/move-to-group",
+        json={"paths": [str(img_a), str(img_b)], "group_name": "Animals"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "results" in body
+    results = {r["path"]: r["ok"] for r in body["results"]}
+    assert results[str(img_a)] is True
+    assert results[str(img_b)] is True
+
+    # Files must be at the Animals destination
+    assert (tmp_path / "animals" / "a.jpg").exists()
+    assert (tmp_path / "animals" / "b.jpg").exists()
+
+
+def test_move_to_group_returns_404_for_unknown_group(tmp_path):
+    """POST /api/move-to-group returns 404 when group_name is not found."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    unclassified_dir = tmp_path / "sorted" / "others"
+    img = make_jpeg(unclassified_dir / "a.jpg")
+
+    config = _make_groupby_config(tmp_path)
+    state = scanner.ScanState()
+    state.images.append(str(img))
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/move-to-group",
+        json={"paths": [str(img)], "group_name": "NoSuchGroup"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_move_to_group_removes_moved_paths_from_state(tmp_path):
+    """POST /api/move-to-group removes successfully moved paths from state.images."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    unclassified_dir = tmp_path / "sorted" / "others"
+    img_a = make_jpeg(unclassified_dir / "a.jpg")
+    img_b = make_jpeg(unclassified_dir / "b.jpg")
+
+    config = _make_groupby_config(tmp_path)
+    state = scanner.ScanState()
+    state.images.extend([str(img_a), str(img_b)])
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    client.post(
+        "/api/move-to-group",
+        json={"paths": [str(img_a)], "group_name": "Animals"},
+    )
+
+    # img_a was successfully moved — must be removed from replay
+    assert str(img_a) not in state.images
+    # img_b was not moved — must remain
+    assert str(img_b) in state.images
+
+
+def test_move_to_group_applies_group_by_year(tmp_path):
+    """POST /api/move-to-group applies group_by_year when the group has it set."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+    from imagesorter.config import Config, TagGroup, Unclassified
+    import datetime
+
+    unclassified_dir = tmp_path / "sorted" / "others"
+    img = make_jpeg(unclassified_dir / "photo.jpg")
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(tmp_path / "src"),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[
+            TagGroup(name="Dated", tags=["dog"], destination=str(tmp_path / "dated"),
+                     group_by_year=True, group_by_month=False),
+        ],
+        unclassified=Unclassified(
+            enabled=True, folder_name="others",
+            destination=str(tmp_path / "sorted"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+    state = scanner.ScanState()
+    state.images.append(str(img))
+    app = web.create_app(config, state)
+
+    year = datetime.datetime.fromtimestamp(img.stat().st_mtime).year
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/move-to-group",
+        json={"paths": [str(img)], "group_name": "Dated"},
+    )
+
+    assert response.status_code == 200
+    assert (tmp_path / "dated" / str(year) / "photo.jpg").exists()
+
+
+# ── Criterion: _get_file_date duplication removed ────────────────────────────
+
+def test_move_to_group_returns_400_for_path_outside_unclassified_folder(tmp_path):
+    """POST /api/move-to-group returns 400 when any submitted path is outside the unclassified folder."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    # Create a file outside the unclassified folder
+    outside_dir = tmp_path / "outside"
+    outside_img = make_jpeg(outside_dir / "evil.jpg")
+
+    config = _make_groupby_config(tmp_path)
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/move-to-group",
+        json={"paths": [str(outside_img)], "group_name": "Animals"},
+    )
+
+    assert response.status_code == 400, (
+        f"Expected 400 for path outside unclassified folder, got {response.status_code}: {response.text}"
+    )
+
+
+def test_get_file_date_not_duplicated_in_web():
+    """web.py must not define its own _get_file_date; it must reuse sorter._get_image_date."""
+    import inspect
+    from imagesorter import web, sorter
+
+    # web.py must not contain a local _get_file_date function definition
+    web_source = inspect.getsource(web)
+    assert "def _get_file_date" not in web_source, (
+        "web.py must not define a local _get_file_date — reuse sorter._get_image_date instead"
+    )
+
+
+# ── Criterion: GET /api/images serves files within unclassified folder for GroupByTags ──
+
+def test_get_image_serves_file_in_unclassified_folder_groupbytags(tmp_path):
+    """GET /api/images/{path} returns 200 (not 403) for a path inside the unclassified
+    folder when mode=GroupByTags, because thumbnails live there, not in source_folder.
+    """
+    from fastapi.testclient import TestClient
+    from urllib.parse import quote
+    from imagesorter import web
+    from imagesorter.config import Config, TagGroup, Unclassified
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    # Image is in the unclassified folder, not in source_folder
+    unclassified_dir = tmp_path / "sorted" / "others"
+    img = make_jpeg(unclassified_dir / "unclassified.jpg")
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[
+            TagGroup(name="Animals", tags=["dog"], destination=str(tmp_path / "animals"),
+                     group_by_year=False, group_by_month=False),
+        ],
+        unclassified=Unclassified(
+            enabled=True, folder_name="others",
+            destination=str(tmp_path / "sorted"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    client = TestClient(app)
+    encoded = quote(str(img.resolve()), safe="")
+    response = client.get(f"/api/images/{encoded}")
+    assert response.status_code == 200, (
+        f"Expected 200 for unclassified image in GroupByTags mode, got {response.status_code}"
+    )
