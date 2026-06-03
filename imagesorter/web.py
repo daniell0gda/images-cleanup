@@ -79,7 +79,11 @@ def create_app(config: Config, state: ScanState):
     @app.delete("/api/images")
     async def delete_images(paths: list[str] = Body(...)):
         for p in paths:
-            if not _is_path_within(Path(p), source):
+            allowed = _is_path_within(Path(p), source)
+            if not allowed and config.mode == "GroupByTags":
+                unclassified_dest = Path(config.unclassified.destination).resolve()
+                allowed = _is_path_within(Path(p), unclassified_dest)
+            if not allowed:
                 raise HTTPException(status_code=403, detail=f"path outside source_folder: {p}")
         import send2trash
         trashed: list[str] = []

@@ -1778,3 +1778,349 @@ def test_get_image_serves_file_in_unclassified_folder_groupbytags(tmp_path):
     assert response.status_code == 200, (
         f"Expected 200 for unclassified image in GroupByTags mode, got {response.status_code}"
     )
+
+
+# ── groupby-ui-fixes: SSE replay of pre-existing images ──────────────────────
+
+def _make_groupby_scan_config(tmp_path):
+    """Config for GroupByTags scan tests (mode=GroupByTags)."""
+    from imagesorter.config import Config, TagGroup, Unclassified
+    (tmp_path / "src").mkdir(exist_ok=True)
+    return Config(
+        mode="GroupByTags",
+        source_folder=str(tmp_path / "src"),
+        recursive=True,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[
+            TagGroup(name="Animals", tags=["dog"], destination=str(tmp_path / "animals"),
+                     group_by_year=False, group_by_month=False),
+        ],
+        unclassified=Unclassified(
+            enabled=True, folder_name="others",
+            destination=str(tmp_path / "unclassified"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+
+
+def test_sse_replay_sends_preexisting_images_to_late_joining_client(tmp_path):
+    """When a client opens /api/stream after pre-existing images have been emitted,
+    the SSE replay sends one 'image' event per path in state.images.
+    """
+    import asyncio
+    import json
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    config = _make_groupby_scan_config(tmp_path)
+
+    state = scanner.ScanState()
+    # Simulate pre-existing images already discovered before client connects
+    state.images.extend(["/unc/a.jpg", "/unc/b.jpg", "/unc/c.jpg"])
+
+    app = web.create_app(config, state)
+    stream_route = next(r for r in app.router.routes if getattr(r, "path", "") == "/api/stream")
+
+    async def collect():
+        state.loop = asyncio.get_event_loop()
+        resp = await stream_route.endpoint()
+        body_iter = resp.body_iterator
+        image_paths = []
+        # Drain up to 10 chunks
+        for _ in range(10):
+            try:
+                chunk = await asyncio.wait_for(body_iter.__anext__(), timeout=1.0)
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                break
+            if isinstance(chunk, dict) and chunk.get("event") == "image":
+                payload = json.loads(chunk["data"])
+                image_paths.append(payload["path"])
+            if isinstance(chunk, dict) and chunk.get("event") == "complete":
+                break
+        return image_paths
+
+    paths = asyncio.run(collect())
+    assert paths == ["/unc/a.jpg", "/unc/b.jpg", "/unc/c.jpg"], (
+        f"Expected replay of 3 pre-existing image paths; got: {paths}"
+    )
+
+
+def test_scan_images_groupby_emits_preexisting_before_source_scan(tmp_path):
+    """scan_images_groupby emits image events for files already in the unclassified
+    folder before it begins scanning the source folder (which starts the YOLO loop).
+    The pre-existing images must appear in state.images before any source-folder images.
+    """
+    from imagesorter import scanner as sc
+
+    config = _make_groupby_scan_config(tmp_path)
+
+    # Create pre-existing images in the unclassified folder
+    unc_folder = tmp_path / "unclassified" / "others"
+    pre_a = make_jpeg(unc_folder / "pre_a.jpg")
+    pre_b = make_jpeg(unc_folder / "pre_b.jpg")
+
+    # Create a source image that will be processed
+    src = tmp_path / "src"
+    make_jpeg(src / "source.jpg")
+
+    state = sc.ScanState()
+
+    # Track insertion order
+    emit_order: list[str] = []
+    original_emit = state.emit_image
+
+    def tracking_emit(path: str) -> None:
+        emit_order.append(path)
+        original_emit(path)
+
+    state.emit_image = tracking_emit  # type: ignore[method-assign]
+
+    # Mock YOLO so source image is classified as unclassified (no groups match)
+    from unittest.mock import MagicMock, patch
+
+    mock_result = MagicMock()
+    mock_result.boxes = MagicMock()
+    mock_result.boxes.cls = []  # no detections → unclassified
+    mock_model = MagicMock()
+    mock_model.return_value = [mock_result]
+    mock_model.names = {}
+
+    with patch("imagesorter.scanner.YOLO", return_value=mock_model):
+        sc.scan_images_groupby(config, state)
+
+    pre_existing = {str(pre_a), str(pre_b)}
+    # All pre-existing paths must appear before source paths in emission order
+    assert len(emit_order) >= 3, f"Expected at least 3 emitted paths, got: {emit_order}"
+
+    # The first two emitted paths must be the pre-existing ones
+    first_two = set(emit_order[:2])
+    assert first_two == pre_existing, (
+        f"Expected pre-existing images {pre_existing} to be emitted first; "
+        f"actual emission order: {emit_order}"
+    )
+
+
+def test_scan_images_groupby_uses_rglob_for_preexisting(tmp_path):
+    """scan_images_groupby discovers pre-existing images nested in subdirectories
+    (e.g. unclassified/2024/01/img.jpg), proving rglob is used rather than flat iteration.
+    """
+    from imagesorter import scanner as sc
+
+    config = _make_groupby_scan_config(tmp_path)
+
+    # Create nested pre-existing images
+    unc_folder = tmp_path / "unclassified" / "others"
+    nested_img = make_jpeg(unc_folder / "2024" / "01" / "nested.jpg")
+
+    state = sc.ScanState()
+
+    from unittest.mock import MagicMock, patch
+
+    mock_result = MagicMock()
+    mock_result.boxes = MagicMock()
+    mock_result.boxes.cls = []
+    mock_model = MagicMock()
+    mock_model.return_value = [mock_result]
+    mock_model.names = {}
+
+    with patch("imagesorter.scanner.YOLO", return_value=mock_model):
+        sc.scan_images_groupby(config, state)
+
+    assert str(nested_img) in state.images, (
+        f"Nested pre-existing image {nested_img} was not discovered; "
+        f"state.images = {state.images}"
+    )
+
+
+def test_scan_images_groupby_progress_only_for_source_not_preexisting(tmp_path):
+    """scan_images_groupby emits progress events only for the source-folder scan,
+    not for the pre-existing unclassified folder enumeration.
+    The pre-existing scan must not produce any progress events.
+    """
+    from imagesorter import scanner as sc
+    import asyncio
+
+    config = _make_groupby_scan_config(tmp_path)
+
+    # Create pre-existing images
+    unc_folder = tmp_path / "unclassified" / "others"
+    make_jpeg(unc_folder / "pre.jpg")
+
+    # Create source images
+    src = tmp_path / "src"
+    make_jpeg(src / "source1.jpg")
+    make_jpeg(src / "source2.jpg")
+
+    state = sc.ScanState()
+    loop = asyncio.new_event_loop()
+    state.loop = loop
+    queue = state.subscribe()
+
+    from unittest.mock import MagicMock, patch
+
+    mock_result = MagicMock()
+    mock_result.boxes = MagicMock()
+    mock_result.boxes.cls = []
+    mock_model = MagicMock()
+    mock_model.return_value = [mock_result, mock_result]
+    mock_model.names = {}
+
+    import threading
+
+    def run():
+        with patch("imagesorter.scanner.YOLO", return_value=mock_model):
+            sc.scan_images_groupby(config, state)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    async def drain():
+        events = []
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=10.0)
+            except asyncio.TimeoutError:
+                break
+            events.append(item)
+            if item.get("event") == "complete":
+                break
+        return events
+
+    events = loop.run_until_complete(drain())
+    loop.close()
+    t.join(timeout=15)
+
+    progress_events = [e for e in events if e.get("event") == "progress"]
+    # With 2 source images, there should be exactly 2 progress events (one per image)
+    assert len(progress_events) == 2, (
+        f"Expected 2 progress events (one per source image), got {len(progress_events)}: {progress_events}"
+    )
+    # Totals should be 2 (source images only), not 3 (including pre-existing)
+    totals = [e["total"] for e in progress_events]
+    assert all(t == 2 for t in totals), (
+        f"Progress totals should be 2 (source images only), got: {totals}"
+    )
+
+
+def test_scan_images_groupby_empty_unclassified_folder_no_error(tmp_path):
+    """When the unclassified folder does not exist or is empty,
+    scan_images_groupby emits no image events during the pre-existing scan phase
+    and proceeds to the source-folder scan without error.
+    """
+    from imagesorter import scanner as sc
+
+    config = _make_groupby_scan_config(tmp_path)
+
+    # Unclassified folder does NOT exist
+    unc_folder = tmp_path / "unclassified" / "others"
+    assert not unc_folder.exists()
+
+    state = sc.ScanState()
+
+    from unittest.mock import MagicMock, patch
+
+    mock_model = MagicMock()
+    mock_model.return_value = []
+    mock_model.names = {}
+
+    # Should not raise
+    with patch("imagesorter.scanner.YOLO", return_value=mock_model):
+        sc.scan_images_groupby(config, state)
+
+    assert state.images == [], f"Expected no pre-existing images emitted; got: {state.images}"
+    assert state.scan_complete, "scan_images_groupby should complete normally"
+
+
+# ── Criterion: DELETE /api/images returns 403 for all GroupByTags images fix ──
+
+def test_delete_images_groupbytags_allows_unclassified_destination(tmp_path, monkeypatch):
+    """DELETE /api/images returns 200 (not 403) for a path inside the unclassified
+    destination folder when mode=GroupByTags, mirroring the GET endpoint fix.
+    """
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+    from imagesorter.config import Config, TagGroup, Unclassified
+
+    src = tmp_path / "src"
+    src.mkdir()
+
+    # Image is in the unclassified destination, not in source_folder
+    unclassified_dir = tmp_path / "sorted" / "others"
+    img = make_jpeg(unclassified_dir / "unclassified.jpg")
+
+    config = Config(
+        mode="GroupByTags",
+        source_folder=str(src),
+        recursive=False,
+        copy_instead_of_move=False,
+        include_formats=[".jpg"],
+        threads=1,
+        log_level="DEBUG",
+        log_file=None,
+        tag_groups=[
+            TagGroup(name="Animals", tags=["dog"], destination=str(tmp_path / "animals"),
+                     group_by_year=False, group_by_month=False),
+        ],
+        unclassified=Unclassified(
+            enabled=True, folder_name="others",
+            destination=str(tmp_path / "sorted"),
+            group_by_year=False, group_by_month=False,
+        ),
+        similarity_threshold=0.96,
+    )
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    monkeypatch.setattr("send2trash.send2trash", lambda p: None)
+
+    client = TestClient(app)
+    response = client.request(
+        "DELETE",
+        "/api/images",
+        json=[str(img.resolve())],
+    )
+
+    assert response.status_code == 200, (
+        f"Expected 200 for unclassified image in GroupByTags mode, got {response.status_code}: {response.text}"
+    )
+
+
+def test_scan_images_groupby_empty_unclassified_folder_proceeds(tmp_path):
+    """When the unclassified folder exists but is empty,
+    no image events are emitted during the pre-existing phase and source scan proceeds.
+    """
+    from imagesorter import scanner as sc
+
+    config = _make_groupby_scan_config(tmp_path)
+
+    # Create empty unclassified folder
+    unc_folder = tmp_path / "unclassified" / "others"
+    unc_folder.mkdir(parents=True)
+
+    # Add a source image to verify the source scan runs
+    src = tmp_path / "src"
+    make_jpeg(src / "source.jpg")
+
+    state = sc.ScanState()
+
+    from unittest.mock import MagicMock, patch
+
+    mock_result = MagicMock()
+    mock_result.boxes = MagicMock()
+    mock_result.boxes.cls = []
+    mock_model = MagicMock()
+    mock_model.return_value = [mock_result]
+    mock_model.names = {}
+
+    with patch("imagesorter.scanner.YOLO", return_value=mock_model):
+        sc.scan_images_groupby(config, state)
+
+    # No pre-existing images from empty folder
+    # But source image (unclassified by YOLO) should appear
+    assert state.scan_complete, "scan should complete without error"
