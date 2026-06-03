@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { MantineProvider } from "@mantine/core";
 import { Notifications } from "@mantine/notifications";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import App from "./App";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 type Listener = (evt: MessageEvent) => void;
 
@@ -1031,11 +1036,11 @@ describe("App virtual scrolling", () => {
   });
 
   it("delete flow removes groups from virtual list — no blank rows, total height shrinks", async () => {
-    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+    vi.stubGlobal("fetch", (url: string, _opts?: RequestInit) => {
       if (url === "/api/config") {
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ similarity_threshold: 0.96 }) });
       }
-      if (url === "/api/images" && opts?.method === "DELETE") {
+      if (url === "/api/images" && _opts?.method === "DELETE") {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({ trashed: ["/g0/a.jpg"], failed: [] }),
@@ -1491,18 +1496,12 @@ describe("App modal nav when activeGroup filtered out", () => {
 describe("App source compliance", () => {
   it("contains the 'Append new group' comment (preserve order)", () => {
     // This comment was deleted without cause — surgical-change rule requires restoration.
-    const src = require("fs").readFileSync(
-      require("path").resolve(__dirname, "App.tsx"),
-      "utf-8"
-    );
+    const src = fs.readFileSync(path.resolve(__dirname, "App.tsx"), "utf-8");
     expect(src).toContain("// Append new group (preserve order — never reorder existing)");
   });
 
   it("contains the 'Update the existing row in place' comment", () => {
-    const src = require("fs").readFileSync(
-      require("path").resolve(__dirname, "App.tsx"),
-      "utf-8"
-    );
+    const src = fs.readFileSync(path.resolve(__dirname, "App.tsx"), "utf-8");
     expect(src).toContain("// Update the existing row in place");
   });
 });
@@ -1511,15 +1510,11 @@ describe("App source compliance", () => {
 
 describe("groupby-ui-fixes: page title", () => {
   it("index.html title does not contain 'Similarity'", () => {
-    const fs = require("fs");
-    const path = require("path");
     const html = fs.readFileSync(path.resolve(__dirname, "../index.html"), "utf-8");
     expect(html).not.toMatch(/similarity/i);
   });
 
   it("index.html title is 'Image Sorter'", () => {
-    const fs = require("fs");
-    const path = require("path");
     const html = fs.readFileSync(path.resolve(__dirname, "../index.html"), "utf-8");
     expect(html).toContain("<title>Image Sorter</title>");
   });
@@ -1614,7 +1609,7 @@ describe("groupby-ui-fixes: heading", () => {
 // ── GroupByTags mode frontend tests ──────────────────────────────────────────
 
 function mockGroupByTagsFetch(tagGroups = [{ name: "Animals", destination: "/sorted/animals" }]) {
-  vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+  vi.stubGlobal("fetch", (url: string, _opts?: RequestInit) => {
     if (url === "/api/config") {
       return Promise.resolve({
         ok: true,
@@ -1813,7 +1808,7 @@ describe("GroupByTags: move to sorted — single group", () => {
 
   it("clicking 'Move to sorted' with one tag group calls POST /api/move-to-group without a picker", async () => {
     const moveCalls: unknown[] = [];
-    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+    vi.stubGlobal("fetch", (url: string, _opts?: RequestInit) => {
       if (url === "/api/config") {
         return Promise.resolve({
           ok: true,
@@ -1826,7 +1821,7 @@ describe("GroupByTags: move to sorted — single group", () => {
         });
       }
       if (url === "/api/move-to-group") {
-        moveCalls.push(JSON.parse(opts?.body as string));
+        moveCalls.push(JSON.parse(_opts?.body as string));
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve({ results: [{ path: "/sorted/others/a.jpg", ok: true }] }),
@@ -1868,7 +1863,7 @@ describe("GroupByTags: move to sorted — single group", () => {
   });
 
   it("after successful move, moved images are removed from the grid", async () => {
-    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+    vi.stubGlobal("fetch", (url: string, _opts?: RequestInit) => {
       if (url === "/api/config") {
         return Promise.resolve({
           ok: true,
