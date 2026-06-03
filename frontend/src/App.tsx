@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ActionIcon,
@@ -65,6 +65,9 @@ export default function App() {
   const [deleting, setDeleting] = useState(false);
   const [similarityMin, setSimilarityMin] = useState<number | null>(null);
   const [sliderValue, setSliderValue] = useState<number>(0.0);
+  const [, startTransition] = useTransition();
+  const pendingGroupUpdates = useRef<SimilarityGroup[]>([]);
+  const pendingImages = useRef<string[]>([]);
 
   useEffect(() => {
     fetch("/api/config")
@@ -84,22 +87,11 @@ export default function App() {
   useEffect(() => {
     const es = new EventSource("/api/stream");
     es.addEventListener("group", (evt: MessageEvent) => {
-      const data: SimilarityGroup = JSON.parse(evt.data);
-      setGroups((prev) => {
-        const idx = prev.findIndex((g) => g.id === data.id);
-        if (idx === -1) {
-          // Append new group (preserve order — never reorder existing)
-          return [...prev, data];
-        }
-        // Update the existing row in place
-        const next = prev.slice();
-        next[idx] = data;
-        return next;
-      });
+      pendingGroupUpdates.current.push(JSON.parse(evt.data));
     });
     es.addEventListener("image", (evt: MessageEvent) => {
       const data: { path: string } = JSON.parse(evt.data);
-      setImages((prev) => [...prev, data.path]);
+      pendingImages.current.push(data.path);
     });
     es.addEventListener("progress", (evt: MessageEvent) => {
       const data: { scanned: number; total: number } = JSON.parse(evt.data);
@@ -116,10 +108,41 @@ export default function App() {
     es.onerror = () => {
       setStreamError("Connection to scanner lost");
     };
-    return () => {
-      es.close();
-    };
+    return () => es.close();
   }, []);
+
+  // Flush batched SSE events every 100 ms as low-priority transitions so
+  // user interactions (checkbox clicks) always interrupt them immediately.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const groupUpdates = pendingGroupUpdates.current.splice(0);
+      const imageUpdates = pendingImages.current.splice(0);
+      if (groupUpdates.length === 0 && imageUpdates.length === 0) return;
+      startTransition(() => {
+        if (groupUpdates.length > 0) {
+          setGroups((prev) => {
+            let next = prev;
+            for (const data of groupUpdates) {
+              const idx = next.findIndex((g) => g.id === data.id);
+              if (idx === -1) {
+                // Append new group (preserve order — never reorder existing)
+                next = [...next, data];
+              } else {
+                // Update the existing row in place
+                next = next.slice();
+                next[idx] = data;
+              }
+            }
+            return next;
+          });
+        }
+        if (imageUpdates.length > 0) {
+          setImages((prev) => [...prev, ...imageUpdates]);
+        }
+      });
+    }, 100);
+    return () => clearInterval(id);
+  }, [startTransition]);
 
   const toggleSelected = (path: string) => {
     setSelected((prev) => {
