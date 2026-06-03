@@ -1485,3 +1485,381 @@ describe("App modal nav when activeGroup filtered out", () => {
     expect(screen.getByTestId("modal-prev")).toBeDisabled();
   });
 });
+
+// ── Compliance: deleted comments must be restored ────────────────────────────
+
+describe("App source compliance", () => {
+  it("contains the 'Append new group' comment (preserve order)", () => {
+    // This comment was deleted without cause — surgical-change rule requires restoration.
+    const src = require("fs").readFileSync(
+      require("path").resolve(__dirname, "App.tsx"),
+      "utf-8"
+    );
+    expect(src).toContain("// Append new group (preserve order — never reorder existing)");
+  });
+
+  it("contains the 'Update the existing row in place' comment", () => {
+    const src = require("fs").readFileSync(
+      require("path").resolve(__dirname, "App.tsx"),
+      "utf-8"
+    );
+    expect(src).toContain("// Update the existing row in place");
+  });
+});
+
+// ── GroupByTags mode frontend tests ──────────────────────────────────────────
+
+function mockGroupByTagsFetch(tagGroups = [{ name: "Animals", destination: "/sorted/animals" }]) {
+  vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+    if (url === "/api/config") {
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            mode: "GroupByTags",
+            similarity_threshold: 0.96,
+            tag_groups: tagGroups,
+          }),
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ results: [] }),
+    });
+  });
+}
+
+describe("GroupByTags: flat image grid", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    mockGroupByTagsFetch();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders individual image cards when mode is GroupByTags (not row-per-group layout)", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    await waitFor(() => screen.queryByText("GroupByTags") !== null || true);
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+      es.emit("image", { path: "/sorted/others/b.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /sorted/others/a.jpg")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Select /sorted/others/b.jpg")).toBeInTheDocument();
+  });
+
+  it("does not render the similarity slider in GroupByTags mode", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /sorted/others/a.jpg")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+  });
+
+  it("does not render column header buttons in GroupByTags mode", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /sorted/others/a.jpg")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByTestId("col-btn-1")).not.toBeInTheDocument();
+  });
+
+  it("shows 'Move to sorted' button in GroupByTags mode", async () => {
+    renderApp();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /move to sorted/i })).toBeInTheDocument();
+    });
+  });
+
+  it("'Move to sorted' button is disabled when no images are selected", async () => {
+    renderApp();
+    await waitFor(() => {
+      const btn = screen.getByRole("button", { name: /move to sorted/i });
+      expect(btn).toBeDisabled();
+    });
+  });
+
+  it("'Move to sorted' button is enabled when at least one image is selected", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /sorted/others/a.jpg")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Select /sorted/others/a.jpg"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /move to sorted/i })).not.toBeDisabled();
+    });
+  });
+});
+
+describe("GroupByTags: modal navigation", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    mockGroupByTagsFetch();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("clicking a thumbnail opens a detail modal with a single image", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+      es.emit("image", { path: "/sorted/others/b.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("img").length).toBeGreaterThan(0);
+    });
+
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[0]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("modal-next")).toBeInTheDocument();
+      expect(screen.getByTestId("modal-prev")).toBeInTheDocument();
+    });
+  });
+
+  it("Next/Previous navigate through the flat image list", async () => {
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+      es.emit("image", { path: "/sorted/others/b.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("img").length).toBeGreaterThan(0);
+    });
+
+    // Open first image
+    const images = screen.getAllByRole("img");
+    act(() => {
+      fireEvent.click(images[0]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("modal-prev")).toBeDisabled();
+      expect(screen.getByTestId("modal-next")).not.toBeDisabled();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("modal-next"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("modal-next")).toBeDisabled();
+      expect(screen.getByTestId("modal-prev")).not.toBeDisabled();
+    });
+  });
+});
+
+describe("GroupByTags: move to sorted — single group", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("clicking 'Move to sorted' with one tag group calls POST /api/move-to-group without a picker", async () => {
+    const moveCalls: unknown[] = [];
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      if (url === "/api/config") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              mode: "GroupByTags",
+              similarity_threshold: 0.96,
+              tag_groups: [{ name: "Animals", destination: "/sorted/animals" }],
+            }),
+        });
+      }
+      if (url === "/api/move-to-group") {
+        moveCalls.push(JSON.parse(opts?.body as string));
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ results: [{ path: "/sorted/others/a.jpg", ok: true }] }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /sorted/others/a.jpg")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Select /sorted/others/a.jpg"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /move to sorted/i })).not.toBeDisabled();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /move to sorted/i }));
+    });
+
+    await waitFor(() => {
+      expect(moveCalls.length).toBe(1);
+    });
+
+    // No picker modal should have appeared — the move was direct
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect((moveCalls[0] as { group_name: string }).group_name).toBe("Animals");
+  });
+
+  it("after successful move, moved images are removed from the grid", async () => {
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      if (url === "/api/config") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              mode: "GroupByTags",
+              similarity_threshold: 0.96,
+              tag_groups: [{ name: "Animals", destination: "/sorted/animals" }],
+            }),
+        });
+      }
+      if (url === "/api/move-to-group") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              results: [{ path: "/sorted/others/a.jpg", ok: true }],
+            }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+      es.emit("image", { path: "/sorted/others/b.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /sorted/others/a.jpg")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Select /sorted/others/a.jpg"));
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /move to sorted/i }));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Select /sorted/others/a.jpg")).not.toBeInTheDocument();
+    });
+    // b.jpg should still be there
+    expect(screen.getByLabelText("Select /sorted/others/b.jpg")).toBeInTheDocument();
+  });
+});
+
+describe("GroupByTags: move to sorted — multiple groups picker", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("with multiple tag groups, clicking 'Move to sorted' opens a picker modal", async () => {
+    mockGroupByTagsFetch([
+      { name: "Animals", destination: "/sorted/animals" },
+      { name: "Vehicles", destination: "/sorted/vehicles" },
+    ]);
+
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("image", { path: "/sorted/others/a.jpg" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Select /sorted/others/a.jpg")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Select /sorted/others/a.jpg"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /move to sorted/i })).not.toBeDisabled();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /move to sorted/i }));
+    });
+
+    await waitFor(() => {
+      // Picker modal shows group buttons
+      expect(screen.getByRole("button", { name: /animals/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /vehicles/i })).toBeInTheDocument();
+    });
+  });
+});
