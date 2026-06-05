@@ -10,7 +10,6 @@ import {
   Loader,
   Modal,
   Notification,
-  SimpleGrid,
   Slider,
   Stack,
   Text,
@@ -42,6 +41,7 @@ interface ComparingState {
 
 const THUMB_SIZE = 100;
 const MODAL_IMAGE_HEIGHT = 360;
+const GROUPBY_COLS = 6;
 
 function imageUrl(path: string): string {
   return `/api/images/${encodeURIComponent(path)}`;
@@ -216,6 +216,14 @@ export default function App() {
     [visibleGroups]
   );
 
+  const groupByRows = useMemo(() => {
+    const rows: string[][] = [];
+    for (let i = 0; i < images.length; i += GROUPBY_COLS) {
+      rows.push(images.slice(i, i + GROUPBY_COLS));
+    }
+    return rows;
+  }, [images]);
+
   const toggleColumn = (n: number) => {
     const nthPaths = visibleGroups
       .filter((g) => g.paths.length >= n)
@@ -238,6 +246,13 @@ export default function App() {
     count: visibleGroups.length,
     getScrollElement: () => scrollParentRef.current,
     estimateSize: () => 130,
+    overscan: 3,
+  });
+
+  const flatGridVirtualizer = useVirtualizer({
+    count: groupByRows.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => THUMB_SIZE + 32,
     overscan: 3,
   });
 
@@ -417,26 +432,49 @@ export default function App() {
                 <Text c="dimmed">No unclassified images found.</Text>
               </Stack>
             )}
-            <SimpleGrid cols={6} spacing="sm">
-              {images.map((path, idx) => (
-                <Stack key={path} gap={4} align="center">
-                  <Image
-                    src={imageUrl(path)}
-                    w={THUMB_SIZE}
-                    h={THUMB_SIZE}
-                    fit="cover"
-                    radius="sm"
-                    onClick={() => openImageModal(idx)}
-                    style={{ cursor: "pointer" }}
-                  />
-                  <Checkbox
-                    checked={selected.has(path)}
-                    onChange={() => toggleSelected(path)}
-                    aria-label={`Select ${path}`}
-                  />
-                </Stack>
-              ))}
-            </SimpleGrid>
+            <div
+              ref={scrollParentRef}
+              data-virtual-scroll="true"
+              style={{ height: "calc(100vh - 60px - var(--mantine-spacing-md) * 2)", overflowY: "auto" }}
+            >
+              <div style={{ height: flatGridVirtualizer.getTotalSize(), position: "relative" }}>
+                {flatGridVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const rowImages = groupByRows[virtualRow.index];
+                  return (
+                    <div
+                      key={virtualRow.index}
+                      data-index={virtualRow.index}
+                      ref={flatGridVirtualizer.measureElement}
+                      style={{ position: "absolute", top: virtualRow.start, width: "100%" }}
+                    >
+                      <Group gap="sm" pb="sm">
+                        {rowImages.map((path, colIdx) => {
+                          const imgIdx = virtualRow.index * GROUPBY_COLS + colIdx;
+                          return (
+                            <Stack key={path} gap={4} align="center">
+                              <Image
+                                src={imageUrl(path)}
+                                w={THUMB_SIZE}
+                                h={THUMB_SIZE}
+                                fit="cover"
+                                radius="sm"
+                                onClick={() => openImageModal(imgIdx)}
+                                style={{ cursor: "pointer" }}
+                              />
+                              <Checkbox
+                                checked={selected.has(path)}
+                                onChange={() => toggleSelected(path)}
+                                aria-label={`Select ${path}`}
+                              />
+                            </Stack>
+                          );
+                        })}
+                      </Group>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </>
         ) : (
           <>
