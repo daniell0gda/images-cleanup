@@ -52,6 +52,7 @@ export default function App() {
   const [images, setImages] = useState<string[]>([]);
   const [mode, setMode] = useState<string>("SimilaritySearch");
   const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
+  const [launcherUrl, setLauncherUrl] = useState<string | null>(null);
   const [scanComplete, setScanComplete] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
@@ -72,11 +73,12 @@ export default function App() {
   useEffect(() => {
     fetch("/api/config")
       .then((r) => r.json())
-      .then((cfg: { similarity_threshold: number; mode?: string; tag_groups?: TagGroup[] }) => {
+      .then((cfg: { similarity_threshold: number; mode?: string; tag_groups?: TagGroup[]; launcher_url?: string }) => {
         setSimilarityMin(cfg.similarity_threshold);
         setSliderValue(cfg.similarity_threshold);
         if (cfg.mode) setMode(cfg.mode);
         if (cfg.tag_groups) setTagGroups(cfg.tag_groups);
+        if (cfg.launcher_url) setLauncherUrl(cfg.launcher_url);
       })
       .catch(() => {
         setSimilarityMin(0.0);
@@ -381,6 +383,9 @@ export default function App() {
               <Text size="sm" c="dimmed">
                 Scan complete
               </Text>
+            )}
+            {scanComplete && launcherUrl && (
+              <a href={launcherUrl}>Back to launcher</a>
             )}
             <Button variant="default" onClick={selectVisiblePhotos}>
               Select Visible Photos

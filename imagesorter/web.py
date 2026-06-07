@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -105,6 +106,9 @@ def create_app(config: Config, state: ScanState):
                 {"name": g.name, "destination": g.destination}
                 for g in config.tag_groups
             ]
+        launcher_url = os.environ.get("LAUNCHER_URL")
+        if launcher_url:
+            result["launcher_url"] = launcher_url
         return result
 
     @app.post("/api/move-to-group")

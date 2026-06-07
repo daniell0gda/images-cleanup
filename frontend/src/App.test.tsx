@@ -1915,6 +1915,70 @@ describe("GroupByTags: move to sorted — single group", () => {
   });
 });
 
+// ── "Back to launcher" link criteria ─────────────────────────────────────────
+
+describe("Back to launcher link", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows a 'Back to launcher' link after scan completes when launcher_url is set", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            mode: "SimilaritySearch",
+            similarity_threshold: 0.96,
+            launcher_url: "http://localhost:7000",
+          }),
+      })
+    );
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("complete", {});
+    });
+
+    await waitFor(() => {
+      const link = screen.getByRole("link", { name: /back to launcher/i });
+      expect(link).toBeInTheDocument();
+      expect(link).toHaveAttribute("href", "http://localhost:7000");
+    });
+  });
+
+  it("does not show 'Back to launcher' link when launcher_url is absent in config", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            mode: "SimilaritySearch",
+            similarity_threshold: 0.96,
+            // no launcher_url
+          }),
+      })
+    );
+    renderApp();
+    const es = latestEventSource();
+
+    act(() => {
+      es.emit("complete", {});
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("link", { name: /back to launcher/i })).not.toBeInTheDocument();
+    });
+  });
+});
+
 describe("GroupByTags: move to sorted — multiple groups picker", () => {
   beforeEach(() => {
     MockEventSource.instances = [];

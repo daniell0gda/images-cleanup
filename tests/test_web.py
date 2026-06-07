@@ -1522,6 +1522,47 @@ def test_api_config_returns_tag_groups_for_groupbytags(tmp_path):
     ]
 
 
+def test_api_config_includes_launcher_url_when_env_set(tmp_path, monkeypatch):
+    """GET /api/config returns launcher_url equal to LAUNCHER_URL env var when set."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path)
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    monkeypatch.setenv("LAUNCHER_URL", "http://localhost:7000")
+
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("launcher_url") == "http://localhost:7000"
+
+
+def test_api_config_omits_launcher_url_when_env_not_set(tmp_path, monkeypatch):
+    """GET /api/config omits launcher_url (or returns null) when LAUNCHER_URL is not set."""
+    from fastapi.testclient import TestClient
+    from imagesorter import web
+
+    src = tmp_path / "src"
+    src.mkdir()
+    config = _make_config(tmp_path)
+    state = scanner.ScanState()
+    app = web.create_app(config, state)
+
+    monkeypatch.delenv("LAUNCHER_URL", raising=False)
+
+    client = TestClient(app)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    # launcher_url should be absent or null
+    assert body.get("launcher_url") is None
+
+
 def test_api_config_omits_tag_groups_for_similarity_search(tmp_path):
     """GET /api/config does not include tag_groups when mode=SimilaritySearch."""
     from fastapi.testclient import TestClient
