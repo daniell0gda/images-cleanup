@@ -196,9 +196,11 @@ def serve(config: Config) -> None:
         )
         sys.exit(1)
 
-    port = find_free_port(8080)
+    host = os.environ.get("SORTER_HOST", "127.0.0.1")
+    port_env = os.environ.get("SORTER_PORT")
+    port = int(port_env) if port_env else find_free_port(8080)
     url = f"http://127.0.0.1:{port}"
-    logger.info("Web UI listening on %s", url)
+    logger.info("Web UI listening on %s (bind %s:%d)", url, host, port)
 
     state = ScanState()
     if config.mode == "GroupByTags":
@@ -222,8 +224,9 @@ def serve(config: Config) -> None:
         )
     scan_thread.start()
 
-    webbrowser.open(url)
+    if os.environ.get("IMAGESORTER_NO_BROWSER") != "1":
+        webbrowser.open(url)
 
     import uvicorn
     app = create_app(config, state)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info")

@@ -385,7 +385,7 @@ export default function App() {
               </Text>
             )}
             {scanComplete && launcherUrl && (
-              <a href={launcherUrl}>Back to launcher</a>
+              <a href={`http://${window.location.hostname}:7000`}>Back to launcher</a>
             )}
             <Button variant="default" onClick={selectVisiblePhotos}>
               Select Visible Photos
