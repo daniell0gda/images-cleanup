@@ -1,0 +1,15 @@
+services:
+  image-sorter:
+    build: .
+    image: image-sorter:latest
+    container_name: image-sorter
+    restart: unless-stopped
+    ports:
+      - "7000:7000"   # launcher UI  -> open http://<nas-ip>:7000
+      - "8080:8080"   # sorter UI    -> opened from the launcher's "Open UI" link
+    volumes:
+      # Config files (config_<user>_<groupby|similarity>.yaml). Read-only.
+      - ./configs:/configs:ro
+      # Your photo library + sort destinations. Point your configs at /data/...
+      # Change the host path to your TrueNAS dataset:
+      - /mnt/YOUR_POOL/photos:/data

@@ -1,0 +1,25 @@
+# VCS / IDE / caches
+.git
+.idea
+.claude
+.gen
+.pytest_cache
+**/__pycache__
+
+# Node deps and committed build output (frontends are rebuilt in the image)
+**/node_modules
+frontend/dist
+launcher/dist
+
+# Runtime artifacts and data — never bake these into the image
+*.log
+sorted/
+configs/
+
+# Unused model weights (only yolo11s.pt is loaded)
+yolo26n.pt
+
+# Tests
+tests/
+launcher/tests/
+**/*.test.tsx
