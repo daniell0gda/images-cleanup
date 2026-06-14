@@ -15,5 +15,13 @@ dependencies = [
     "Pillow",
 ]
 
+[project.optional-dependencies]
+web = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sse-starlette",
+    "pydantic",
+]
+
 [project.scripts]
 imagesorter = "imagesorter.__main__:main"
