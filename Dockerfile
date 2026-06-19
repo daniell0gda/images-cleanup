@@ -46,12 +46,16 @@ COPY --from=frontend-build /build/launcher/dist   ./launcher/dist
 # Bake in the YOLO weights so the first run works fully offline
 COPY yolo11s.pt ./
 
-# Container defaults: bind the sorter on all interfaces at a fixed port,
-# never try to open a desktop browser, read configs from a mounted volume.
+# Container defaults: bind the sorter on all interfaces at a fixed internal
+# port, never try to open a desktop browser, read configs from a mounted volume.
+# The *_PUBLIC_PORT values are the host ports the UIs are reached on; override
+# them in compose if you remap the published ports.
 ENV SORTER_HOST=0.0.0.0 \
     SORTER_PORT=8080 \
     IMAGESORTER_NO_BROWSER=1 \
-    CONFIGS_DIR=/configs
+    CONFIGS_DIR=/configs \
+    LAUNCHER_PUBLIC_PORT=7000 \
+    SORTER_PUBLIC_PORT=8080
 
 EXPOSE 7000 8080
 

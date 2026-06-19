@@ -1928,7 +1928,7 @@ describe("Back to launcher link", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows a 'Back to launcher' link after scan completes when launcher_url is set", async () => {
+  it("shows a 'Back to launcher' link after scan completes when launcher_port is set", async () => {
     vi.stubGlobal("fetch", () =>
       Promise.resolve({
         ok: true,
@@ -1936,7 +1936,7 @@ describe("Back to launcher link", () => {
           Promise.resolve({
             mode: "SimilaritySearch",
             similarity_threshold: 0.96,
-            launcher_url: "http://localhost:7000",
+            launcher_port: 7000,
           }),
       })
     );
@@ -1954,7 +1954,7 @@ describe("Back to launcher link", () => {
     });
   });
 
-  it("does not show 'Back to launcher' link when launcher_url is absent in config", async () => {
+  it("does not show 'Back to launcher' link when launcher_port is absent in config", async () => {
     vi.stubGlobal("fetch", () =>
       Promise.resolve({
         ok: true,
@@ -1962,7 +1962,7 @@ describe("Back to launcher link", () => {
           Promise.resolve({
             mode: "SimilaritySearch",
             similarity_threshold: 0.96,
-            // no launcher_url
+            // no launcher_port
           }),
       })
     );

@@ -141,11 +141,12 @@ def test_post_jobs_returns_409_when_job_already_running(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Criterion: subprocess receives LAUNCHER_URL env var
+# Criterion: subprocess receives LAUNCHER_PUBLIC_PORT env var
 # ---------------------------------------------------------------------------
 
 def test_subprocess_receives_launcher_url_env(tmp_path, monkeypatch):
-    """The spawned subprocess gets LAUNCHER_URL=http://<host>:7000 in its environment."""
+    """The spawned subprocess gets LAUNCHER_PUBLIC_PORT in its environment so the
+    sorter can build a 'Back to launcher' link on the correct host port."""
     (tmp_path / "config_alice_groupby.yaml").write_text("mode: GroupByTags\n")
 
     from fastapi.testclient import TestClient
@@ -166,8 +167,8 @@ def test_subprocess_receives_launcher_url_env(tmp_path, monkeypatch):
     client = TestClient(app)
     client.post("/api/jobs", json={"user": "alice", "mode": "groupby"})
 
-    assert "LAUNCHER_URL" in captured_env, f"LAUNCHER_URL not in env: {captured_env}"
-    assert captured_env["LAUNCHER_URL"].endswith(":7000")
+    assert "LAUNCHER_PUBLIC_PORT" in captured_env, f"LAUNCHER_PUBLIC_PORT not in env: {captured_env}"
+    assert captured_env["LAUNCHER_PUBLIC_PORT"] == "7000"
 
 
 # ---------------------------------------------------------------------------

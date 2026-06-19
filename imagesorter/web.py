@@ -106,9 +106,9 @@ def create_app(config: Config, state: ScanState):
                 {"name": g.name, "destination": g.destination}
                 for g in config.tag_groups
             ]
-        launcher_url = os.environ.get("LAUNCHER_URL")
-        if launcher_url:
-            result["launcher_url"] = launcher_url
+        launcher_port = os.environ.get("LAUNCHER_PUBLIC_PORT")
+        if launcher_port:
+            result["launcher_port"] = int(launcher_port)
         return result
 
     @app.post("/api/move-to-group")

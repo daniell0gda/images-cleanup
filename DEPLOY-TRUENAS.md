@@ -108,7 +108,15 @@ docker compose up -d --build
 - **Adding TrueNAS Apps UI instead of CLI:** you can also register this under
   **Apps → Discover → Custom App** using the same image and the two port +
   volume mappings above. The compose route is simpler for a single host.
-- If port 7000 or 8080 is already used on the NAS, remap the host side in
-  `docker-compose.yml` (e.g. `"17000:7000"`). The launcher's link to the sorter
-  assumes the sorter is reachable on host port **8080**, so if you remap 8080
-  also update the launcher link expectation accordingly.
+- **Remapping ports.** If 7000 or 8080 is already used on the NAS, remap the
+  host side in `docker-compose.yml` (e.g. `"7123:7000"` and `"8123:8080"`) **and**
+  set the matching public ports so the in-browser links work:
+
+  ```yaml
+      environment:
+        - LAUNCHER_PUBLIC_PORT=7123   # host port mapped to container 7000
+        - SORTER_PUBLIC_PORT=8123     # host port mapped to container 8080
+  ```
+
+  The frontends use these to build the **Open UI** and **Back to launcher**
+  links. Without them the links would point at the internal 7000/8080.

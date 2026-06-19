@@ -51,6 +51,7 @@ function LauncherApp() {
   const [users, setUsers] = useState<UserEntry[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus>({ status: "idle" });
+  const [sorterPort, setSorterPort] = useState<number>(8080);
 
   const fetchUsers = useCallback(() => {
     fetch("/api/users")
@@ -69,6 +70,12 @@ function LauncherApp() {
   useEffect(() => {
     fetchUsers();
     fetchStatus();
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((cfg: { sorter_port?: number }) => {
+        if (cfg.sorter_port) setSorterPort(cfg.sorter_port);
+      })
+      .catch(() => {});
     const interval = setInterval(fetchStatus, 2000);
     return () => clearInterval(interval);
   }, [fetchUsers, fetchStatus]);
@@ -93,7 +100,7 @@ function LauncherApp() {
 
   const running = jobStatus.status === "running" ? jobStatus : null;
   const selectedEntry = users.find((u) => u.user === selected) ?? null;
-  const sorterUrl = `http://${window.location.hostname}:8080`;
+  const sorterUrl = `http://${window.location.hostname}:${sorterPort}`;
 
   return (
     <Box className={classes.root}>

@@ -7,6 +7,11 @@ services:
     ports:
       - "7000:7000"   # launcher UI  -> open http://<nas-ip>:7000
       - "8080:8080"   # sorter UI    -> opened from the launcher's "Open UI" link
+    # If you change the HOST side of the port mappings above, set these to match
+    # so the in-browser links point at the right ports:
+    # environment:
+    #   - LAUNCHER_PUBLIC_PORT=7000   # host port mapped to container 7000
+    #   - SORTER_PUBLIC_PORT=8080     # host port mapped to container 8080
     volumes:
       # Config files (config_<user>_<groupby|similarity>.yaml). Read-only.
       - ./configs:/configs:ro

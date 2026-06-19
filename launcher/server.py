@@ -19,6 +19,18 @@ def _configs_dir() -> Path:
     return Path(os.environ.get("CONFIGS_DIR", "./configs"))
 
 
+def _launcher_public_port() -> str:
+    """Host port the launcher UI is reachable on (may differ from the internal
+    7000 when remapped in Docker)."""
+    return os.environ.get("LAUNCHER_PUBLIC_PORT", "7000")
+
+
+def _sorter_public_port() -> int:
+    """Host port the sorter UI is reachable on (may differ from the internal
+    8080 when remapped in Docker)."""
+    return int(os.environ.get("SORTER_PUBLIC_PORT", "8080"))
+
+
 _CONFIG_RE = re.compile(r"^config_(.+?)_(groupby|similarity)\.yaml$")
 
 
@@ -67,6 +79,10 @@ def create_app(state: _JobState | None = None, dist_dir: Path | None = None):
 
     app = FastAPI()
 
+    @app.get("/api/config")
+    async def get_config():
+        return {"sorter_port": _sorter_public_port()}
+
     @app.get("/api/users")
     async def get_users():
         return _scan_users(_configs_dir())
@@ -89,7 +105,7 @@ def create_app(state: _JobState | None = None, dist_dir: Path | None = None):
         if not config_file.exists():
             raise HTTPException(status_code=404, detail=f"Config not found: {config_file}")
 
-        env = {**os.environ, "LAUNCHER_URL": "http://127.0.0.1:7000"}
+        env = {**os.environ, "LAUNCHER_PUBLIC_PORT": _launcher_public_port()}
         state.proc = subprocess.Popen(
             [sys.executable, "-m", "imagesorter", "--config", str(config_file)],
             env=env,
