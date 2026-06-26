@@ -31,3 +31,7 @@ frontend/tsconfig.tsbuildinfo
 # User config
 config.yaml
 quick-start.md
+
+# Phone-sync runtime artifacts
+sync.db
+inbox/

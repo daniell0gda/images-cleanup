@@ -5,8 +5,10 @@ import os
 import re
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
+from fastapi import Request
 from pydantic import BaseModel
 
 
@@ -17,6 +19,14 @@ class _JobRequest(BaseModel):
 
 def _configs_dir() -> Path:
     return Path(os.environ.get("CONFIGS_DIR", "./configs"))
+
+
+def _inbox_base() -> Path:
+    return Path(os.environ.get("INBOX_BASE", "./inbox"))
+
+
+def _sync_db_path() -> Path:
+    return Path(os.environ.get("SYNC_DB", "./sync.db"))
 
 
 def _launcher_public_port() -> str:
@@ -70,7 +80,12 @@ def shutdown_handler(state: _JobState) -> None:
             pass
 
 
-def create_app(state: _JobState | None = None, dist_dir: Path | None = None):
+def create_app(
+    state: _JobState | None = None,
+    dist_dir: Path | None = None,
+    sync_detect_tags=None,
+    sync_scheduler=None,
+):
     from fastapi import FastAPI, HTTPException
     from fastapi.staticfiles import StaticFiles
 
@@ -123,10 +138,238 @@ def create_app(state: _JobState | None = None, dist_dir: Path | None = None):
         state.mode = None
         return {"status": "idle"}
 
+    _register_sync_routes(app, sync_detect_tags, sync_scheduler)
+
     if dist_dir is not None and dist_dir.is_dir():
         app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="frontend")
 
     return app
+
+
+class _DeviceRequest(BaseModel):
+    device_id: str
+    name: str
+
+
+class _Identity(BaseModel):
+    name: str
+    created_on: str
+    size: int
+
+
+class _SessionRequest(BaseModel):
+    profile_id: str
+
+
+def _load_sync_config(profile_id: str):
+    """Load the GroupByTags Config backing a sync profile_id."""
+    from imagesorter import config as config_mod
+    user = profile_id[: -len("_groupby")] if profile_id.endswith("_groupby") else profile_id
+    config_file = _configs_dir() / f"config_{user}_groupby.yaml"
+    return config_mod.load(str(config_file))
+
+
+def _default_detect_tags():
+    """Build the production tag detector backed by a warm YOLO model."""
+    from ultralytics import YOLO
+    model = YOLO("yolo11s.pt")
+
+    def detect(path: Path) -> set:
+        result = model([str(path)], verbose=False)[0]
+        cls_tensor = result.boxes.cls if result.boxes is not None else []
+        return {model.names[int(c)].lower() for c in cls_tensor}
+
+    return detect
+
+
+class _DeferredDetect:
+    """Lazily builds the YOLO-backed detector on first use, so creating the app
+    (and the test suite) never downloads or loads the model."""
+
+    def __init__(self):
+        self._detect = None
+
+    def __call__(self, path: Path) -> set:
+        if self._detect is None:
+            self._detect = _default_detect_tags()
+        return self._detect(path)
+
+
+_SYNC_TTL = timedelta(hours=24)
+
+
+def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
+    """Mount the android-phone-sync endpoints onto the launcher app.
+
+    On startup the lane reconciles complete-but-unprocessed sessions and runs a
+    janitor pass; ``scheduler`` (``(interval_seconds, fn) -> None``) registers a
+    recurring janitor so leftovers are reaped on a timer in production.
+    """
+    from fastapi import Header, HTTPException
+    from . import sync as sync_mod
+
+    store = sync_mod.SyncStore(_sync_db_path())
+    sessions = sync_mod.SessionManager(_inbox_base())
+    lane = sync_mod.SyncLane(
+        store, sessions, _load_sync_config,
+        detect_tags if detect_tags is not None else _DeferredDetect(),
+    )
+    app.state.sync_lane = lane
+
+    lane.startup_reconcile(_SYNC_TTL)
+    lane.janitor(_SYNC_TTL)
+    if scheduler is not None:
+        scheduler(_SYNC_TTL.total_seconds(), lambda: lane.janitor(_SYNC_TTL))
+
+    def _profile_ids() -> set[str]:
+        return {p["profile_id"] for p in sync_mod.list_profiles(_configs_dir())}
+
+    def _require_device(authorization: str | None):
+        token = ""
+        if authorization and authorization.lower().startswith("bearer "):
+            token = authorization[7:].strip()
+        device = store.device_for_token(token)
+        if device is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token")
+        return device
+
+    @app.post("/api/sync/devices")
+    async def sync_register(req: _DeviceRequest):
+        code = store.register_device(req.device_id, req.name)
+        return {"status": "pending", "pairing_code": code}
+
+    @app.get("/api/sync/devices/{device_id}/status")
+    async def sync_device_status(device_id: str):
+        device = store.get_device(device_id)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        result = {"status": device["status"]}
+        if device["status"] == "trusted":
+            result["token"] = device["token"]
+        return result
+
+    @app.post("/api/sync/devices/{device_id}/approve")
+    async def sync_device_approve(device_id: str):
+        token = store.approve_device(device_id)
+        if token is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return {"status": "trusted", "token": token}
+
+    @app.post("/api/sync/devices/{device_id}/revoke")
+    async def sync_device_revoke(device_id: str):
+        store.revoke_device(device_id)
+        return {"status": "revoked"}
+
+    @app.get("/api/sync/profiles")
+    async def sync_profiles(authorization: str | None = Header(default=None)):
+        _require_device(authorization)
+        return sync_mod.list_profiles(_configs_dir())
+
+    @app.post("/api/sync/reconcile")
+    async def sync_reconcile(
+        items: list[_Identity],
+        authorization: str | None = Header(default=None),
+    ):
+        _require_device(authorization)
+        return {
+            "results": [
+                {
+                    "name": i.name,
+                    "created_on": i.created_on,
+                    "size": i.size,
+                    "already_synced": store.is_synced(i.name, i.created_on, i.size),
+                }
+                for i in items
+            ]
+        }
+
+    @app.post("/api/sync/sessions")
+    async def sync_open_session(
+        req: _SessionRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        device = _require_device(authorization)
+        if req.profile_id not in _profile_ids():
+            raise HTTPException(status_code=404, detail="Unknown profile")
+        config = _load_sync_config(req.profile_id)
+        if not config.unclassified.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="Sync profiles require unclassified.enabled=true",
+            )
+        session_id = sessions.create_session(device["device_id"], req.profile_id)
+        return {"session_id": session_id}
+
+    @app.get("/api/sync/sessions/{session_id}/files/{file_id}")
+    async def sync_file_offset(
+        session_id: str,
+        file_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        _require_device(authorization)
+        return {"offset": sessions.file_offset(session_id, file_id)}
+
+    @app.post("/api/sync/sessions/{session_id}/files")
+    async def sync_upload_chunk(
+        session_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        file_id: str = Header(alias="File-Id"),
+        file_name: str = Header(alias="File-Name"),
+        file_created_on: str = Header(alias="File-Created-On"),
+        file_size: int = Header(alias="File-Size"),
+        file_mime_type: str = Header(alias="File-Mime-Type"),
+        upload_offset: int = Header(alias="Upload-Offset", default=0),
+    ):
+        _require_device(authorization)
+        meta = sync_mod.FileMeta(file_name, file_created_on, file_size, file_mime_type)
+        data = await request.body()
+        try:
+            new_offset = sessions.write_chunk(session_id, file_id, meta, upload_offset, data)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Unknown session")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid file_id")
+        return {"offset": new_offset, "length": file_size}
+
+    @app.post("/api/sync/sessions/{session_id}/complete")
+    async def sync_complete_session(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        _require_device(authorization)
+        try:
+            sessions.complete(session_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Unknown session")
+        lane.process_session(session_id)
+        return {"status": "complete"}
+
+    @app.get("/api/sync/sessions/{session_id}/outcomes")
+    async def sync_outcomes(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        _require_device(authorization)
+        return {"outcomes": lane.read_outcomes(session_id)}
+
+    @app.post("/api/sync/verify")
+    async def sync_verify(
+        items: list[_Identity],
+        authorization: str | None = Header(default=None),
+    ):
+        _require_device(authorization)
+        results = []
+        for i in items:
+            stored = store.stored_path_for(i.name, i.created_on, i.size)
+            present = bool(stored) and Path(stored).exists()
+            results.append({
+                "name": i.name,
+                "created_on": i.created_on,
+                "size": i.size,
+                "present": present,
+            })
+        return {"results": results}
 
 
 def _check_port(port: int = 7000) -> None:
@@ -144,6 +387,24 @@ def _check_port(port: int = 7000) -> None:
             sys.exit(1)
 
 
+def _recurring_timer(interval: float, fn) -> None:
+    """Run ``fn`` every ``interval`` seconds on a daemon timer that reschedules
+    itself after each tick."""
+    import threading
+
+    def tick() -> None:
+        try:
+            fn()
+        finally:
+            t = threading.Timer(interval, tick)
+            t.daemon = True
+            t.start()
+
+    t = threading.Timer(interval, tick)
+    t.daemon = True
+    t.start()
+
+
 def serve() -> None:
     """Start the launcher server on port 7000."""
     import atexit
@@ -153,5 +414,5 @@ def serve() -> None:
     state = _JobState()
     atexit.register(shutdown_handler, state)
     dist_dir = Path(__file__).parent / "dist"
-    app = create_app(state, dist_dir=dist_dir)
+    app = create_app(state, dist_dir=dist_dir, sync_scheduler=_recurring_timer)
     uvicorn.run(app, host="0.0.0.0", port=7000, log_level="info")
