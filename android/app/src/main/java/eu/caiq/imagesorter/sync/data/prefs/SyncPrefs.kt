@@ -11,4 +11,8 @@ interface SyncPrefs {
     fun getUploadConcurrency(): Int
     fun setMediaGeneration(value: Long)
     fun clearTokenForRepair()
+
+    /** Stored `host:port` of the configured server, or null when unset. */
+    fun getServerAddress(): String?
+    fun setServerAddress(value: String?)
 }

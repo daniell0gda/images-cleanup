@@ -17,7 +17,7 @@ import java.util.UUID
  * The device id is generated once on first access and never changes for the life
  * of the install; uninstall/reinstall mints a new identity and re-pairs.
  */
-class SecurePrefs(context: Context) : CredentialStore, SyncPrefs {
+class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.imagesorter.sync.ui.RoutingPrefs {
 
     private val appContext = context.applicationContext
 
@@ -56,7 +56,7 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs {
         }.apply()
     }
 
-    fun isTrusted(): Boolean = !getToken().isNullOrEmpty()
+    override fun isTrusted(): Boolean = !getToken().isNullOrEmpty()
 
     /** Clears the token (e.g. after a 401) so the app routes back to pairing. */
     override fun clearTokenForRepair() = setToken(null)
@@ -77,6 +77,14 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs {
 
     override fun setMediaGeneration(value: Long) {
         plain.edit().putLong(KEY_MEDIA_GENERATION, value).apply()
+    }
+
+    override fun getServerAddress(): String? = plain.getString(KEY_SERVER_ADDRESS, null)
+
+    override fun setServerAddress(value: String?) {
+        plain.edit().apply {
+            if (value == null) remove(KEY_SERVER_ADDRESS) else putString(KEY_SERVER_ADDRESS, value)
+        }.apply()
     }
 
     /** The SSID the user marked as trusted for sync, or null if none. */
@@ -105,6 +113,7 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs {
         private const val KEY_MEDIA_GENERATION = "media_generation"
         private const val KEY_TRUSTED_SSID = "trusted_ssid"
         private const val KEY_UPLOAD_CONCURRENCY = "upload_concurrency"
+        private const val KEY_SERVER_ADDRESS = "server_address"
 
         const val NO_WATERMARK = -1L
         const val MIN_CONCURRENCY = 4

@@ -22,6 +22,7 @@ import eu.caiq.imagesorter.sync.ui.screens.CleanupScreen
 import eu.caiq.imagesorter.sync.ui.screens.MainStatusScreen
 import eu.caiq.imagesorter.sync.ui.screens.PairingScreen
 import eu.caiq.imagesorter.sync.ui.screens.ProfilePickerScreen
+import eu.caiq.imagesorter.sync.ui.screens.ServerSetupScreen
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
 
 /**
@@ -50,6 +51,13 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * The pairing poll must start on entry only for [AppScreen.PAIRING]; in
+ * particular it must not fire while the user is still on [AppScreen.SERVER_SETUP]
+ * (no server is configured yet, so pairing cannot succeed).
+ */
+internal fun shouldStartPairing(screen: AppScreen): Boolean = screen == AppScreen.PAIRING
+
 @Composable
 private fun AppRoot(viewModel: MainViewModel) {
     val screen by viewModel.screen.collectAsStateWithLifecycle()
@@ -62,7 +70,7 @@ private fun AppRoot(viewModel: MainViewModel) {
 
     LaunchedEffect(Unit) {
         permissionLauncher.launch(requiredPermissions())
-        if (screen == AppScreen.PAIRING) viewModel.startPairing()
+        if (shouldStartPairing(screen)) viewModel.startPairing()
     }
 
     // System delete dialog launcher for the cleanup flow.
@@ -71,6 +79,12 @@ private fun AppRoot(viewModel: MainViewModel) {
     ) { viewModel.onDeleteCompleted() }
 
     when (screen) {
+        AppScreen.SERVER_SETUP -> {
+            val error by viewModel.serverSetupError.collectAsStateWithLifecycle()
+            val connecting by viewModel.connecting.collectAsStateWithLifecycle()
+            ServerSetupScreen(error = error, onConnect = viewModel::connect, connecting = connecting)
+        }
+
         AppScreen.PAIRING -> {
             val state by viewModel.pairingState.collectAsStateWithLifecycle()
             PairingScreen(state = state)

@@ -38,12 +38,21 @@ class SyncApp : Application() {
 }
 
 /**
+ * Derives the Retrofit base URL from a stored `host:port` server address.
+ * Returns null when no address is configured so callers can defer building the
+ * api client rather than targeting any hardcoded default.
+ */
+fun serverAddressToBaseUrl(address: String?): String? {
+    val trimmed = address?.trim().orEmpty()
+    if (trimmed.isEmpty()) return null
+    return "http://$trimmed/"
+}
+
+/**
  * Manual dependency graph. Everything is a lazy singleton scoped to the process.
  *
- * The base URL is a stand-in for a user-configured NAS host; settings should let
- * the user set host/port. For the skeleton it points at a LAN default.
- *
- * TODO(designer): surface host/port and concurrency in a Settings screen.
+ * The base URL comes from the user-configured server address stored in
+ * [SecurePrefs]; the api client is rebuilt whenever that address changes.
  */
 class ServiceLocator(private val app: Context) {
 
@@ -68,14 +77,43 @@ class ServiceLocator(private val app: Context) {
             .build()
     }
 
-    val api: SyncApi by lazy {
+    private var cachedApi: SyncApi? = null
+    private var cachedBaseUrl: String? = null
+
+    /**
+     * Retrofit-backed [SyncApi]. Rebuilt whenever the stored server address
+     * changes so a re-pointed address takes effect without a process restart.
+     * Falls back to a placeholder base URL only when no address is stored yet,
+     * deferring real targeting until the user configures one.
+     */
+    val api: SyncApi
+        get() {
+            val baseUrl = serverAddressToBaseUrl(securePrefs.getServerAddress()) ?: PLACEHOLDER_BASE_URL
+            val existing = cachedApi
+            if (existing != null && baseUrl == cachedBaseUrl) return existing
+            val built = Retrofit.Builder()
+                .baseUrl(baseUrl)
+                .client(okHttpClient)
+                .addConverterFactory(MoshiConverterFactory.create(moshi))
+                .build()
+                .create(SyncApi::class.java)
+            cachedApi = built
+            cachedBaseUrl = baseUrl
+            return built
+        }
+
+    /**
+     * Builds a throwaway [SyncApi] targeting [baseUrl], reusing the shared
+     * OkHttp/Moshi/Auth wiring. Used to probe an entered address before it is
+     * persisted, so a failed probe never re-points the cached [api].
+     */
+    fun buildApi(baseUrl: String): SyncApi =
         Retrofit.Builder()
-            .baseUrl(baseUrl())
+            .baseUrl(baseUrl)
             .client(okHttpClient)
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(SyncApi::class.java)
-    }
 
     private val uploadClient: UploadClient by lazy {
         UploadClient(api, app.contentResolver)
@@ -118,18 +156,15 @@ class ServiceLocator(private val app: Context) {
     fun pendingUploadDao() = database.pendingUploadDao()
     fun failureDao() = database.failureDao()
 
-    private fun baseUrl(): String {
-        // TODO(designer): make host/port user-configurable in Settings.
-        return "http://$DEFAULT_HOST:$DEFAULT_PORT/"
-    }
-
     private fun defaultDeviceName(): String =
         listOfNotNull(Build.MANUFACTURER?.replaceFirstChar { it.uppercase() }, Build.MODEL)
             .joinToString(" ")
             .ifBlank { "Android device" }
 
     companion object {
-        private const val DEFAULT_HOST = "nas.local"
-        private const val DEFAULT_PORT = 7000
+        // Inert stand-in used only while no server address is stored, so Retrofit
+        // can be constructed without targeting any real host. Replaced as soon as
+        // the user configures an address.
+        private const val PLACEHOLDER_BASE_URL = "http://localhost/"
     }
 }

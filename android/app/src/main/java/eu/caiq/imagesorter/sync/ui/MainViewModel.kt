@@ -3,6 +3,9 @@ package eu.caiq.imagesorter.sync.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import eu.caiq.imagesorter.sync.ServiceLocator
+import eu.caiq.imagesorter.sync.data.api.ParseResult
+import eu.caiq.imagesorter.sync.data.api.ProbeResult
+import eu.caiq.imagesorter.sync.data.api.ServerProbe
 import eu.caiq.imagesorter.sync.data.api.dto.ProfileDto
 import eu.caiq.imagesorter.sync.data.db.entity.FailureEntity
 import eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity
@@ -22,7 +25,20 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /** Top-level screen the Activity should render. */
-enum class AppScreen { PAIRING, PROFILE_PICKER, MAIN, CLEANUP }
+enum class AppScreen { SERVER_SETUP, PAIRING, PROFILE_PICKER, MAIN, CLEANUP }
+
+/**
+ * Narrow read/write seam over the prefs the routing + connect flow touches. Kept
+ * separate from [ServiceLocator] so the routing logic is unit-testable with an
+ * in-memory fake (the real [eu.caiq.imagesorter.sync.data.prefs.SecurePrefs]
+ * uses EncryptedSharedPreferences, which does not run under the JVM test harness).
+ */
+interface RoutingPrefs {
+    fun getServerAddress(): String?
+    fun setServerAddress(value: String?)
+    fun isTrusted(): Boolean
+    fun getProfileId(): String?
+}
 
 /**
  * Drives screen routing and the async flows (pairing poll, profile load, sync
@@ -34,10 +50,22 @@ enum class AppScreen { PAIRING, PROFILE_PICKER, MAIN, CLEANUP }
  */
 class MainViewModel(
     private val locator: ServiceLocator,
+    private val routingPrefs: RoutingPrefs = locator.securePrefs,
+    private val apiFactory: (String) -> eu.caiq.imagesorter.sync.data.api.SyncApi = locator::buildApi,
 ) : ViewModel() {
 
     private val _screen = MutableStateFlow(initialScreen())
     val screen: StateFlow<AppScreen> = _screen.asStateFlow()
+
+    private val _serverSetupError = MutableStateFlow<String?>(null)
+
+    /** Error message for the server-setup screen, or null when there is none. */
+    val serverSetupError: StateFlow<String?> = _serverSetupError.asStateFlow()
+
+    private val _connecting = MutableStateFlow(false)
+
+    /** True while a reachability probe is in flight; gates re-entrant connect calls. */
+    val connecting: StateFlow<Boolean> = _connecting.asStateFlow()
 
     private val _pairingState = MutableStateFlow<PairingState>(PairingState.Pending(""))
     val pairingState: StateFlow<PairingState> = _pairingState.asStateFlow()
@@ -67,9 +95,48 @@ class MainViewModel(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private fun initialScreen(): AppScreen = when {
-        !locator.securePrefs.isTrusted() -> AppScreen.PAIRING
-        locator.securePrefs.getProfileId().isNullOrEmpty() -> AppScreen.PROFILE_PICKER
+        routingPrefs.getServerAddress().isNullOrEmpty() -> AppScreen.SERVER_SETUP
+        !routingPrefs.isTrusted() -> AppScreen.PAIRING
+        routingPrefs.getProfileId().isNullOrEmpty() -> AppScreen.PROFILE_PICKER
         else -> AppScreen.MAIN
+    }
+
+    // --- Server setup ---
+
+    /**
+     * Validates the entered [host]/[port] and, on a reachable server, persists
+     * the address (so the api client re-points) and advances to pairing. Invalid
+     * input is rejected without probing; an unreachable / bad-response server
+     * surfaces an error and the screen stays on server setup.
+     */
+    fun connect(host: String, port: String) {
+        if (_connecting.value) return
+        when (val parsed = ServerProbe.parse(host, port)) {
+            is ParseResult.Invalid -> _serverSetupError.value = parsed.reason
+            is ParseResult.Valid -> probeAndConnect(host.trim(), port.trim().toInt(), parsed.baseUrl)
+        }
+    }
+
+    private fun probeAndConnect(host: String, port: Int, baseUrl: String) {
+        _serverSetupError.value = null
+        _connecting.value = true
+        viewModelScope.launch {
+            try {
+                when (val result = ServerProbe.validate(apiFactory(baseUrl))) {
+                    is ProbeResult.Success -> {
+                        routingPrefs.setServerAddress("$host:$port")
+                        _serverSetupError.value = null
+                        _screen.value = AppScreen.PAIRING
+                    }
+                    is ProbeResult.BadResponse ->
+                        _serverSetupError.value = "Server responded with ${result.code}"
+                    ProbeResult.Unreachable ->
+                        _serverSetupError.value = "Could not reach the server"
+                }
+            } finally {
+                _connecting.value = false
+            }
+        }
     }
 
     // --- Pairing ---

@@ -32,6 +32,16 @@ import retrofit2.http.Path
  */
 interface SyncApi {
 
+    // --- Reachability probe (no auth) ---
+
+    /**
+     * Unauthenticated reachability probe. The launcher's `GET /api/users`
+     * needs no token; we only inspect the HTTP status to decide whether the
+     * server is reachable and responding, so the body is left unparsed.
+     */
+    @GET("api/users")
+    suspend fun ping(): retrofit2.Response<okhttp3.ResponseBody>
+
     // --- Pairing (no auth) ---
 
     @POST("api/sync/devices")
