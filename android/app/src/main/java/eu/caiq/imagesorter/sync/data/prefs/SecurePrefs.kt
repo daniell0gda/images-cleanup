@@ -17,7 +17,7 @@ import java.util.UUID
  * The device id is generated once on first access and never changes for the life
  * of the install; uninstall/reinstall mints a new identity and re-pairs.
  */
-class SecurePrefs(context: Context) {
+class SecurePrefs(context: Context) : CredentialStore, SyncPrefs {
 
     private val appContext = context.applicationContext
 
@@ -41,16 +41,16 @@ class SecurePrefs(context: Context) {
     // --- Secrets ---
 
     /** Stable per-install device UUID, generated lazily on first call. */
-    fun getOrCreateDeviceId(): String {
+    override fun getOrCreateDeviceId(): String {
         secure.getString(KEY_DEVICE_ID, null)?.let { return it }
         val id = UUID.randomUUID().toString()
         secure.edit().putString(KEY_DEVICE_ID, id).apply()
         return id
     }
 
-    fun getToken(): String? = secure.getString(KEY_TOKEN, null)
+    override fun getToken(): String? = secure.getString(KEY_TOKEN, null)
 
-    fun setToken(token: String?) {
+    override fun setToken(token: String?) {
         secure.edit().apply {
             if (token == null) remove(KEY_TOKEN) else putString(KEY_TOKEN, token)
         }.apply()
@@ -59,11 +59,11 @@ class SecurePrefs(context: Context) {
     fun isTrusted(): Boolean = !getToken().isNullOrEmpty()
 
     /** Clears the token (e.g. after a 401) so the app routes back to pairing. */
-    fun clearTokenForRepair() = setToken(null)
+    override fun clearTokenForRepair() = setToken(null)
 
     // --- Non-secret choices / cursors ---
 
-    fun getProfileId(): String? = plain.getString(KEY_PROFILE_ID, null)
+    override fun getProfileId(): String? = plain.getString(KEY_PROFILE_ID, null)
 
     fun setProfileId(profileId: String) {
         plain.edit().putString(KEY_PROFILE_ID, profileId).apply()
@@ -75,7 +75,7 @@ class SecurePrefs(context: Context) {
      */
     fun getMediaGeneration(): Long = plain.getLong(KEY_MEDIA_GENERATION, NO_WATERMARK)
 
-    fun setMediaGeneration(value: Long) {
+    override fun setMediaGeneration(value: Long) {
         plain.edit().putLong(KEY_MEDIA_GENERATION, value).apply()
     }
 
@@ -89,7 +89,7 @@ class SecurePrefs(context: Context) {
     }
 
     /** Configurable upload concurrency (4–10, default 6). */
-    fun getUploadConcurrency(): Int = plain.getInt(KEY_UPLOAD_CONCURRENCY, DEFAULT_CONCURRENCY)
+    override fun getUploadConcurrency(): Int = plain.getInt(KEY_UPLOAD_CONCURRENCY, DEFAULT_CONCURRENCY)
 
     fun setUploadConcurrency(value: Int) {
         plain.edit().putInt(KEY_UPLOAD_CONCURRENCY, value.coerceIn(MIN_CONCURRENCY, MAX_CONCURRENCY)).apply()

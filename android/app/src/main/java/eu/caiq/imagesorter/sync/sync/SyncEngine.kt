@@ -9,8 +9,9 @@ import eu.caiq.imagesorter.sync.data.db.dao.SyncedCacheDao
 import eu.caiq.imagesorter.sync.data.db.entity.FailureEntity
 import eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity
 import eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity
-import eu.caiq.imagesorter.sync.data.media.MediaStoreScanner
+import eu.caiq.imagesorter.sync.data.media.MediaSource
 import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
+import eu.caiq.imagesorter.sync.data.prefs.SyncPrefs
 import eu.caiq.imagesorter.sync.domain.model.FailureReason
 import eu.caiq.imagesorter.sync.domain.model.Identity
 import eu.caiq.imagesorter.sync.domain.model.MediaItem
@@ -44,9 +45,9 @@ import java.util.UUID
  */
 class SyncEngine(
     private val api: SyncApi,
-    private val scanner: MediaStoreScanner,
+    private val scanner: MediaSource,
     private val uploader: TusUploader,
-    private val securePrefs: SecurePrefs,
+    private val securePrefs: SyncPrefs,
     private val syncedCacheDao: SyncedCacheDao,
     private val pendingUploadDao: PendingUploadDao,
     private val failureDao: FailureDao,

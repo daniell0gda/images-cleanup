@@ -24,7 +24,7 @@ import java.time.format.DateTimeFormatter
  * `created_on` is rendered as ISO-8601 local date-time to match the server's
  * `datetime.fromisoformat` parsing.
  */
-class MediaStoreScanner(context: Context) {
+class MediaStoreScanner(context: Context) : MediaSource {
 
     private val appContext: Context = context.applicationContext
     private val resolver: ContentResolver = appContext.contentResolver
@@ -37,7 +37,7 @@ class MediaStoreScanner(context: Context) {
      * @param folders optional set of relative paths to restrict to (e.g.
      *   "DCIM/Camera/"); empty means all images/videos.
      */
-    fun enumerate(sinceGeneration: Long, folders: Set<String> = emptySet()): List<MediaItem> {
+    override fun enumerate(sinceGeneration: Long, folders: Set<String>): List<MediaItem> {
         val items = ArrayList<MediaItem>()
         items += query(MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE, imageCollection(), sinceGeneration, folders)
         items += query(MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO, videoCollection(), sinceGeneration, folders)
@@ -49,7 +49,7 @@ class MediaStoreScanner(context: Context) {
      * The current MediaStore generation, the watermark to persist after a
      * successful run. Always available at minSdk 33.
      */
-    fun currentGeneration(): Long = MediaStore.getGeneration(appContext, VOLUME)
+    override fun currentGeneration(): Long = MediaStore.getGeneration(appContext, VOLUME)
 
     private fun query(
         mediaType: Int,

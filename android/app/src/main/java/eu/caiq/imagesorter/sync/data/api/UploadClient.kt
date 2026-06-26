@@ -17,17 +17,32 @@ import okio.source
  * an [okio] source. The metadata headers are filled from the item's
  * authoritative [eu.caiq.imagesorter.sync.domain.model.Identity].
  */
+/**
+ * Seam for uploading one chunk of a file, implemented by [UploadClient]. Lets
+ * [eu.caiq.imagesorter.sync.sync.TusUploader] be unit tested without a real
+ * [ContentResolver] / MediaStore.
+ */
+interface ChunkUploader {
+    suspend fun uploadChunk(
+        sessionId: String,
+        fileId: String,
+        item: MediaItem,
+        offset: Long,
+        length: Long,
+    ): ChunkResponse
+}
+
 class UploadClient(
     private val api: SyncApi,
     private val contentResolver: ContentResolver,
-) {
+) : ChunkUploader {
     /**
      * Upload bytes `[offset, offset + length)` of [item] within [sessionId].
      *
      * @param fileId stable per-file id (the phone mints this and reuses it across
      *   resume attempts so the server can match the resume offset).
      */
-    suspend fun uploadChunk(
+    override suspend fun uploadChunk(
         sessionId: String,
         fileId: String,
         item: MediaItem,

@@ -1,6 +1,6 @@
 package eu.caiq.imagesorter.sync.data.api
 
-import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
+import eu.caiq.imagesorter.sync.data.prefs.TokenStore
 import okhttp3.Interceptor
 import okhttp3.Response
 
@@ -14,7 +14,7 @@ import okhttp3.Response
  * re-pair takes effect without rebuilding the OkHttp client.
  */
 class AuthInterceptor(
-    private val securePrefs: SecurePrefs,
+    private val securePrefs: TokenStore,
 ) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {

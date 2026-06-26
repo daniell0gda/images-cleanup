@@ -1,7 +1,7 @@
 package eu.caiq.imagesorter.sync.sync
 
+import eu.caiq.imagesorter.sync.data.api.ChunkUploader
 import eu.caiq.imagesorter.sync.data.api.SyncApi
-import eu.caiq.imagesorter.sync.data.api.UploadClient
 import eu.caiq.imagesorter.sync.domain.model.MediaItem
 import retrofit2.HttpException
 
@@ -15,7 +15,7 @@ import retrofit2.HttpException
  */
 class TusUploader(
     private val api: SyncApi,
-    private val uploadClient: UploadClient,
+    private val uploadClient: ChunkUploader,
     private val chunkSize: Long = DEFAULT_CHUNK_SIZE,
 ) {
     /**

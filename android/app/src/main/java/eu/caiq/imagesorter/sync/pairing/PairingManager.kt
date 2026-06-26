@@ -2,7 +2,7 @@ package eu.caiq.imagesorter.sync.pairing
 
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.dto.RegisterDeviceRequest
-import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
+import eu.caiq.imagesorter.sync.data.prefs.CredentialStore
 import kotlinx.coroutines.delay
 import retrofit2.HttpException
 
@@ -30,7 +30,7 @@ sealed interface PairingState {
  */
 class PairingManager(
     private val api: SyncApi,
-    private val securePrefs: SecurePrefs,
+    private val securePrefs: CredentialStore,
     private val deviceName: String,
 ) {
     /**
