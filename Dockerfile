@@ -37,7 +37,7 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 
 # Application source
 COPY imagesorter/ ./imagesorter/
-COPY launcher/__init__.py launcher/__main__.py launcher/server.py ./launcher/
+COPY launcher/__init__.py launcher/__main__.py launcher/server.py launcher/sync.py ./launcher/
 
 # Built frontends from stage 1
 COPY --from=frontend-build /build/frontend/dist   ./frontend/dist
@@ -54,8 +54,15 @@ ENV SORTER_HOST=0.0.0.0 \
     SORTER_PORT=8080 \
     IMAGESORTER_NO_BROWSER=1 \
     CONFIGS_DIR=/configs \
+    INBOX_BASE=/data/inbox \
+    SYNC_DB=/data/sync.db \
     LAUNCHER_PUBLIC_PORT=7000 \
     SORTER_PUBLIC_PORT=8080
+
+# Phone-sync state (trusted devices + synced index + upload sessions) must
+# survive restarts, so keep it on a volume. For fast same-volume placement,
+# mount INBOX_BASE on the same filesystem as your sorted destinations.
+VOLUME /data
 
 EXPOSE 7000 8080
 
