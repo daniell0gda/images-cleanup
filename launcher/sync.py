@@ -81,14 +81,30 @@ class SyncStore:
     """
 
     def __init__(self, db_path: Path):
+        self._db_path = Path(db_path)
         self._lock = threading.RLock()
-        self._con = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._con.row_factory = sqlite3.Row
-        self._init_schema()
+        self._con: sqlite3.Connection | None = None
 
-    def _init_schema(self) -> None:
+    def _conn(self) -> sqlite3.Connection:
+        """Open the SQLite connection on first use.
+
+        Lazy so that merely constructing the store — e.g. when the launcher app
+        is built without sync configured, or in a non-sync test — never creates
+        the database file. The parent directory is created on first connect.
+        """
         with self._lock:
-            self._con.executescript(
+            con = self._con
+            if con is None:
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                con = sqlite3.connect(str(self._db_path), check_same_thread=False)
+                con.row_factory = sqlite3.Row
+                self._con = con
+                self._init_schema(con)
+            return con
+
+    def _init_schema(self, con: sqlite3.Connection) -> None:
+        with self._lock:
+            con.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS devices (
                     device_id     TEXT PRIMARY KEY,
@@ -121,7 +137,7 @@ class SyncStore:
                 );
                 """
             )
-            self._con.commit()
+            con.commit()
 
     # -- devices ---------------------------------------------------------
 
@@ -129,18 +145,18 @@ class SyncStore:
         """Create (or reset) a pending device and return its pairing code."""
         code = f"{secrets.randbelow(1_000_000):06d}"
         with self._lock:
-            self._con.execute(
+            self._conn().execute(
                 "INSERT OR REPLACE INTO devices "
                 "(device_id, name, token, status, pairing_code, created_at, approved_at) "
                 "VALUES (?, ?, NULL, 'pending', ?, ?, NULL)",
                 (device_id, name, code, _now()),
             )
-            self._con.commit()
+            self._conn().commit()
         return code
 
     def get_device(self, device_id: str) -> sqlite3.Row | None:
         with self._lock:
-            return self._con.execute(
+            return self._conn().execute(
                 "SELECT * FROM devices WHERE device_id=?", (device_id,)
             ).fetchone()
 
@@ -148,30 +164,30 @@ class SyncStore:
         """Transition a device to trusted, issue a token, return the token."""
         token = secrets.token_urlsafe(32)
         with self._lock:
-            cur = self._con.execute(
+            cur = self._conn().execute(
                 "UPDATE devices SET status='trusted', token=?, approved_at=? "
                 "WHERE device_id=?",
                 (token, _now(), device_id),
             )
-            self._con.commit()
+            self._conn().commit()
             if cur.rowcount == 0:
                 return None
         return token
 
     def revoke_device(self, device_id: str) -> None:
         with self._lock:
-            self._con.execute(
+            self._conn().execute(
                 "UPDATE devices SET status='revoked' WHERE device_id=?",
                 (device_id,),
             )
-            self._con.commit()
+            self._conn().commit()
 
     def device_for_token(self, token: str) -> sqlite3.Row | None:
         """Return a trusted device matching the bearer token, else None."""
         if not token:
             return None
         with self._lock:
-            return self._con.execute(
+            return self._conn().execute(
                 "SELECT * FROM devices WHERE token=? AND status='trusted'",
                 (token,),
             ).fetchone()
@@ -183,7 +199,7 @@ class SyncStore:
         # device is "already synced" for every other device. The primary key on
         # synced_files enforces one row per identity (not per device).
         with self._lock:
-            return self._con.execute(
+            return self._conn().execute(
                 "SELECT 1 FROM synced_files WHERE name=? AND created_on=? AND size=?",
                 (name, created_on, size),
             ).fetchone() is not None
@@ -199,19 +215,19 @@ class SyncStore:
         profile_id: str,
     ) -> None:
         with self._lock:
-            self._con.execute(
+            self._conn().execute(
                 "INSERT OR REPLACE INTO synced_files "
                 "(name, created_on, size, mime_type, stored_path, device_id, profile_id, synced_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (name, created_on, size, mime_type, stored_path, device_id, profile_id, _now()),
             )
-            self._con.commit()
+            self._conn().commit()
 
     # -- outcomes --------------------------------------------------------
 
     def record_outcome(self, session_id: str, outcome: dict) -> None:
         with self._lock:
-            self._con.execute(
+            self._conn().execute(
                 "INSERT OR REPLACE INTO outcomes "
                 "(session_id, file_id, name, status, reason, retryable) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -224,17 +240,17 @@ class SyncStore:
                     1 if outcome.get("retryable") else 0,
                 ),
             )
-            self._con.commit()
+            self._conn().commit()
 
     def has_outcomes(self, session_id: str) -> bool:
         with self._lock:
-            return self._con.execute(
+            return self._conn().execute(
                 "SELECT 1 FROM outcomes WHERE session_id=? LIMIT 1", (session_id,)
             ).fetchone() is not None
 
     def outcomes_for(self, session_id: str) -> list[dict]:
         with self._lock:
-            rows = self._con.execute(
+            rows = self._conn().execute(
                 "SELECT file_id, name, status, reason, retryable FROM outcomes "
                 "WHERE session_id=? ORDER BY file_id",
                 (session_id,),
@@ -250,7 +266,7 @@ class SyncStore:
 
     def stored_path_for(self, name: str, created_on: str, size: int) -> str | None:
         with self._lock:
-            row = self._con.execute(
+            row = self._conn().execute(
                 "SELECT stored_path FROM synced_files "
                 "WHERE name=? AND created_on=? AND size=?",
                 (name, created_on, size),

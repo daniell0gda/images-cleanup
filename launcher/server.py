@@ -22,11 +22,11 @@ def _configs_dir() -> Path:
 
 
 def _inbox_base() -> Path:
-    return Path(os.environ.get("INBOX_BASE", "./inbox"))
+    return Path(os.environ.get("INBOX_BASE", "./data/inbox"))
 
 
 def _sync_db_path() -> Path:
-    return Path(os.environ.get("SYNC_DB", "./sync.db"))
+    return Path(os.environ.get("SYNC_DB", "./data/sync.db"))
 
 
 def _launcher_public_port() -> str:
