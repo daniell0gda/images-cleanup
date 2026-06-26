@@ -1,30 +1,60 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.PriorityHigh
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import eu.caiq.imagesorter.sync.domain.model.SyncStatus
+import eu.caiq.imagesorter.sync.ui.components.AppearOnEntry
+import eu.caiq.imagesorter.sync.ui.components.Eyebrow
+import eu.caiq.imagesorter.sync.ui.components.clickableScale
+import eu.caiq.imagesorter.sync.ui.components.photoTile
+import eu.caiq.imagesorter.sync.ui.components.statusColor
+import eu.caiq.imagesorter.sync.ui.theme.MonoLabel
+import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 
 /** Filter chips on the main status view (working set is the default). */
 enum class StatusFilter { WORKING_SET, SYNCED_TODAY, ALL }
@@ -37,12 +67,12 @@ data class StatusRow(
 )
 
 /**
- * PLACEHOLDER main status screen. Read-only list of media with status icons, a
- * filter-chip row, and the two primary actions (sync, clean up). The list is a
- * plain LazyColumn here; the production screen must be virtualized + paged to
- * stay fast over a 100k-item library.
+ * Main status — the hero. A photo-tile grid keyed to each item's sync state, with
+ * a count headline, filter pills, and the two primary actions. While a sync is in
+ * flight, a mint "secure sweep" crosses the grid.
  *
- * TODO(designer): paging, thumbnails/preview, row tap behaviour, final visuals.
+ * Counts are derived from the visible [rows]. TODO: surface global totals from the
+ * ViewModel so they don't change with the active filter.
  */
 @Composable
 fun MainStatusScreen(
@@ -53,27 +83,83 @@ fun MainStatusScreen(
     onCleanup: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
-        FilterRow(selectedFilter, onFilterChange)
+    val c = VaultTheme.colors
+    val safe = rows.count { it.status == SyncStatus.SYNCED }
+    val todo = rows.count { it.status == SyncStatus.PENDING || it.status == SyncStatus.IN_PROGRESS }
+    val failed = rows.count { it.status == SyncStatus.FAILED }
+    val syncing = rows.any { it.status == SyncStatus.IN_PROGRESS }
 
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Button(onClick = onSyncNow) { Text("Sync now") }
-            OutlinedButton(onClick = onCleanup) { Text("Clean up") }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(c.ground)
+            .padding(horizontal = 22.dp)
+            .padding(top = 24.dp, bottom = 18.dp),
+    ) {
+        Eyebrow("Backup status")
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                text = "%,d".format(safe),
+                style = MonoLabel.copy(fontSize = 44.sp, fontWeight = FontWeight.W700, letterSpacing = (-0.5).sp),
+                color = c.text,
+            )
+            Spacer(Modifier.size(10.dp))
+            Text(
+                "photos safe\non the server",
+                style = MaterialTheme.typography.bodySmall,
+                color = c.muted,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row {
+            Text("$todo", style = MonoLabel.copy(fontSize = 13.sp, fontWeight = FontWeight.W600), color = c.amber)
+            Text(" still to back up", style = MonoLabel.copy(fontSize = 13.sp), color = c.muted)
+            if (failed > 0) {
+                Text("  ·  $failed", style = MonoLabel.copy(fontSize = 13.sp, fontWeight = FontWeight.W600), color = c.coral)
+                Text(" failed", style = MonoLabel.copy(fontSize = 13.sp), color = c.muted)
+            }
         }
 
-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
-            items(rows, key = { it.name + it.status.name }) { row ->
-                ListItem(
-                    headlineContent = { Text(row.name) },
-                    supportingContent = {
-                        row.failureReason?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    },
-                    leadingContent = { Icon(statusIcon(row.status), contentDescription = row.status.name) },
-                )
+        Spacer(Modifier.height(18.dp))
+        FilterRow(selectedFilter, onFilterChange)
+        Spacer(Modifier.height(14.dp))
+
+        Box(Modifier.weight(1f)) {
+            if (rows.isEmpty()) {
+                EmptyState()
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    itemsIndexed(rows, key = { _, r -> r.name + r.status.name }) { index, row ->
+                        AppearOnEntry(
+                            delayMs = (index % 12) * 26,
+                            key = row.name,
+                            modifier = Modifier.animateItem(),
+                        ) {
+                            MediaTile(row)
+                        }
+                    }
+                }
             }
+            SweepOverlay(visible = syncing)
+        }
+
+        Spacer(Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = onSyncNow,
+                modifier = Modifier.weight(1f).height(52.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+            ) { Text("Back up now", fontWeight = FontWeight.SemiBold) }
+            OutlinedButton(
+                onClick = onCleanup,
+                modifier = Modifier.weight(1f).height(52.dp),
+            ) { Text("Free up space") }
         }
     }
 }
@@ -81,27 +167,97 @@ fun MainStatusScreen(
 @Composable
 private fun FilterRow(selected: StatusFilter, onChange: (StatusFilter) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = selected == StatusFilter.WORKING_SET,
-            onClick = { onChange(StatusFilter.WORKING_SET) },
-            label = { Text("Working set") },
-        )
-        FilterChip(
-            selected = selected == StatusFilter.SYNCED_TODAY,
-            onClick = { onChange(StatusFilter.SYNCED_TODAY) },
-            label = { Text("Synced today") },
-        )
-        FilterChip(
-            selected = selected == StatusFilter.ALL,
-            onClick = { onChange(StatusFilter.ALL) },
-            label = { Text("All") },
+        Pill("Working set", selected == StatusFilter.WORKING_SET) { onChange(StatusFilter.WORKING_SET) }
+        Pill("Synced today", selected == StatusFilter.SYNCED_TODAY) { onChange(StatusFilter.SYNCED_TODAY) }
+        Pill("All", selected == StatusFilter.ALL) { onChange(StatusFilter.ALL) }
+    }
+}
+
+@Composable
+private fun Pill(label: String, on: Boolean, onClick: () -> Unit) {
+    val c = VaultTheme.colors
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .clickableScale(onClick = onClick)
+            .background(if (on) c.accent else c.surface)
+            .border(1.dp, if (on) c.accent else c.line, RoundedCornerShape(999.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        Text(label, style = MonoLabel.copy(fontSize = 12.5.sp), color = if (on) c.onAccent else c.muted)
+    }
+}
+
+@Composable
+private fun MediaTile(row: StatusRow, modifier: Modifier = Modifier) {
+    val c = VaultTheme.colors
+    val dim = row.status == SyncStatus.PENDING
+    Box(modifier = modifier.aspectRatio(1f).clip(RoundedCornerShape(13.dp))) {
+        Box(Modifier.photoTile(row.name))
+        if (dim) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.42f)))
+        StatusBadge(
+            status = row.status,
+            modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
         )
     }
 }
 
-private fun statusIcon(status: SyncStatus): ImageVector = when (status) {
-    SyncStatus.SYNCED -> Icons.Filled.CheckCircle
-    SyncStatus.FAILED -> Icons.Filled.Error
-    SyncStatus.IN_PROGRESS -> Icons.Filled.CloudUpload
-    SyncStatus.PENDING -> Icons.Filled.Schedule
+@Composable
+private fun StatusBadge(status: SyncStatus, modifier: Modifier = Modifier) {
+    val c = VaultTheme.colors
+    val tint = statusColor(status)
+    Box(
+        modifier = modifier
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(if (status == SyncStatus.SYNCED || status == SyncStatus.IN_PROGRESS || status == SyncStatus.FAILED) tint else Color.Black.copy(alpha = 0.45f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        when (status) {
+            SyncStatus.SYNCED -> Icon(Icons.Rounded.Check, null, tint = c.onAccent, modifier = Modifier.size(14.dp))
+            SyncStatus.IN_PROGRESS -> Icon(Icons.Rounded.CloudUpload, null, tint = Color(0xFF2A1B02), modifier = Modifier.size(13.dp))
+            SyncStatus.FAILED -> Icon(Icons.Rounded.PriorityHigh, null, tint = Color(0xFF2A0B07), modifier = Modifier.size(14.dp))
+            SyncStatus.PENDING -> Box(Modifier.size(6.dp).clip(CircleShape).background(c.muted))
+        }
+    }
+}
+
+@Composable
+private fun SweepOverlay(visible: Boolean) {
+    val c = VaultTheme.colors
+    AnimatedVisibility(visible, enter = fadeIn(), exit = fadeOut()) {
+        val t by rememberInfiniteTransition(label = "sweep").animateFloat(
+            initialValue = -0.4f,
+            targetValue = 1.4f,
+            animationSpec = infiniteRepeatable(tween(1400, easing = LinearEasing), RepeatMode.Restart),
+            label = "sweepX",
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.horizontalGradient(
+                        0.0f to Color.Transparent,
+                        0.5f to c.accent.copy(alpha = 0.22f),
+                        1.0f to Color.Transparent,
+                        startX = t * 1000f - 300f,
+                        endX = t * 1000f + 300f,
+                    ),
+                ),
+        )
+    }
+}
+
+@Composable
+private fun EmptyState() {
+    val c = VaultTheme.colors
+    Column(
+        Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("All caught up", style = MaterialTheme.typography.titleMedium, color = c.text)
+        Spacer(Modifier.height(6.dp))
+        Text("Nothing waiting to back up.", style = MonoLabel.copy(fontSize = 13.sp), color = c.muted)
+    }
 }
