@@ -86,6 +86,13 @@ class Unclassified:
 
 
 @dataclass
+class Video:
+    destination: str
+    group_by_year: bool = False
+    group_by_month: bool = False
+
+
+@dataclass
 class Config:
     mode: str
     source_folder: str
@@ -104,6 +111,7 @@ class Config:
     max_image_dimension: int = 1920
     web_ui: bool = False
     similarity_time_window_minutes: int = 5
+    video: Video | None = None
 
 
 def _default_threads() -> int:
@@ -164,6 +172,15 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
             f"similarity_time_window_minutes must be >= 0, got {similarity_time_window_minutes}"
         )
 
+    video_raw = raw.get("video")
+    video = None
+    if video_raw is not None:
+        video = Video(
+            destination=video_raw.get("destination", ""),
+            group_by_year=video_raw.get("group_by_year", False),
+            group_by_month=video_raw.get("group_by_month", False),
+        )
+
     return Config(
         mode=raw.get("mode", "GroupByTags"),
         source_folder=raw.get("source_folder", "./photos"),
@@ -182,4 +199,5 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
         max_image_dimension=max_image_dimension,
         web_ui=bool(raw.get("web_ui", False)),
         similarity_time_window_minutes=similarity_time_window_minutes,
+        video=video,
     )
