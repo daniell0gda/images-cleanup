@@ -44,6 +44,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,6 +62,9 @@ import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 
 /** Filter chips on the main status view (working set is the default). */
 enum class StatusFilter { WORKING_SET, SYNCED_TODAY, ALL }
+
+/** Test tag on each status tile, so the rendered tile count is assertable. */
+const val STATUS_TILE_TAG = "statusTile"
 
 /** One read-only status row rendered in the list. */
 data class StatusRow(
@@ -180,6 +187,7 @@ private fun Pill(label: String, on: Boolean, onClick: () -> Unit) {
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
             .clickableScale(onClick = onClick)
+            .semantics { selected = on }
             .background(if (on) c.accent else c.surface)
             .border(1.dp, if (on) c.accent else c.line, RoundedCornerShape(999.dp))
             .padding(horizontal = 14.dp, vertical = 8.dp),
@@ -192,7 +200,7 @@ private fun Pill(label: String, on: Boolean, onClick: () -> Unit) {
 private fun MediaTile(row: StatusRow, modifier: Modifier = Modifier) {
     val c = VaultTheme.colors
     val dim = row.status == SyncStatus.PENDING
-    Box(modifier = modifier.aspectRatio(1f).clip(RoundedCornerShape(13.dp))) {
+    Box(modifier = modifier.testTag(STATUS_TILE_TAG).aspectRatio(1f).clip(RoundedCornerShape(13.dp))) {
         Box(Modifier.photoTile(row.name))
         if (dim) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.42f)))
         StatusBadge(
@@ -206,11 +214,18 @@ private fun MediaTile(row: StatusRow, modifier: Modifier = Modifier) {
 private fun StatusBadge(status: SyncStatus, modifier: Modifier = Modifier) {
     val c = VaultTheme.colors
     val tint = statusColor(status)
+    val label = when (status) {
+        SyncStatus.SYNCED -> "Synced"
+        SyncStatus.IN_PROGRESS -> "Uploading"
+        SyncStatus.FAILED -> "Failed"
+        SyncStatus.PENDING -> "Pending"
+    }
     Box(
         modifier = modifier
             .size(22.dp)
             .clip(CircleShape)
-            .background(if (status == SyncStatus.SYNCED || status == SyncStatus.IN_PROGRESS || status == SyncStatus.FAILED) tint else Color.Black.copy(alpha = 0.45f)),
+            .background(if (status == SyncStatus.SYNCED || status == SyncStatus.IN_PROGRESS || status == SyncStatus.FAILED) tint else Color.Black.copy(alpha = 0.45f))
+            .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
         when (status) {
