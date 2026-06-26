@@ -32,7 +32,9 @@ frontend/tsconfig.tsbuildinfo
 config.yaml
 quick-start.md
 
-# Phone-sync runtime artifacts (default DATA dir + legacy CWD locations)
-data/
-sync.db
-inbox/
+# Phone-sync runtime artifacts (repo-root DATA dir + legacy CWD locations).
+# Anchored with a leading slash so it does NOT match the Android source
+# package eu/caiq/imagesorter/sync/data/.
+/data/
+/sync.db
+/inbox/
