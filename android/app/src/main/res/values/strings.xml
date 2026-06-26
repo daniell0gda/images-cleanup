@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Image Sorter Sync</string>
+
+    <!-- Foreground service notification -->
+    <string name="sync_channel_name">Photo sync</string>
+    <string name="sync_channel_description">Progress while photos and videos back up to the NAS.</string>
+    <string name="sync_notification_title">Syncing to NAS</string>
+    <string name="sync_notification_idle">Preparing sync…</string>
+
+    <!-- Pairing -->
+    <string name="pairing_title">Pair this device</string>
+    <string name="pairing_instructions">Open Trusted Devices on the launcher and approve this device after matching the code below.</string>
+    <string name="pairing_waiting">Waiting for approval…</string>
+    <string name="pairing_revoked">This device was revoked. Re-pair to continue.</string>
+
+    <!-- Profile picker -->
+    <string name="profile_title">Choose a sync profile</string>
+
+    <!-- Main status -->
+    <string name="filter_working_set">Working set</string>
+    <string name="filter_synced_today">Synced today</string>
+    <string name="filter_all">All</string>
+    <string name="action_sync_now">Sync now</string>
+    <string name="action_cleanup">Clean up</string>
+
+    <!-- Cleanup -->
+    <string name="cleanup_title">Remove synced files</string>
+    <string name="cleanup_start">Start cleanup</string>
+    <string name="cleanup_verifying">Verifying files still exist on the NAS…</string>
+    <string name="cleanup_remove">Remove synced files</string>
+    <string name="cleanup_explainer">Only files the NAS confirms it still has are eligible for removal. Nothing is deleted without your confirmation.</string>
+</resources>

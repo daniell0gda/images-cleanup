@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base application theme. Compose drives the actual Material3 styling
+         (see ui/theme/Theme.kt); this XML theme only provides a sensible
+         splash/window background before Compose mounts. PLACEHOLDER — the
+         professional designer owns the final look. -->
+    <style name="Theme.ImageSorterSync" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
