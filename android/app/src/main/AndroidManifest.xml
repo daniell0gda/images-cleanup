@@ -2,13 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Media access. SDK 33+ uses the granular READ_MEDIA_* permissions;
-         SDK 32 and below fall back to READ_EXTERNAL_STORAGE. -->
+    <!-- Media access. minSdk 33, so the granular READ_MEDIA_* permissions
+         are always available; no legacy READ_EXTERNAL_STORAGE needed. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
 
     <!-- Foreground service + its data-sync type (required on SDK 34). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

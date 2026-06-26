@@ -17,7 +17,7 @@ phone (source) → NAS (destination). Nothing on the phone is ever auto-deleted.
 
 - Android Studio (Koala or newer recommended)
 - JDK 17
-- Android SDK with platform 34; minSdk 26
+- Android SDK with platform 34; minSdk 33 (Android 13)
 
 ## Open / build
 
@@ -30,11 +30,11 @@ of the Python repo's build.
 3. Set the server host: the base URL defaults to `http://nas.local:7000/` in
    `ServiceLocator.baseUrl()`. Make it user-configurable in Settings
    (`// TODO(designer)`), or edit the constant for local testing.
-4. Run the `app` configuration on a device/emulator (API 26+).
+4. Run the `app` configuration on a device/emulator (API 33+).
 
-> The Gradle wrapper JAR/scripts are not committed here. Android Studio will
-> generate the wrapper on first sync, or run `gradle wrapper` once with a local
-> Gradle install. No build is run in this skeleton's authoring environment.
+> The Gradle wrapper is committed and pinned to Gradle 9.3.0. `:app:assembleDebug`
+> has been verified to build green with AGP 8.5.2 and JDK 17 (SDK platform 34,
+> build-tools 34.0.0).
 
 ## Package
 
@@ -136,8 +136,6 @@ The phone never calls `approve` / `revoke` — those are launcher-side actions.
   current-MediaStore-id re-query is stubbed; wire it before enabling deletion.
 - Settings screen (host/port, concurrency, folders, forget-network, re-pair) is
   not built; the underlying prefs exist in `SecurePrefs`.
-- `MediaStore.createDeleteRequest` is API 30+; the API 26–29 per-item delete
-  fallback is not implemented.
 - The trusted-network *check* itself (read current SSID, compare) is not wired
   into the service gate yet; the preference store is in place.
 ```

@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "eu.caiq.imagesorter.sync"
-        minSdk = 26
+        minSdk = 33
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"

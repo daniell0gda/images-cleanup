@@ -2,7 +2,6 @@ package eu.caiq.imagesorter.sync.ui
 
 import android.Manifest
 import android.content.IntentSender
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -113,30 +112,24 @@ private fun AppRoot(viewModel: MainViewModel) {
 }
 
 /**
- * Build the delete IntentSender via CleanupManager and hand it to the launcher.
- * The system delete dialog requires API 30; on older devices this is a no-op for
- * the skeleton (see CleanupManager.buildDeleteRequest).
+ * Build the delete IntentSender via CleanupManager and hand it to the launcher;
+ * the OS then shows its system delete dialog.
  */
 private fun launchDelete(
     viewModel: MainViewModel,
     mediaIds: List<Long>,
     launch: (IntentSenderRequest) -> Unit,
 ) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
     val sender: IntentSender = viewModel.buildDeleteRequest(mediaIds) ?: return
     launch(IntentSenderRequest.Builder(sender).build())
 }
 
 private fun requiredPermissions(): Array<String> =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        arrayOf(
-            Manifest.permission.READ_MEDIA_IMAGES,
-            Manifest.permission.READ_MEDIA_VIDEO,
-            Manifest.permission.POST_NOTIFICATIONS,
-        )
-    } else {
-        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-    }
+    arrayOf(
+        Manifest.permission.READ_MEDIA_IMAGES,
+        Manifest.permission.READ_MEDIA_VIDEO,
+        Manifest.permission.POST_NOTIFICATIONS,
+    )
 
 /** Minimal factory so the ViewModel can take the [ServiceLocator]. */
 class MainViewModelFactory(

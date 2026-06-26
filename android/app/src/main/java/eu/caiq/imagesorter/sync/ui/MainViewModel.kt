@@ -145,7 +145,6 @@ class MainViewModel(
     private fun resolveLocalIds(present: List<Identity>): List<Long> = emptyList()
 
     /** Build the system delete request for the verified-present local ids. */
-    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.R)
     fun buildDeleteRequest(mediaIds: List<Long>): android.content.IntentSender? =
         locator.cleanupManager.buildDeleteRequest(mediaIds)
 

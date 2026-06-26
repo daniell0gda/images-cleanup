@@ -4,7 +4,6 @@ import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
-import android.os.Build
 import android.provider.MediaStore
 import eu.caiq.imagesorter.sync.domain.model.Identity
 import eu.caiq.imagesorter.sync.domain.model.MediaItem
@@ -48,14 +47,9 @@ class MediaStoreScanner(context: Context) {
 
     /**
      * The current MediaStore generation, the watermark to persist after a
-     * successful run. Returns 0 below the API level that exposes generations.
+     * successful run. Always available at minSdk 33.
      */
-    fun currentGeneration(): Long =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            MediaStore.getGeneration(appContext, VOLUME)
-        } else {
-            0L
-        }
+    fun currentGeneration(): Long = MediaStore.getGeneration(appContext, VOLUME)
 
     private fun query(
         mediaType: Int,
@@ -110,12 +104,12 @@ class MediaStoreScanner(context: Context) {
         val clauses = ArrayList<String>()
         val args = ArrayList<String>()
 
-        if (sinceGeneration >= 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        if (sinceGeneration >= 0) {
             clauses += "${MediaStore.MediaColumns.GENERATION_MODIFIED} > ?"
             args += sinceGeneration.toString()
         }
 
-        if (folders.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (folders.isNotEmpty()) {
             val placeholders = folders.joinToString(" OR ") {
                 "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
             }
@@ -147,19 +141,9 @@ class MediaStoreScanner(context: Context) {
     private fun defaultMime(mediaType: Int): String =
         if (mediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO) "video/*" else "image/*"
 
-    private fun imageCollection(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(VOLUME)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
+    private fun imageCollection(): Uri = MediaStore.Images.Media.getContentUri(VOLUME)
 
-    private fun videoCollection(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Video.Media.getContentUri(VOLUME)
-        } else {
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        }
+    private fun videoCollection(): Uri = MediaStore.Video.Media.getContentUri(VOLUME)
 
     companion object {
         private const val VOLUME = MediaStore.VOLUME_EXTERNAL

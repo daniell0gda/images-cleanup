@@ -3,9 +3,7 @@ package eu.caiq.imagesorter.sync.sync
 import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.IntentSender
-import android.os.Build
 import android.provider.MediaStore
-import androidx.annotation.RequiresApi
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.dto.IdentityDto
 import eu.caiq.imagesorter.sync.data.db.dao.SyncedCacheDao
@@ -60,13 +58,8 @@ class CleanupManager(
      * the OS shows its own confirmation dialog. Returns null if the list is empty.
      *
      * Only the *local copy* is removed; the NAS copy is the backup and is never
-     * touched.
-     *
-     * Requires API 30 (R). On API 26–29 the caller must fall back to a per-item
-     * `ContentResolver.delete` after its own confirmation; that fallback is out of
-     * scope for the skeleton.
+     * touched. `createDeleteRequest` is always available at minSdk 33.
      */
-    @RequiresApi(Build.VERSION_CODES.R)
     fun buildDeleteRequest(mediaStoreIds: List<Long>): IntentSender? {
         if (mediaStoreIds.isEmpty()) return null
         val uris = mediaStoreIds.map {
