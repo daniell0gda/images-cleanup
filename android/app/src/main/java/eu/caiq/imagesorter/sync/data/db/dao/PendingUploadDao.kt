@@ -35,6 +35,10 @@ interface PendingUploadDao {
     @Query("DELETE FROM pending_upload WHERE fileId = :fileId")
     suspend fun delete(fileId: String)
 
+    /** Remove any pending/in-progress row for an identity (e.g. when reconcile reports it already synced). */
+    @Query("DELETE FROM pending_upload WHERE name = :name AND createdOn = :createdOn AND size = :size")
+    suspend fun deleteByIdentity(name: String, createdOn: String, size: Long)
+
     @Query("DELETE FROM pending_upload")
     suspend fun clear()
 }

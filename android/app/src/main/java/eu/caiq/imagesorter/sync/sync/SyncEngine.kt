@@ -3,6 +3,7 @@ package eu.caiq.imagesorter.sync.sync
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.dto.IdentityDto
 import eu.caiq.imagesorter.sync.data.api.dto.OpenSessionRequest
+import eu.caiq.imagesorter.sync.data.api.dto.OutcomeDto
 import eu.caiq.imagesorter.sync.data.db.dao.FailureDao
 import eu.caiq.imagesorter.sync.data.db.dao.PendingUploadDao
 import eu.caiq.imagesorter.sync.data.db.dao.SyncedCacheDao
@@ -52,41 +53,62 @@ class SyncEngine(
     private val pendingUploadDao: PendingUploadDao,
     private val failureDao: FailureDao,
     private val uploadBatchSize: Int = UPLOAD_BATCH,
+    // Monotonic clock for the discover() debounce — NOT the wall clock. A wall-clock
+    // backward jump (NTP correction / user changing device time) would make the
+    // elapsed delta negative and wrongly suppress a discover; elapsedRealtime can't
+    // run backwards. Injectable so tests can drive it with a FakeClock.
+    private val now: () -> Long = android.os.SystemClock::elapsedRealtime,
 ) {
     private val _progress = MutableStateFlow(SyncProgress())
     val progress: StateFlow<SyncProgress> = _progress.asStateFlow()
+
+    // Single atomic gate shared by run() and discover(). Acquired with
+    // compareAndSet at entry and released in finally; closes the check-then-act
+    // gap so a re-entrant run()/discover() cannot overlap an active pass.
+    private val active = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    // Watermark of the last completed full enumerate+reconcile, used to debounce
+    // back-to-back discover() calls. run() ignores this and always reconciles.
+    @Volatile private var lastFullReconcileAt: Long? = null
 
     /**
      * Run one full sync. Safe to call again to resume — discovery + the persisted
      * pending queue make a re-run idempotent.
      */
     suspend fun run() {
-        val profileId = securePrefs.getProfileId()
-        if (profileId.isNullOrEmpty()) {
-            _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "No profile selected")
-            return
-        }
-
+        // Atomic re-entrancy guard: a second run() (or a discover()) while a pass is
+        // already active is a no-op — it opens no session and starts no upload pass.
+        if (!active.compareAndSet(false, true)) return
         try {
-            val toUpload = discoverAndReconcile()
-            if (toUpload.isEmpty()) {
-                _progress.value = SyncProgress(phase = SyncPhase.DONE, message = "Nothing to sync")
-                advanceWatermark()
+            val profileId = securePrefs.getProfileId()
+            if (profileId.isNullOrEmpty()) {
+                _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "No profile selected")
                 return
             }
 
-            uploadPending(profileId, toUpload)
-            advanceWatermark()
+            try {
+                val toUpload = discoverAndReconcile()
+                if (toUpload.isEmpty()) {
+                    _progress.value = SyncProgress(phase = SyncPhase.DONE, message = "Nothing to sync")
+                    advanceWatermark()
+                    return
+                }
 
-            _progress.value = _progress.value.copy(phase = SyncPhase.DONE)
-        } catch (e: HttpException) {
-            if (e.code() == HTTP_UNAUTHORIZED) {
-                // Revoked or invalid token → force re-pair on next launch.
-                securePrefs.clearTokenForRepair()
-                _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Re-pairing required")
-            } else {
-                _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Server error ${e.code()}")
+                uploadPending(profileId, toUpload)
+                advanceWatermark()
+
+                _progress.value = _progress.value.copy(phase = SyncPhase.DONE)
+            } catch (e: HttpException) {
+                if (e.code() == HTTP_UNAUTHORIZED) {
+                    // Revoked or invalid token → force re-pair on next launch.
+                    securePrefs.clearTokenForRepair()
+                    _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Re-pairing required")
+                } else {
+                    _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Server error ${e.code()}")
+                }
             }
+        } finally {
+            active.set(false)
         }
     }
 
@@ -98,12 +120,24 @@ class SyncEngine(
      * an unreachable server leaves the existing cache untouched.
      */
     suspend fun discover() {
-        when (_progress.value.phase) {
-            SyncPhase.DISCOVERING, SyncPhase.RECONCILING,
-            SyncPhase.UPLOADING, SyncPhase.REPORTING -> return
-            else -> Unit
-        }
+        // Same atomic guard as run(): bail if a pass is already active. This closes
+        // the check-then-act gap a progress-phase read left open (run() can hold the
+        // guard before it has set any busy phase), so discover never races a run.
+        if (!active.compareAndSet(false, true)) return
         try {
+            // Debounce: a discover() inside the dedup window of the last full pass
+            // reuses that just-computed working set instead of re-enumerating and
+            // re-reconciling the whole library.
+            val last = lastFullReconcileAt
+            val elapsed = last?.let { now() - it }
+            // A monotonic source can't go backwards, but guard the delta anyway:
+            // treat a negative elapsed (a wall-clock backward jump if the source is
+            // ever non-monotonic) as window-expired so a discover is never wrongly
+            // suppressed.
+            if (elapsed != null && elapsed in 0 until DISCOVER_DEDUP_MILLIS) {
+                _progress.value = SyncProgress(phase = SyncPhase.IDLE)
+                return
+            }
             discoverAndReconcile()
             _progress.value = SyncProgress(phase = SyncPhase.IDLE)
         } catch (e: HttpException) {
@@ -116,6 +150,8 @@ class SyncEngine(
         } catch (e: java.io.IOException) {
             // Server unreachable on open: keep whatever the cache already shows.
             _progress.value = SyncProgress(phase = SyncPhase.IDLE)
+        } finally {
+            active.set(false)
         }
     }
 
@@ -148,6 +184,14 @@ class SyncEngine(
                             mimeType = item.mimeType,
                         ),
                     )
+                    // A `complete` timeout can leave this file as a pending/IN_PROGRESS
+                    // row even though the server synced it; drop that stuck row so no
+                    // ghost "in progress" tile lingers next to the synced one.
+                    pendingUploadDao.deleteByIdentity(
+                        item.identity.name,
+                        item.identity.createdOn,
+                        item.identity.size,
+                    )
                 } else {
                     notSynced += item
                     // The server still holds bytes from an interrupted run: resume
@@ -179,6 +223,7 @@ class SyncEngine(
                 )
             },
         )
+        lastFullReconcileAt = now()
         return notSynced
     }
 
@@ -280,9 +325,13 @@ class SyncEngine(
         api.completeSession(sessionId)
 
         val outcomes = api.outcomes(sessionId).outcomes
+        val pendingRows = pendingUploadDao.pending()
         var failed = 0
         outcomes.forEach { outcome ->
-            val pending = pendingUploadByFileId(outcome.fileId) ?: return@forEach
+            // Resolve by file id first; if the server reassigned the id, fall back
+            // to the echoed identity so a round-trip-identical outcome is never
+            // silently dropped. Use the resolved row's real file id for mutations.
+            val pending = resolvePending(pendingRows, outcome) ?: return@forEach
             val identity = Identity(pending.name, pending.createdOn, pending.size)
             if (outcome.status == OUTCOME_SYNCED) {
                 syncedCacheDao.upsert(
@@ -293,10 +342,10 @@ class SyncEngine(
                     ),
                 )
                 failureDao.clear(identity.name, identity.createdOn, identity.size)
-                pendingUploadDao.delete(outcome.fileId)
+                pendingUploadDao.delete(pending.fileId)
             } else {
                 failed += 1
-                recordFailure(outcome.fileId, identity, pending, outcome.reason, outcome.retryable)
+                recordFailure(pending.fileId, identity, pending, outcome.reason, outcome.retryable)
             }
         }
         _progress.value = _progress.value.copy(failedFiles = _progress.value.failedFiles + failed)
@@ -338,9 +387,17 @@ class SyncEngine(
         }
     }
 
-    /** Look up a persisted pending row by its file id. */
-    private suspend fun pendingUploadByFileId(fileId: String): PendingUploadEntity? =
-        pendingUploadDao.pending().firstOrNull { it.fileId == fileId }
+    /**
+     * Find the pending row an outcome belongs to. Prefer an exact file-id match;
+     * if the server echoed a different id, fall back to the round-trip identity
+     * (name) so the outcome is routed to synced/failed handling, never dropped.
+     */
+    private fun resolvePending(
+        pendingRows: List<PendingUploadEntity>,
+        outcome: OutcomeDto,
+    ): PendingUploadEntity? =
+        pendingRows.firstOrNull { it.fileId == outcome.fileId }
+            ?: pendingRows.firstOrNull { it.name == outcome.name }
 
     private fun advanceWatermark() {
         val generation = scanner.currentGeneration()
@@ -405,6 +462,10 @@ class SyncEngine(
         private const val UPLOAD_BATCH = 100
         private const val HTTP_UNAUTHORIZED = 401
         private const val OUTCOME_SYNCED = "synced"
+
+        // Window during which a repeat discover() reuses the last full reconcile
+        // instead of re-enumerating the whole library. run() is never debounced.
+        private const val DISCOVER_DEDUP_MILLIS = 5_000L
 
         // Camera output folder (MediaStore RELATIVE_PATH prefix). Restricting
         // discovery to this excludes other apps' media (Viber, WhatsApp,

@@ -9,11 +9,13 @@ import eu.caiq.imagesorter.sync.data.api.ChunkUploader
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.dto.ChunkResponse
 import eu.caiq.imagesorter.sync.data.db.AppDatabase
+import eu.caiq.imagesorter.sync.data.prefs.SyncPrefs
 import eu.caiq.imagesorter.sync.domain.model.Identity
 import eu.caiq.imagesorter.sync.domain.model.MediaItem
 import eu.caiq.imagesorter.sync.support.FakeMediaSource
 import eu.caiq.imagesorter.sync.support.FakeSyncPrefs
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
@@ -82,9 +84,10 @@ class SyncEngineTest {
 
     private fun engine(
         scanner: FakeMediaSource,
-        prefs: FakeSyncPrefs,
+        prefs: SyncPrefs,
         uploader: ChunkUploader = EchoUploader(),
         batchSize: Int = 100,
+        now: () -> Long = System::currentTimeMillis,
     ) = SyncEngine(
         api = api,
         scanner = scanner,
@@ -94,7 +97,13 @@ class SyncEngineTest {
         pendingUploadDao = db.pendingUploadDao(),
         failureDao = db.failureDao(),
         uploadBatchSize = batchSize,
+        now = now,
     )
+
+    /** Mutable monotonic clock for debounce tests. */
+    private class FakeClock(var millis: Long = 0) : () -> Long {
+        override fun invoke(): Long = millis
+    }
 
     /** Routes by request path so concurrent uploads don't depend on enqueue order. */
     private fun dispatch(handler: (RecordedRequest) -> MockResponse) {
@@ -173,9 +182,9 @@ class SyncEngineTest {
                 req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
                 req.path!!.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
                 req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
-                req.path!!.endsWith("/outcomes") -> resp(
-                    """{"outcomes":[{"file_id":"placeholder","name":"keep.jpg","status":"synced"}]}""",
-                )
+                // No outcome reported yet, so keep.jpg stays queued; this test
+                // pins reconcile's synced-vs-to-upload separation, not reporting.
+                req.path!!.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
                 else -> resp("{}")
             }
         }
@@ -445,6 +454,50 @@ class SyncEngineTest {
     }
 
     @Test
+    fun zeroByteFileCompletesInOnePassAndIsNeverResumed() = runTest {
+        // [wontfix-rationale] A zero-length file is never "resumed": there are no
+        // bytes to resume, so its uploaded_offset stays 0 and the upload loop sends
+        // no chunk. This documents that the missing resume path is harmless — a
+        // zero-byte file completes in a single pass (offset 0 == size 0).
+        val empty = item("empty.jpg", 0)
+        val zero = ZeroByteUploader()
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"empty.jpg","created_on":"2024-01-01T00:00:00","size":0,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
+                else -> resp("{}")
+            }
+        }
+
+        val engine = engine(FakeMediaSource(listOf(empty)), FakeSyncPrefs(concurrency = 1), uploader = zero)
+        engine.run()
+
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        assertEquals("a zero-byte file sends no chunk (nothing to upload or resume)", 0, zero.chunks)
+    }
+
+    /** Asserts no chunk is ever requested; a zero-byte file must skip the loop. */
+    private class ZeroByteUploader : ChunkUploader {
+        @Volatile var chunks = 0
+            private set
+        override suspend fun uploadChunk(
+            sessionId: String,
+            fileId: String,
+            item: MediaItem,
+            offset: Long,
+            length: Long,
+        ): ChunkResponse {
+            chunks += 1
+            return ChunkResponse(offset = offset + length, length = length)
+        }
+    }
+
+    @Test
     fun uploadAllNeverExceedsConfiguredConcurrency() = runTest {
         val concurrency = 3
         val fileCount = 8
@@ -593,6 +646,357 @@ class SyncEngineTest {
         val candidateNames = db.syncedCacheDao().syncedItems().map { it.name }.toSet()
         assertTrue("synced file is a candidate", candidateNames.contains("ok.jpg"))
         assertTrue("terminal-failed file must NOT be a cleanup candidate", !candidateNames.contains("bad.jpg"))
+    }
+
+    @Test
+    fun reconcileAlreadySyncedRemovesStuckPendingRowForThatIdentity() = runTest {
+        // After a `complete` timeout left a file as IN_PROGRESS in the pending
+        // queue while the server actually synced it, the next reconcile reports
+        // that identity already_synced. The stuck pending/IN_PROGRESS row must be
+        // removed so no ghost "in progress" tile remains alongside the synced one.
+        val stuck = item("stuck.jpg", 9)
+        db.pendingUploadDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity(
+                fileId = "stale-fid",
+                mediaStoreId = stuck.mediaStoreId,
+                name = stuck.identity.name,
+                createdOn = stuck.identity.createdOn,
+                size = stuck.identity.size,
+                mimeType = stuck.mimeType,
+                sessionId = "oldsess",
+                serverOffset = 3,
+                status = "IN_PROGRESS",
+                sortKey = 0,
+            ),
+        )
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"stuck.jpg","created_on":"2024-01-01T00:00:00","size":9,"already_synced":true}]}""",
+                )
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(listOf(stuck)), FakeSyncPrefs()).discover()
+
+        assertTrue(
+            "stuck pending row removed when reconcile says already_synced",
+            db.pendingUploadDao().pending().none { it.mediaStoreId == stuck.mediaStoreId },
+        )
+        assertTrue(
+            "identity cached as synced",
+            db.syncedCacheDao().syncedItems().any { it.name == "stuck.jpg" },
+        )
+    }
+
+    @Test
+    fun outcomeIsRoutedByEchoedIdentityWhenFileIdDoesNotMatch() = runTest {
+        // The server echoes a synced outcome whose identity round-trips identically
+        // to a pending row, but whose file_id differs from the row the engine
+        // persisted (e.g. server-side id reassignment). The outcome must NOT be
+        // silently dropped — the matching identity routes it to synced handling.
+        val one = item("one.jpg", 5)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"one.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp(
+                    // Identity round-trips identically, but file_id is a stranger.
+                    """{"outcomes":[{"file_id":"server-reassigned-id","name":"one.jpg","status":"synced"}]}""",
+                )
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(listOf(one)), FakeSyncPrefs(concurrency = 1)).run()
+
+        assertTrue(
+            "outcome routed to synced via echoed identity (not dropped)",
+            db.syncedCacheDao().syncedItems().any { it.name == "one.jpg" },
+        )
+        assertTrue(
+            "pending row cleared once routed",
+            db.pendingUploadDao().pending().none { it.name == "one.jpg" },
+        )
+    }
+
+    @Test
+    fun reportRoutesEveryOutcomeFromOnePrecomputedPendingMap() = runTest {
+        // Reporting must resolve each outcome against a single precomputed snapshot
+        // of the pending rows (no per-outcome rescan): with several files in one
+        // session, every outcome is routed to the right place — synced rows are
+        // cached and cleared, failed rows are recorded — in a single report pass.
+        val items = (0 until 5).map { item("m$it.jpg", it.toLong() + 1) }
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> {
+                    val results = items.joinToString(",") {
+                        """{"name":"${it.identity.name}","created_on":"2024-01-01T00:00:00","size":${it.identity.size},"already_synced":false}"""
+                    }
+                    resp("""{"results":[$results]}""")
+                }
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":999,"length":1}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp(outcomesMixedForQueued())
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(items), FakeSyncPrefs(concurrency = 1)).run()
+
+        // Odd-indexed files were reported synced; even-indexed reported failed.
+        val synced = db.syncedCacheDao().syncedItems()
+            .filter { it.status == "SYNCED" }
+            .map { it.name }
+            .toSet()
+        assertEquals(setOf("m1.jpg", "m3.jpg"), synced)
+        val failures = db.failureDao().observeAll().first().map { it.name }.toSet()
+        assertEquals(setOf("m0.jpg", "m2.jpg", "m4.jpg"), failures)
+        // Synced rows cleared from pending; the terminal failures dropped too.
+        assertTrue(db.pendingUploadDao().pending().none { it.name == "m1.jpg" })
+        assertTrue(db.pendingUploadDao().pending().none { it.name == "m3.jpg" })
+    }
+
+    // Mixed outcomes: odd-indexed synced, even-indexed terminal failure.
+    private fun outcomesMixedForQueued(): String = runBlocking {
+        val rows = db.pendingUploadDao().pending().associateBy { it.name }
+        val parts = (0 until 5).map { i ->
+            val fid = rows.getValue("m$i.jpg").fileId
+            if (i % 2 == 1) {
+                """{"file_id":"$fid","name":"m$i.jpg","status":"synced"}"""
+            } else {
+                """{"file_id":"$fid","name":"m$i.jpg","status":"failed","reason":"no_video_destination","retryable":false}"""
+            }
+        }
+        """{"outcomes":[${parts.joinToString(",")}]}"""
+    }
+
+    @Test
+    fun secondRunWhileFirstIsActiveIsANoOpAndOpensNoNewSession() = runBlocking {
+        // A second run() invoked while the first run() is still in-flight (uploading)
+        // must be a no-op: the atomic re-entrancy guard means it opens no new session
+        // and starts no second upload pass.
+        val one = item("one.jpg", 5)
+        val sessionsOpened = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"one.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> {
+                    sessionsOpened.incrementAndGet()
+                    resp("""{"session_id":"sess"}""")
+                }
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
+                else -> resp("{}")
+            }
+        }
+
+        val gate = GateUploader()
+        val engine = engine(FakeMediaSource(listOf(one)), FakeSyncPrefs(concurrency = 1), uploader = gate)
+
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val first = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
+        gate.awaitEntered()
+
+        // First run is now blocked inside its upload critical section. A second run
+        // while it is active must return promptly (no-op) — the atomic guard makes
+        // it bail before opening a session. Without the guard it would either open a
+        // second session or block on the same gate; the timeout catches the block.
+        kotlinx.coroutines.withTimeout(5_000) { engine.run() }
+        assertEquals("second run must open no new session", 1, sessionsOpened.get())
+
+        gate.release()
+        first.join()
+        // After the guard releases, the engine is reusable.
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+    }
+
+    /** Suspends one upload until released, signalling when it has entered. */
+    private class GateUploader : ChunkUploader {
+        private val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        private val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        suspend fun awaitEntered() = entered.await()
+        fun release() = release.complete(Unit)
+        override suspend fun uploadChunk(
+            sessionId: String,
+            fileId: String,
+            item: MediaItem,
+            offset: Long,
+            length: Long,
+        ): ChunkResponse {
+            entered.complete(Unit)
+            release.await()
+            return ChunkResponse(offset = offset + length, length = length)
+        }
+    }
+
+    @Test
+    fun discoverConcurrentWithActiveRunIsANoOpViaAtomicGuard() = runBlocking {
+        // discover() must be gated by the SAME atomic guard as run(), not by a
+        // check-then-act read of the progress phase. run() acquires the guard
+        // before it touches the phase; a discover() that lands in that window must
+        // still bail (issue no /reconcile), which a phase-read guard would miss.
+        val one = item("one.jpg", 5)
+        val reconciles = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> {
+                    reconciles.incrementAndGet()
+                    resp("""{"results":[{"name":"one.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":true}]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+
+        // Prefs that blocks the first getProfileId() — run() holds the guard here
+        // but has not yet set any busy phase, exposing the check-then-act gap.
+        val gatedPrefs = GatedProfilePrefs()
+        val engine = engine(FakeMediaSource(listOf(one)), gatedPrefs)
+
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val first = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
+        gatedPrefs.awaitEntered()
+
+        // run() owns the guard but phase is still the initial (non-busy) value.
+        engine.discover()
+        assertEquals("discover during an active run must issue no reconcile", 0, reconciles.get())
+
+        gatedPrefs.release()
+        first.join()
+    }
+
+    /** SyncPrefs whose first getProfileId() blocks until released, signalling entry. */
+    private class GatedProfilePrefs : SyncPrefs {
+        private val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        private val gate = java.util.concurrent.CountDownLatch(1)
+        fun release() = gate.countDown()
+        suspend fun awaitEntered() = entered.await()
+        override fun getProfileId(): String? {
+            entered.complete(Unit)
+            gate.await()
+            return "groupby"
+        }
+        override fun getUploadConcurrency(): Int = 1
+        override fun setMediaGeneration(value: Long) {}
+        override fun clearTokenForRepair() {}
+        override fun getServerAddress(): String? = null
+        override fun setServerAddress(value: String?) {}
+    }
+
+    @Test
+    fun secondDiscoverImmediatelyAfterFirstSkipsRedundantEnumerateAndReconcile() = runTest {
+        // A discover() that fires right after a just-completed discover (e.g. the
+        // user re-opening the app, or two triggers landing together) must skip the
+        // redundant full enumerate + reconcile within the dedup window.
+        val a = item("a.jpg", 5)
+        val reconciles = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> {
+                    reconciles.incrementAndGet()
+                    resp("""{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":true}]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+        val scanner = FakeMediaSource(listOf(a))
+        val clock = FakeClock(1_000)
+        val engine = engine(scanner, FakeSyncPrefs(), now = clock)
+
+        engine.discover()
+        engine.discover()
+
+        assertEquals("second back-to-back discover must reuse the prior pass", 1, reconciles.get())
+    }
+
+    @Test
+    fun discoverAfterDedupWindowPerformsAnotherFullPass() = runTest {
+        // Once the dedup window has elapsed, a discover() must do a full pass again
+        // so stale state is refreshed.
+        val a = item("a.jpg", 5)
+        val reconciles = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> {
+                    reconciles.incrementAndGet()
+                    resp("""{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":true}]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+        val scanner = FakeMediaSource(listOf(a))
+        val clock = FakeClock(1_000)
+        val engine = engine(scanner, FakeSyncPrefs(), now = clock)
+
+        engine.discover()
+        clock.millis += 10 * 60 * 1000 // advance well past the dedup window
+        engine.discover()
+
+        assertEquals("a discover after the window does a full pass again", 2, reconciles.get())
+    }
+
+    @Test
+    fun discoverAfterBackwardClockJumpStillPerformsFullPass() = runTest {
+        // A backward clock jump between two discover() calls (NTP correction or the
+        // user changing device time) must not make now()-lastFullReconcileAt
+        // negative and thereby suppress a discover that should run.
+        val a = item("a.jpg", 5)
+        val reconciles = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> {
+                    reconciles.incrementAndGet()
+                    resp("""{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":true}]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+        val scanner = FakeMediaSource(listOf(a))
+        val clock = FakeClock(1_000_000)
+        val engine = engine(scanner, FakeSyncPrefs(), now = clock)
+
+        engine.discover()
+        clock.millis -= 500_000 // wall-clock jumps backward → negative delta
+        engine.discover()
+
+        assertEquals("a backward clock jump must not suppress the second discover", 2, reconciles.get())
+    }
+
+    @Test
+    fun runAlwaysReconcilesEvenRightAfterADiscover() = runTest {
+        // run() must never be debounced by a recent discover — a "Back up now" tap
+        // immediately after app-open discovery must still reconcile and upload.
+        val a = item("a.jpg", 5)
+        val reconciles = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> {
+                    reconciles.incrementAndGet()
+                    resp("""{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":true}]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+        val scanner = FakeMediaSource(listOf(a))
+        val clock = FakeClock(1_000)
+        val engine = engine(scanner, FakeSyncPrefs(), now = clock)
+
+        engine.discover()
+        engine.run()
+
+        assertEquals("run reconciles regardless of a recent discover", 2, reconciles.get())
     }
 
     @Test
