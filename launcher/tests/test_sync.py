@@ -108,6 +108,19 @@ def test_device_status_lifecycle_pending_trusted_revoked(tmp_path):
     assert revoked["status"] == "revoked"
 
 
+def test_pending_status_returns_pairing_code(tmp_path):
+    """A pending device's status includes its pairing_code, so a phone that lost
+    local state can re-display the code instead of re-registering (which would
+    reset an already-approved device back to pending)."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    code = register(client, "dev-1").json()["pairing_code"]
+
+    status = client.get("/api/sync/devices/dev-1/status").json()
+    assert status["status"] == "pending"
+    assert status["pairing_code"] == code
+
+
 def test_approve_sets_approved_at_and_status_token_matches(tmp_path):
     """Approval issues a token and sets approved_at; the status endpoint
     returns the same token that approval issued."""
@@ -363,7 +376,7 @@ def test_complete_marker_survives_restart_and_distinguishes_sessions(tmp_path):
 # Routing & placement
 # ---------------------------------------------------------------------------
 
-def _make_config(tmp_path, *, video=True):
+def _make_config(tmp_path, *, video=True, on_collision="rename"):
     from imagesorter.config import Config, TagGroup, Unclassified, Video
     return Config(
         mode="GroupByTags",
@@ -383,6 +396,7 @@ def _make_config(tmp_path, *, video=True):
             group_by_year=True, group_by_month=False,
         ),
         similarity_threshold=0.96,
+        on_collision=on_collision,
         video=Video(str(tmp_path / "dest" / "videos"), group_by_year=True, group_by_month=False)
         if video else None,
     )
@@ -473,6 +487,27 @@ def test_placement_always_renames_on_clash_both_survive(tmp_path):
     assert s1.exists() and s2.exists()
     assert s1.read_bytes() == b"first"
     assert s2.read_bytes() == b"secondchunk"
+
+
+def test_placement_honors_on_collision_skip_treating_clash_as_already_backed_up(tmp_path):
+    """With on_collision='skip', a name clash is not renamed: the existing file is
+    left untouched and the upload is reported as already backed up (ok, no _1
+    duplicate), pointing the synced index at the existing destination file."""
+    from launcher.sync import place_file
+    cfg = _make_config(tmp_path, on_collision="skip")
+
+    p1 = _part(tmp_path, "a.part", b"first")
+    ok1, s1, _ = place_file(p1, _meta("dup.jpg", 5), cfg, lambda p: {"cat"})
+    p2 = _part(tmp_path, "b.part", b"secondchunk")
+    ok2, s2, reason2 = place_file(p2, _meta("dup.jpg", 11), cfg, lambda p: {"cat"})
+
+    assert ok1 and ok2 and reason2 is None
+    # No rename: the second resolves to the same existing destination path.
+    assert s1 == s2
+    # The existing file is preserved (not overwritten by the skipped upload).
+    assert s1.read_bytes() == b"first"
+    # No _1 duplicate was created.
+    assert not (s1.parent / "dup_1.jpg").exists()
 
 
 # ---------------------------------------------------------------------------

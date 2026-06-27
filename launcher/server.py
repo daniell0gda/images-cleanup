@@ -233,6 +233,10 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             raise HTTPException(status_code=401, detail="Invalid or missing token")
         return device
 
+    @app.get("/api/sync/devices")
+    async def sync_list_devices():
+        return store.list_devices()
+
     @app.post("/api/sync/devices")
     async def sync_register(req: _DeviceRequest):
         code = store.register_device(req.device_id, req.name)
@@ -246,6 +250,11 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         result = {"status": device["status"]}
         if device["status"] == "trusted":
             result["token"] = device["token"]
+        elif device["status"] == "pending":
+            # Surface the code so a phone that lost local state (e.g. cleared app
+            # data) can re-display it without re-registering — re-registering would
+            # reset an already-known device back to pending.
+            result["pairing_code"] = device["pairing_code"]
         return result
 
     @app.post("/api/sync/devices/{device_id}/approve")

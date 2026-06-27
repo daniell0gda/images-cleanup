@@ -192,6 +192,16 @@ class SyncStore:
                 (token,),
             ).fetchone()
 
+    def list_devices(self) -> list[dict]:
+        """List all devices for the management UI, newest first. The bearer
+        token is never exposed — only pairing/identity fields."""
+        with self._lock:
+            rows = self._conn().execute(
+                "SELECT device_id, name, status, pairing_code, created_at, approved_at "
+                "FROM devices ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # -- synced-file index ----------------------------------------------
 
     def is_synced(self, name: str, created_on: str, size: int) -> bool:
@@ -516,8 +526,13 @@ def place_file(
     config,
     detect_tags,
 ) -> tuple[bool, Path | None, FailureReason | None]:
-    """Route a single uploaded file to its destination, always renaming on a
-    genuine filename clash.
+    """Route a single uploaded file to its destination, honoring the profile's
+    ``on_collision`` policy on a genuine filename clash.
+
+    With ``on_collision='rename'`` (the default) a clash is renamed so both files
+    survive. With ``on_collision='skip'`` a clash leaves the existing file in place
+    and the uploaded file is treated as already backed up: ``ok`` is True and the
+    returned path is the existing destination file.
 
     ``detect_tags`` is a callable ``(Path) -> set[str]`` used to classify
     images; it is never called for videos. Returns
@@ -565,11 +580,16 @@ def place_file(
                 dest_dir = _build_dest_dir(
                     base, dt, config.unclassified.group_by_year, config.unclassified.group_by_month
                 )
-        # Sync path forces always-rename: no skip/overwrite knob.
-        stored = _transfer_with_policy(named, dest_dir, copy=False, on_collision="rename")
+        # Honor the profile's collision policy ('rename' default, or 'skip').
+        stored = _transfer_with_policy(named, dest_dir, copy=False, on_collision=config.on_collision)
     except Exception:
         return False, None, FailureReason.PLACEMENT_ERROR
     if stored is None:
+        # transfer() returns None only under on_collision='skip' when the name is
+        # already present. The file is treated as already backed up; point the
+        # synced index at the existing destination file.
+        if config.on_collision == "skip":
+            return True, dest_dir / named.name, None
         return False, None, FailureReason.PLACEMENT_ERROR
     return True, stored, None
 
