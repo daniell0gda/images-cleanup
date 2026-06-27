@@ -79,16 +79,21 @@ true for a sync profile (there must always be a destination for unmatched images
 - **Server-authoritative persistent index** (SQLite on the NAS). Records each synced
   file by its **original** identity plus the actual stored path (which may differ due
   to always-rename).
-- **No `on_collision` knob in the sync path.** Re-syncs are caught by the index
-  before transfer; genuinely distinct filename clashes at a destination are **always
-  renamed** so both files survive. Skip/overwrite are never options.
+- **`on_collision` is honored in the sync path.** Re-syncs are caught by the index
+  before transfer. For a genuine filename clash at a destination, the profile's
+  `on_collision` decides: `rename` (default) keeps both files; `skip` leaves the
+  existing file in place and treats the upload as already backed up (recorded synced
+  against the existing destination file). `skip` suits content-derived filenames,
+  where a clash means the same file; note it weakens the always-rename safety net
+  if two genuinely distinct files ever share a destination name.
 
 ---
 
 ## Server: configuration
 
 A sync profile is an existing **GroupByTags** config plus an optional `video`
-section. `source_folder` and `on_collision` are unused in the sync path.
+section. `source_folder` is unused in the sync path; `on_collision` is honored
+(see Identity & dedup above).
 
 ```yaml
 # ... existing GroupByTags config (tag_groups, unclassified, etc.) ...
