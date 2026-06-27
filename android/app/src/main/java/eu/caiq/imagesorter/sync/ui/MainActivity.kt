@@ -66,10 +66,15 @@ private fun AppRoot(viewModel: MainViewModel) {
     // gated on here (placeholder); production should block sync until granted.
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) { /* TODO(designer/impl): reflect grant state in the UI. */ }
+    ) { viewModel.onMediaPermissionResult() }
 
     LaunchedEffect(Unit) {
         permissionLauncher.launch(requiredPermissions())
+    }
+
+    // Keyed on screen (not Unit) so pairing also starts when the user *arrives*
+    // at the pairing screen by connecting — not only when the app opens there.
+    LaunchedEffect(screen) {
         if (shouldStartPairing(screen)) viewModel.startPairing()
     }
 
@@ -97,14 +102,23 @@ private fun AppRoot(viewModel: MainViewModel) {
         }
 
         AppScreen.MAIN -> {
+            // Refresh the working set on entry so "still to back up" reflects the
+            // device before the user taps "Back up now".
+            LaunchedEffect(Unit) { viewModel.discoverNow() }
             val rows by viewModel.rows.collectAsStateWithLifecycle()
             val filter by viewModel.filter.collectAsStateWithLifecycle()
+            val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
+            val totals by viewModel.totals.collectAsStateWithLifecycle()
+            val failures by viewModel.failures.collectAsStateWithLifecycle()
             MainStatusScreen(
                 rows = rows,
                 selectedFilter = filter,
                 onFilterChange = viewModel::setFilter,
                 onSyncNow = viewModel::syncNow,
                 onCleanup = viewModel::openCleanup,
+                syncProgress = syncProgress,
+                totals = totals,
+                failures = failures,
             )
         }
 

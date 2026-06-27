@@ -10,17 +10,23 @@ import eu.caiq.imagesorter.sync.data.api.dto.ProfileDto
 import eu.caiq.imagesorter.sync.data.db.entity.FailureEntity
 import eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity
 import eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity
+import eu.caiq.imagesorter.sync.domain.model.FailureReason
 import eu.caiq.imagesorter.sync.domain.model.Identity
 import eu.caiq.imagesorter.sync.domain.model.SyncStatus
 import eu.caiq.imagesorter.sync.pairing.PairingState
 import eu.caiq.imagesorter.sync.ui.screens.CleanupPhase
+import eu.caiq.imagesorter.sync.ui.screens.FailureDetail
 import eu.caiq.imagesorter.sync.ui.screens.StatusFilter
 import eu.caiq.imagesorter.sync.ui.screens.StatusRow
+import eu.caiq.imagesorter.sync.ui.screens.StatusTotals
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -76,6 +82,13 @@ class MainViewModel(
     private val _filter = MutableStateFlow(StatusFilter.WORKING_SET)
     val filter: StateFlow<StatusFilter> = _filter.asStateFlow()
 
+    /**
+     * Live sync progress. The engine is a process-wide singleton, so this is the
+     * same flow the foreground service drives — the UI mirrors the running pass.
+     */
+    val syncProgress: StateFlow<eu.caiq.imagesorter.sync.sync.SyncProgress> =
+        locator.syncEngine.progress
+
     private val _cleanupPhase = MutableStateFlow(CleanupPhase.IDLE)
     val cleanupPhase: StateFlow<CleanupPhase> = _cleanupPhase.asStateFlow()
 
@@ -83,16 +96,40 @@ class MainViewModel(
     private val _deletableMediaIds = MutableStateFlow<List<Long>>(emptyList())
     val deletableMediaIds: StateFlow<List<Long>> = _deletableMediaIds.asStateFlow()
 
-    /** The status rows shown on the main view, recomputed from the cache + queue. */
-    val rows: StateFlow<List<StatusRow>> =
+    /**
+     * Every status row, unfiltered, recomputed from the cache + queue. The filtered
+     * view and the library-wide totals both derive from this so the header counts
+     * stay independent of the active filter.
+     */
+    private val allRows: StateFlow<List<StatusRow>> =
         combine(
             locator.syncedCacheDao().observeAll(),
             locator.pendingUploadDao().observeAll(),
             locator.failureDao().observeAll(),
-            _filter,
-        ) { synced, pending, failures, filter ->
-            buildRows(synced, pending, failures, filter)
+        ) { synced, pending, failures ->
+            buildAllRows(synced, pending, failures)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** The status rows shown on the main view, after applying the active filter. */
+    val rows: StateFlow<List<StatusRow>> =
+        combine(allRows, _filter) { all, filter ->
+            applyFilter(all, filter)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Library-wide counts for the header, filter-independent. */
+    val totals: StateFlow<StatusTotals> =
+        allRows
+            .map { StatusTotals.fromRows(it) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), StatusTotals(0, 0, 0))
+
+    /**
+     * Per-file failures for the failures modal — the authoritative record of which
+     * files didn't back up and why. Newest first (the DAO orders by failure time).
+     */
+    val failures: StateFlow<List<FailureDetail>> =
+        locator.failureDao().observeAll()
+            .map { list -> list.map { it.toFailureDetail() } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private fun initialScreen(): AppScreen = when {
         routingPrefs.getServerAddress().isNullOrEmpty() -> AppScreen.SERVER_SETUP
@@ -141,22 +178,42 @@ class MainViewModel(
 
     // --- Pairing ---
 
+    private var pairingJob: Job? = null
+
+    /**
+     * Resolve and display this device's pairing state, then poll for approval.
+     * Re-entrant calls (e.g. re-navigating to the pairing screen) are ignored
+     * while a pairing pass is already running, so polling never doubles up.
+     *
+     * Uses [PairingManager.beginPairing] so an already-trusted device recovers
+     * its trust instead of re-registering and resetting itself.
+     */
     fun startPairing() {
-        viewModelScope.launch {
-            val code = locator.pairingManager.register()
-            _pairingState.value = PairingState.Pending(code)
-            val resolved = locator.pairingManager.pollUntilResolved { state ->
-                // Preserve the displayed code while pending.
-                _pairingState.value = when (state) {
-                    is PairingState.Pending -> PairingState.Pending(code)
-                    else -> state
+        if (pairingJob?.isActive == true) return
+        pairingJob = viewModelScope.launch {
+            when (val initial = locator.pairingManager.beginPairing()) {
+                is PairingState.Trusted -> onPaired()
+                is PairingState.Revoked -> _pairingState.value = PairingState.Revoked
+                is PairingState.Pending -> {
+                    _pairingState.value = initial
+                    val code = initial.pairingCode
+                    val resolved = locator.pairingManager.pollUntilResolved { state ->
+                        // Preserve the displayed code while pending.
+                        _pairingState.value = when (state) {
+                            is PairingState.Pending -> PairingState.Pending(code)
+                            else -> state
+                        }
+                    }
+                    if (resolved is PairingState.Trusted) onPaired()
                 }
             }
-            if (resolved is PairingState.Trusted) {
-                loadProfiles()
-                _screen.value = AppScreen.PROFILE_PICKER
-            }
         }
+    }
+
+    private fun onPaired() {
+        _pairingState.value = PairingState.Trusted
+        loadProfiles()
+        _screen.value = AppScreen.PROFILE_PICKER
     }
 
     // --- Profiles ---
@@ -174,6 +231,21 @@ class MainViewModel(
 
     fun syncNow() {
         locator.syncTrigger.requestSync()
+    }
+
+    /**
+     * Refresh the working set on app open: enumerate the device + reconcile so the
+     * main view shows what still needs backing up, without starting an upload.
+     * Runs off the main thread (MediaStore enumeration blocks) and is a no-op while
+     * a sync is already running.
+     */
+    fun discoverNow() {
+        viewModelScope.launch(Dispatchers.Default) { locator.syncEngine.discover() }
+    }
+
+    /** Permission flow result: refresh discovery once media access is granted. */
+    fun onMediaPermissionResult() {
+        if (_screen.value == AppScreen.MAIN) discoverNow()
     }
 
     fun setFilter(filter: StatusFilter) {
@@ -223,11 +295,10 @@ class MainViewModel(
 
     // --- Row projection ---
 
-    private fun buildRows(
+    private fun buildAllRows(
         synced: List<SyncedCacheEntity>,
         pending: List<PendingUploadEntity>,
         failures: List<FailureEntity>,
-        filter: StatusFilter,
     ): List<StatusRow> {
         val failureByName = failures.associateBy { it.name }
         val syncedRows = synced.map { row ->
@@ -235,6 +306,10 @@ class MainViewModel(
                 name = row.name,
                 status = runCatching { SyncStatus.valueOf(row.status) }.getOrDefault(SyncStatus.SYNCED),
                 failureReason = failureByName[row.name]?.reason,
+                // Identity (name+createdOn+size) is the synced_cache primary key.
+                key = "s:${row.name}:${row.createdOn}:${row.size}",
+                mediaStoreId = row.mediaStoreId,
+                mimeType = row.mimeType,
             )
         }
         val pendingRows = pending
@@ -243,15 +318,32 @@ class MainViewModel(
                 StatusRow(
                     name = row.name,
                     status = runCatching { SyncStatus.valueOf(row.status) }.getOrDefault(SyncStatus.PENDING),
+                    // mediaStoreId is unique per phone media file.
+                    key = "p:${row.mediaStoreId}",
+                    mediaStoreId = row.mediaStoreId,
+                    mimeType = row.mimeType,
                 )
             }
 
-        val all = pendingRows + syncedRows
-        return when (filter) {
+        // distinctBy is a safety net: the grid key must be unique, so collapse any
+        // duplicate rows (e.g. stale pending rows left by an earlier double-run)
+        // rather than letting the LazyGrid crash on a repeated key.
+        return (pendingRows + syncedRows).distinctBy { it.key }
+    }
+
+    /** The stored reason is a [FailureReason] name; map it back, falling to UNKNOWN. */
+    private fun FailureEntity.toFailureDetail(): FailureDetail =
+        FailureDetail(
+            name = name,
+            reason = runCatching { FailureReason.valueOf(reason) }.getOrDefault(FailureReason.UNKNOWN),
+            retryable = retryable,
+        )
+
+    private fun applyFilter(all: List<StatusRow>, filter: StatusFilter): List<StatusRow> =
+        when (filter) {
             StatusFilter.ALL -> all
             StatusFilter.SYNCED_TODAY -> all.filter { it.status == SyncStatus.SYNCED }
             StatusFilter.WORKING_SET ->
                 all.filter { it.status != SyncStatus.SYNCED || it.failureReason != null }
         }
-    }
 }
