@@ -29,6 +29,15 @@ def _sync_db_path() -> Path:
     return Path(os.environ.get("SYNC_DB", "./data/sync.db"))
 
 
+# Largest single chunk body the server will append, in bytes. Bounds per-request
+# memory and rejects pathological uploads; overridable via the env for tuning.
+_DEFAULT_MAX_CHUNK_BYTES = 16 * 1024 * 1024
+
+
+def _max_chunk_bytes() -> int:
+    return int(os.environ.get("MAX_CHUNK_BYTES", _DEFAULT_MAX_CHUNK_BYTES))
+
+
 def _launcher_public_port() -> str:
     """Host port the launcher UI is reachable on (may differ from the internal
     7000 when remapped in Docker)."""
@@ -233,13 +242,30 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             raise HTTPException(status_code=401, detail="Invalid or missing token")
         return device
 
+    def _require_owned_session(device, session_id: str) -> None:
+        """Reject access to a session the authed device does not own.
+
+        Ownership is read from the durable session registry (not the on-disk
+        folder) so the check survives session cleanup. An unknown session is a
+        404; a known session owned by another device is a 403, and neither
+        performs any write to the session.
+        """
+        owner = store.session_owner(session_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail="Unknown session")
+        if owner != device["device_id"]:
+            raise HTTPException(status_code=403, detail="Session belongs to another device")
+
     @app.get("/api/sync/devices")
     async def sync_list_devices():
         return store.list_devices()
 
     @app.post("/api/sync/devices")
     async def sync_register(req: _DeviceRequest):
-        code = store.register_device(req.device_id, req.name)
+        try:
+            code = store.register_device(req.device_id, req.name)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid device_id")
         return {"status": "pending", "pairing_code": code}
 
     @app.get("/api/sync/devices/{device_id}/status")
@@ -318,6 +344,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
                 detail="Sync profiles require unclassified.enabled=true",
             )
         session_id = sessions.create_session(device["device_id"], req.profile_id)
+        store.record_session(session_id, device["device_id"], req.profile_id)
         return {"session_id": session_id}
 
     @app.get("/api/sync/sessions/{session_id}/files/{file_id}")
@@ -326,7 +353,8 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         file_id: str,
         authorization: str | None = Header(default=None),
     ):
-        _require_device(authorization)
+        device = _require_device(authorization)
+        _require_owned_session(device, session_id)
         return {"offset": sessions.file_offset(session_id, file_id)}
 
     @app.post("/api/sync/sessions/{session_id}/files")
@@ -341,9 +369,19 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         file_mime_type: str = Header(alias="File-Mime-Type"),
         upload_offset: int = Header(alias="Upload-Offset", default=0),
     ):
-        _require_device(authorization)
+        device = _require_device(authorization)
+        _require_owned_session(device, session_id)
         meta = sync_mod.FileMeta(file_name, file_created_on, file_size, file_mime_type)
+        # Reject an oversize chunk BEFORE appending any bytes. Check the declared
+        # Content-Length first so we can refuse without buffering the body, then
+        # guard the actual length in case the header lied.
+        max_chunk = _max_chunk_bytes()
+        declared = request.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > max_chunk:
+            raise HTTPException(status_code=413, detail="Chunk too large")
         data = await request.body()
+        if len(data) > max_chunk:
+            raise HTTPException(status_code=413, detail="Chunk too large")
         try:
             new_offset = sessions.write_chunk(session_id, file_id, meta, upload_offset, data)
         except FileNotFoundError:
@@ -357,7 +395,12 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         session_id: str,
         authorization: str | None = Header(default=None),
     ):
-        _require_device(authorization)
+        device = _require_device(authorization)
+        _require_owned_session(device, session_id)
+        # Idempotent: a session already processed (its folder cleaned up by the
+        # first placement) reports complete on retry instead of 404.
+        if store.has_outcomes(session_id):
+            return {"status": "complete"}
         try:
             sessions.complete(session_id)
         except FileNotFoundError:
@@ -370,7 +413,8 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         session_id: str,
         authorization: str | None = Header(default=None),
     ):
-        _require_device(authorization)
+        device = _require_device(authorization)
+        _require_owned_session(device, session_id)
         return {"outcomes": lane.read_outcomes(session_id)}
 
     @app.post("/api/sync/verify")
@@ -378,6 +422,12 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         items: list[_Identity],
         authorization: str | None = Header(default=None),
     ):
+        # Accepted trust boundary (wontfix): verify exposes per-identity presence
+        # to any trusted device. This is not narrowed because identity presence is
+        # already inferable through global dedup — is_synced and reconcile's
+        # already_synced are global across all devices (PK is (name, created_on,
+        # size)), so a trusted device can already learn presence via reconcile.
+        # Hiding it here would not change that same trust boundary.
         _require_device(authorization)
         results = []
         for i in items:

@@ -50,6 +50,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def is_safe_device_id(device_id: str) -> bool:
+    """True iff ``device_id`` is a bare safe token usable as a directory name.
+
+    A device_id is used verbatim as a path component for its inbox/session
+    directories, so anything with path separators or a ``..`` component could
+    escape the inbox and must be rejected.
+    """
+    return bool(device_id) and Path(device_id).name == device_id and device_id not in (".", "..")
+
+
 # ---------------------------------------------------------------------------
 # Profiles
 # ---------------------------------------------------------------------------
@@ -135,6 +145,12 @@ class SyncStore:
                     retryable     INTEGER,
                     PRIMARY KEY (session_id, file_id)
                 );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id    TEXT PRIMARY KEY,
+                    device_id     TEXT NOT NULL,
+                    profile_id    TEXT NOT NULL,
+                    created_at    TEXT NOT NULL
+                );
                 """
             )
             con.commit()
@@ -142,7 +158,13 @@ class SyncStore:
     # -- devices ---------------------------------------------------------
 
     def register_device(self, device_id: str, name: str) -> str:
-        """Create (or reset) a pending device and return its pairing code."""
+        """Create (or reset) a pending device and return its pairing code.
+
+        Rejects a device_id that is not a bare safe token, since it is used as a
+        directory component for the device's inbox/session folders.
+        """
+        if not is_safe_device_id(device_id):
+            raise ValueError(f"invalid device_id: {device_id!r}")
         code = f"{secrets.randbelow(1_000_000):06d}"
         with self._lock:
             self._conn().execute(
@@ -274,6 +296,30 @@ class SyncStore:
             results.append(entry)
         return results
 
+    # -- session registry (durable session->device ownership) ------------
+
+    def record_session(self, session_id: str, device_id: str, profile_id: str) -> None:
+        """Durably record which device owns a session.
+
+        Kept independent of the on-disk session folder so ownership checks and
+        idempotent completion still work after the folder is cleaned up.
+        """
+        with self._lock:
+            self._conn().execute(
+                "INSERT OR REPLACE INTO sessions "
+                "(session_id, device_id, profile_id, created_at) VALUES (?, ?, ?, ?)",
+                (session_id, device_id, profile_id, _now()),
+            )
+            self._conn().commit()
+
+    def session_owner(self, session_id: str) -> str | None:
+        """Return the device_id that owns a session, or None if unknown."""
+        with self._lock:
+            row = self._conn().execute(
+                "SELECT device_id FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return row["device_id"] if row else None
+
     def stored_path_for(self, name: str, created_on: str, size: int) -> str | None:
         with self._lock:
             row = self._conn().execute(
@@ -311,6 +357,18 @@ class SessionManager:
     def __init__(self, inbox_base: Path):
         self._inbox = Path(inbox_base)
         self._lock = threading.RLock()
+        # Per-session write locks so chunk appends to different sessions never
+        # serialize against each other; a tiny meta-lock guards the registry.
+        self._write_locks: dict[str, threading.Lock] = {}
+        self._write_locks_guard = threading.Lock()
+
+    def _session_write_lock(self, session_id: str) -> threading.Lock:
+        with self._write_locks_guard:
+            lock = self._write_locks.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._write_locks[session_id] = lock
+            return lock
 
     # -- session dirs ----------------------------------------------------
 
@@ -388,9 +446,11 @@ class SessionManager:
         """Append a chunk at ``offset`` and return the new offset.
 
         Writes are idempotent on the offset: a chunk whose offset matches the
-        current length is appended; a stale offset is ignored.
+        current length is appended; a stale offset is ignored. Held under a
+        per-session lock so two sessions can be written concurrently while a
+        single session's appends stay serialized.
         """
-        with self._lock:
+        with self._session_write_lock(session_id):
             sdir = self._find_session(session_id)
             if sdir is None:
                 raise FileNotFoundError(session_id)
@@ -620,6 +680,18 @@ class SyncLane:
         self._cv = threading.Condition(self._lock)
         self._worker: threading.Thread | None = None
         self._running = False
+        # Per-session processing locks so two callers (e.g. the complete route
+        # and startup_reconcile) never place the same session's files twice.
+        self._session_locks: dict[str, threading.Lock] = {}
+        self._session_locks_guard = threading.Lock()
+
+    def _session_lock(self, session_id: str) -> threading.Lock:
+        with self._session_locks_guard:
+            lock = self._session_locks.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._session_locks[session_id] = lock
+            return lock
 
     def enqueue(self, session_id: str) -> None:
         with self._cv:
@@ -645,7 +717,18 @@ class SyncLane:
 
     def process_session(self, session_id: str) -> list[dict]:
         """Place every uploaded file in a session, commit index rows, write
-        per-file outcomes, and clean up the session folder when emptied."""
+        per-file outcomes, and clean up the session folder when emptied.
+
+        A per-session lock plus an idempotency short-circuit make this safe to
+        call concurrently or back-to-back for the same session: only the first
+        caller places the files; later callers return the recorded outcomes.
+        """
+        with self._session_lock(session_id):
+            if self._store.has_outcomes(session_id):
+                return self._store.outcomes_for(session_id)
+            return self._process_session_locked(session_id)
+
+    def _process_session_locked(self, session_id: str) -> list[dict]:
         sdir = self._sessions.find_session(session_id)
         if sdir is None:
             return []
@@ -670,8 +753,16 @@ class SyncLane:
                 )
                 outcome = {"file_id": file_id, "name": fmeta.name, "status": "synced"}
             else:
-                # Failed: delete the temp copy (phone keeps the original).
-                for leftover in (part, sdir / fmeta.name):
+                # Failed: delete the temp copy (phone keeps the original). The
+                # stored name is untrusted; only ever unlink bare-basename
+                # children that stay inside the session dir so a traversal name
+                # like "../../x" can never reach a file outside it.
+                leftovers = [part]
+                if Path(fmeta.name).name == fmeta.name:
+                    named = sdir / fmeta.name
+                    if _is_path_within(named, sdir):
+                        leftovers.append(named)
+                for leftover in leftovers:
                     if leftover.exists():
                         leftover.unlink()
                 outcome = {
