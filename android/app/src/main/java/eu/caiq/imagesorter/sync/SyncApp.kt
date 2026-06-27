@@ -69,9 +69,11 @@ class ServiceLocator(private val app: Context) {
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .addInterceptor(AuthInterceptor(securePrefs))
-            // Large transfers: generous read/write windows, no call timeout.
+            // Large transfers: generous read/write windows, no call timeout. The
+            // read window also covers `complete`, which blocks while the server
+            // classifies + places a whole upload batch, so it is generous.
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
             .writeTimeout(0, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)
             .build()

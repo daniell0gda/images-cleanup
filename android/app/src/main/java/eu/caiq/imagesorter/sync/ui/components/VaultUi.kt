@@ -23,6 +23,7 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -107,12 +108,69 @@ private val TILE_PALETTE = listOf(
 
 /**
  * A deterministic gradient stand-in for a photo thumbnail, derived from [seed]
- * (the item name). TODO(thumbnails): replace with the real MediaStore thumbnail
- * (Coil + content URI) once device media loading is wired.
+ * (the item name). Used as the fallback by [MediaThumbnail] while the real
+ * thumbnail loads, or when no local MediaStore id is available (e.g. a synced item
+ * already removed from the phone).
  */
 fun Modifier.photoTile(seed: String): Modifier = composed {
     val pair = TILE_PALETTE[(seed.hashCode() and 0x7fffffff) % TILE_PALETTE.size]
     clip(androidx.compose.material3.MaterialTheme.shapes.small)
         .background(Brush.linearGradient(listOf(pair.first, pair.second)))
         .fillMaxSize()
+}
+
+/** Square edge (px) requested from MediaStore for grid thumbnails. */
+private const val THUMB_PX = 256
+
+private fun contentUriFor(mediaStoreId: Long, mimeType: String?): android.net.Uri {
+    val collection = if (mimeType?.startsWith("video/") == true) {
+        android.provider.MediaStore.Video.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL)
+    } else {
+        android.provider.MediaStore.Images.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL)
+    }
+    return android.content.ContentUris.withAppendedId(collection, mediaStoreId)
+}
+
+/**
+ * Renders the real on-device thumbnail for a media item. Loads via
+ * [android.content.ContentResolver.loadThumbnail] (API 29+, so always available at
+ * this app's minSdk 33), which generates frames for videos too. While loading — or
+ * if [mediaStoreId] is null / the file is gone — it shows the [fallbackSeed]
+ * gradient instead of an empty box.
+ */
+@Composable
+fun MediaThumbnail(
+    mediaStoreId: Long?,
+    mimeType: String?,
+    fallbackSeed: String,
+    modifier: Modifier = Modifier,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var bitmap by remember(mediaStoreId, mimeType) {
+        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+    }
+    if (mediaStoreId != null) {
+        androidx.compose.runtime.LaunchedEffect(mediaStoreId, mimeType) {
+            bitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver
+                        .loadThumbnail(contentUriFor(mediaStoreId, mimeType), android.util.Size(THUMB_PX, THUMB_PX), null)
+                        .asImageBitmap()
+                }.getOrNull()
+            }
+        }
+    }
+    val loaded = bitmap
+    if (loaded != null) {
+        androidx.compose.foundation.Image(
+            bitmap = loaded,
+            contentDescription = null,
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            modifier = modifier
+                .clip(androidx.compose.material3.MaterialTheme.shapes.small)
+                .fillMaxSize(),
+        )
+    } else {
+        Box(modifier.photoTile(fallbackSeed))
+    }
 }

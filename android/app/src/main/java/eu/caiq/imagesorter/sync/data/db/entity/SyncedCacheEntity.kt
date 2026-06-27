@@ -15,6 +15,10 @@ data class SyncedCacheEntity(
     val size: Long,
     /** Stored [eu.caiq.imagesorter.sync.domain.model.SyncStatus] name. */
     val status: String,
+    /** Local `MediaStore._ID`, used to load the thumbnail; null if not yet known. */
+    val mediaStoreId: Long? = null,
+    /** MIME type, used to pick the image vs video MediaStore collection. */
+    val mimeType: String? = null,
     /** Epoch millis the server last confirmed presence, or null. */
     val lastVerifiedAt: Long? = null,
     /** Epoch millis this row was last marked synced, or null. */

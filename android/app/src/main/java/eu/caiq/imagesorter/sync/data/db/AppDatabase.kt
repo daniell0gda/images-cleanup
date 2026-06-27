@@ -22,7 +22,7 @@ import eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity
         PendingUploadEntity::class,
         FailureEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

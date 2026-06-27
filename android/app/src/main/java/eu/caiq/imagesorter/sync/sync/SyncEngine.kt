@@ -90,6 +90,35 @@ class SyncEngine(
         }
     }
 
+    /**
+     * Discovery + reconcile only — refresh the working set (what still needs
+     * backing up) without uploading. Called on app open so the main view reflects
+     * reality before the user taps "Back up now". A no-op while a run is already
+     * active so it never races the foreground upload pass. A 401 forces re-pair;
+     * an unreachable server leaves the existing cache untouched.
+     */
+    suspend fun discover() {
+        when (_progress.value.phase) {
+            SyncPhase.DISCOVERING, SyncPhase.RECONCILING,
+            SyncPhase.UPLOADING, SyncPhase.REPORTING -> return
+            else -> Unit
+        }
+        try {
+            discoverAndReconcile()
+            _progress.value = SyncProgress(phase = SyncPhase.IDLE)
+        } catch (e: HttpException) {
+            if (e.code() == HTTP_UNAUTHORIZED) {
+                securePrefs.clearTokenForRepair()
+                _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Re-pairing required")
+            } else {
+                _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Server error ${e.code()}")
+            }
+        } catch (e: java.io.IOException) {
+            // Server unreachable on open: keep whatever the cache already shows.
+            _progress.value = SyncProgress(phase = SyncPhase.IDLE)
+        }
+    }
+
     // --- Discover + reconcile -------------------------------------------------
 
     /** Enumerate, reconcile in batches, persist the pending queue, return items. */
@@ -97,7 +126,9 @@ class SyncEngine(
         _progress.value = SyncProgress(phase = SyncPhase.DISCOVERING)
         // Discovery may be incremental, but the design mandates a FULL reconcile
         // every run, so enumerate the whole library here for the reconcile pass.
-        val items = scanner.enumerate(sinceGeneration = SecurePrefs.NO_WATERMARK)
+        // Restricted to the camera folder so app media (Viber, screenshots, etc.)
+        // is never backed up — only photos/videos the camera produced.
+        val items = scanner.enumerate(sinceGeneration = SecurePrefs.NO_WATERMARK, folders = CAMERA_FOLDERS)
         val byIdentity = items.associateBy { it.identity }
 
         _progress.value = SyncProgress(phase = SyncPhase.RECONCILING, totalFiles = items.size)
@@ -110,7 +141,13 @@ class SyncEngine(
                 val identity = Identity(result.name, result.createdOn, result.size)
                 val item = byIdentity[identity] ?: return@forEach
                 if (result.alreadySynced) {
-                    syncedCacheDao.upsert(item.identity.toSyncedCache(SyncStatus.SYNCED))
+                    syncedCacheDao.upsert(
+                        item.identity.toSyncedCache(
+                            SyncStatus.SYNCED,
+                            mediaStoreId = item.mediaStoreId,
+                            mimeType = item.mimeType,
+                        ),
+                    )
                 } else {
                     notSynced += item
                     // The server still holds bytes from an interrupted run: resume
@@ -248,12 +285,18 @@ class SyncEngine(
             val pending = pendingUploadByFileId(outcome.fileId) ?: return@forEach
             val identity = Identity(pending.name, pending.createdOn, pending.size)
             if (outcome.status == OUTCOME_SYNCED) {
-                syncedCacheDao.upsert(identity.toSyncedCache(SyncStatus.SYNCED))
+                syncedCacheDao.upsert(
+                    identity.toSyncedCache(
+                        SyncStatus.SYNCED,
+                        mediaStoreId = pending.mediaStoreId,
+                        mimeType = pending.mimeType,
+                    ),
+                )
                 failureDao.clear(identity.name, identity.createdOn, identity.size)
                 pendingUploadDao.delete(outcome.fileId)
             } else {
                 failed += 1
-                recordFailure(outcome.fileId, identity, outcome.reason, outcome.retryable)
+                recordFailure(outcome.fileId, identity, pending, outcome.reason, outcome.retryable)
             }
         }
         _progress.value = _progress.value.copy(failedFiles = _progress.value.failedFiles + failed)
@@ -262,6 +305,7 @@ class SyncEngine(
     private suspend fun recordFailure(
         fileId: String,
         identity: Identity,
+        pending: PendingUploadEntity,
         reasonWire: String?,
         retryableFromServer: Boolean?,
     ) {
@@ -279,7 +323,13 @@ class SyncEngine(
                 failedAt = System.currentTimeMillis(),
             ),
         )
-        syncedCacheDao.upsert(identity.toSyncedCache(SyncStatus.FAILED))
+        syncedCacheDao.upsert(
+            identity.toSyncedCache(
+                SyncStatus.FAILED,
+                mediaStoreId = pending.mediaStoreId,
+                mimeType = pending.mimeType,
+            ),
+        )
         if (retryable) {
             // Leave it in the pending queue (reset to PENDING) for the next run.
             pendingUploadDao.setStatus(fileId, SyncStatus.PENDING.name)
@@ -301,11 +351,17 @@ class SyncEngine(
 
     private fun Identity.toDto() = IdentityDto(name = name, createdOn = createdOn, size = size)
 
-    private fun Identity.toSyncedCache(status: SyncStatus) = SyncedCacheEntity(
+    private fun Identity.toSyncedCache(
+        status: SyncStatus,
+        mediaStoreId: Long? = null,
+        mimeType: String? = null,
+    ) = SyncedCacheEntity(
         name = name,
         createdOn = createdOn,
         size = size,
         status = status.name,
+        mediaStoreId = mediaStoreId,
+        mimeType = mimeType,
         syncedAt = if (status == SyncStatus.SYNCED) System.currentTimeMillis() else null,
     )
 
@@ -349,5 +405,10 @@ class SyncEngine(
         private const val UPLOAD_BATCH = 100
         private const val HTTP_UNAUTHORIZED = 401
         private const val OUTCOME_SYNCED = "synced"
+
+        // Camera output folder (MediaStore RELATIVE_PATH prefix). Restricting
+        // discovery to this excludes other apps' media (Viber, WhatsApp,
+        // downloads, screenshots) so only camera photos/videos are backed up.
+        private val CAMERA_FOLDERS = setOf("DCIM/Camera/")
     }
 }

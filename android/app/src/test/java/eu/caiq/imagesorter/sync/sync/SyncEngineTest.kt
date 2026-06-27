@@ -106,6 +106,58 @@ class SyncEngineTest {
     private fun resp(body: String) = MockResponse().setBody(body)
 
     @Test
+    fun discoveryIsRestrictedToTheCameraFolder() = runTest {
+        // Only camera media must be backed up — app media (Viber, screenshots, …)
+        // is excluded by restricting the MediaStore enumerate to DCIM/Camera/.
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp("""{"results":[]}""")
+                else -> resp("{}")
+            }
+        }
+        val scanner = FakeMediaSource(emptyList())
+        engine(scanner, FakeSyncPrefs()).discover()
+
+        assertEquals(setOf("DCIM/Camera/"), scanner.lastFolders)
+    }
+
+    @Test
+    fun discoverPopulatesWorkingSetWithoutUploading() = runTest {
+        // App open: discovery must surface what needs backing up (populate the
+        // pending queue) but must NOT upload — no session is opened.
+        val a = item("a.jpg", 5)
+        val skip = item("skip.jpg", 7)
+        val sessionsOpened = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[
+                        {"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"skip.jpg","created_on":"2024-01-01T00:00:00","size":7,"already_synced":true}
+                    ]}""",
+                )
+                req.path!!.endsWith("/sessions") -> {
+                    sessionsOpened.incrementAndGet()
+                    resp("""{"session_id":"sess"}""")
+                }
+                else -> resp("{}")
+            }
+        }
+
+        val engine = engine(FakeMediaSource(listOf(a, skip)), FakeSyncPrefs())
+        engine.discover()
+
+        // The not-synced file is queued (visible as "to back up").
+        val queued = db.pendingUploadDao().observeAll().first().map { it.name }.toSet()
+        assertEquals(setOf("a.jpg"), queued)
+        // The already-synced file was cached, not queued.
+        assertTrue(db.syncedCacheDao().syncedItems().any { it.name == "skip.jpg" })
+        // Nothing was uploaded.
+        assertEquals("discovery must not open an upload session", 0, sessionsOpened.get())
+        assertEquals(SyncPhase.IDLE, engine.progress.value.phase)
+    }
+
+    @Test
     fun uploadsOnlyNotAlreadySyncedAndCachesAlreadySynced() = runTest {
         val keep = item("keep.jpg", 5)
         val skip = item("skip.jpg", 7)

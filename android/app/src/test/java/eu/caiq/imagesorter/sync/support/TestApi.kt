@@ -62,7 +62,14 @@ class FakeMediaSource(
     private val items: List<MediaItem>,
     private val generation: Long = 0,
 ) : MediaSource {
-    override fun enumerate(sinceGeneration: Long, folders: Set<String>): List<MediaItem> = items
+    /** The folders argument of the last [enumerate] call, for assertions. */
+    var lastFolders: Set<String>? = null
+        private set
+
+    override fun enumerate(sinceGeneration: Long, folders: Set<String>): List<MediaItem> {
+        lastFolders = folders
+        return items
+    }
     override fun currentGeneration(): Long = generation
 }
 
