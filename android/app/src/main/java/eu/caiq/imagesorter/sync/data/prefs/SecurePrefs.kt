@@ -2,6 +2,7 @@ package eu.caiq.imagesorter.sync.data.prefs
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.provider.Settings
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.util.UUID
@@ -14,8 +15,10 @@ import java.util.UUID
  * (profile id, MediaStore generation watermark, trusted-network preference) live
  * in a plain [SharedPreferences] — they are rebuildable and not sensitive.
  *
- * The device id is generated once on first access and never changes for the life
- * of the install; uninstall/reinstall mints a new identity and re-pairs.
+ * The device id is derived from [Settings.Secure.ANDROID_ID] so it survives the
+ * user clearing the app's data (which wipes the encrypted store) — the phone then
+ * recovers its existing pairing instead of re-pairing. A previously stored id is
+ * kept as-is for backward compatibility with installs that predate this.
  */
 class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.imagesorter.sync.ui.RoutingPrefs {
 
@@ -40,12 +43,22 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.images
 
     // --- Secrets ---
 
-    /** Stable per-install device UUID, generated lazily on first call. */
+    /**
+     * Stable device id. Honors any id already stored by an earlier app version;
+     * otherwise derives one from ANDROID_ID (stable across app-data clears), and
+     * only falls back to a random UUID on the rare device that reports no
+     * ANDROID_ID. The resolved value is cached so it never changes mid-install.
+     */
     override fun getOrCreateDeviceId(): String {
         secure.getString(KEY_DEVICE_ID, null)?.let { return it }
-        val id = UUID.randomUUID().toString()
+        val id = stableDeviceId()
         secure.edit().putString(KEY_DEVICE_ID, id).apply()
         return id
+    }
+
+    private fun stableDeviceId(): String {
+        val androidId = Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
+        return if (!androidId.isNullOrBlank()) "android-$androidId" else UUID.randomUUID().toString()
     }
 
     override fun getToken(): String? = secure.getString(KEY_TOKEN, null)

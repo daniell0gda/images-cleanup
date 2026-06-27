@@ -34,13 +34,39 @@ class PairingManager(
     private val deviceName: String,
 ) {
     /**
-     * Register this device (idempotent enough for a skeleton: a re-register just
-     * yields a fresh pending code). Returns the pairing code to display.
+     * Register this device. Returns the pairing code to display.
+     *
+     * Note: on the launcher this *resets* the device to pending and mints a new
+     * code, so it must only be called for a device the server does not already
+     * know — see [beginPairing], which guards this.
      */
     suspend fun register(): String {
         val deviceId = securePrefs.getOrCreateDeviceId()
         val response = api.registerDevice(RegisterDeviceRequest(deviceId = deviceId, name = deviceName))
         return response.pairingCode
+    }
+
+    /**
+     * Resolve the device's pairing state for display, registering only when the
+     * server does not yet know this device (a 404 on status).
+     *
+     * This is the safe entry point: it never re-registers a device the launcher
+     * already knows, so a phone that lost its local token (e.g. the user cleared
+     * app data) recovers its existing trust — or its existing pending code —
+     * instead of resetting the device and forcing a fresh approval.
+     */
+    suspend fun beginPairing(): PairingState {
+        val current = try {
+            checkStatus()
+        } catch (e: HttpException) {
+            if (e.code() == HTTP_NOT_FOUND) null else throw e
+        }
+        return when {
+            current == null -> PairingState.Pending(register())
+            current is PairingState.Pending && current.pairingCode.isBlank() ->
+                PairingState.Pending(register())
+            else -> current
+        }
     }
 
     /**
@@ -59,7 +85,7 @@ class PairingManager(
                 securePrefs.clearTokenForRepair()
                 PairingState.Revoked
             }
-            else -> PairingState.Pending(pairingCode = "")
+            else -> PairingState.Pending(pairingCode = response.pairingCode.orEmpty())
         }
     }
 

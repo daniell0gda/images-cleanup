@@ -21,11 +21,12 @@ data class RegisterDeviceResponse(
  * Response from `GET /api/sync/devices/{id}/status`.
  *
  * `status` is one of `pending` | `revoked` | `trusted`. [token] is present only
- * when `status == "trusted"`. A 404 (unknown device) is handled as an HTTP error,
- * not represented here.
+ * when `status == "trusted"`; [pairingCode] only when `status == "pending"`. A 404
+ * (unknown device) is handled as an HTTP error, not represented here.
  */
 @JsonClass(generateAdapter = true)
 data class DeviceStatusResponse(
     @Json(name = "status") val status: String,
     @Json(name = "token") val token: String? = null,
+    @Json(name = "pairing_code") val pairingCode: String? = null,
 )

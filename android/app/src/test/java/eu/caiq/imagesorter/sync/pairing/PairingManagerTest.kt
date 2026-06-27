@@ -87,4 +87,47 @@ class PairingManagerTest {
 
         assertEquals(PairingState.Revoked, result)
     }
+
+    @Test
+    fun beginPairingRecoversTrustWithoutRegisteringWhenServerAlreadyTrusts() = runTest {
+        // The server already trusts this device (the phone just lost its local
+        // token). beginPairing must adopt the token and must NOT POST /devices,
+        // which would reset the device back to pending.
+        server.enqueue(MockResponse().setBody("""{"status":"trusted","token":"tok-xyz"}"""))
+        val creds = FakeCredentialStore()
+
+        val state = manager(creds).beginPairing()
+
+        assertEquals(PairingState.Trusted, state)
+        assertEquals("tok-xyz", creds.currentToken)
+        assertEquals(1, server.requestCount)
+        assertTrue(server.takeRequest().path!!.endsWith("/status"))
+    }
+
+    @Test
+    fun beginPairingShowsExistingPendingCodeWithoutRegistering() = runTest {
+        // A device already pending on the server returns its code via status, so
+        // beginPairing surfaces it without re-registering (which mints a new code).
+        server.enqueue(MockResponse().setBody("""{"status":"pending","pairing_code":"123456"}"""))
+
+        val state = manager(FakeCredentialStore()).beginPairing()
+
+        assertEquals(PairingState.Pending("123456"), state)
+        assertEquals(1, server.requestCount)
+        assertTrue(server.takeRequest().path!!.endsWith("/status"))
+    }
+
+    @Test
+    fun beginPairingRegistersWhenServerDoesNotKnowDevice() = runTest {
+        // Unknown device (404 on status) → register to obtain a fresh code.
+        server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
+        server.enqueue(MockResponse().setBody("""{"status":"pending","pairing_code":"654321"}"""))
+
+        val state = manager(FakeCredentialStore()).beginPairing()
+
+        assertEquals(PairingState.Pending("654321"), state)
+        assertEquals(2, server.requestCount)
+        assertTrue(server.takeRequest().path!!.endsWith("/status"))
+        assertEquals("POST", server.takeRequest().method)
+    }
 }
