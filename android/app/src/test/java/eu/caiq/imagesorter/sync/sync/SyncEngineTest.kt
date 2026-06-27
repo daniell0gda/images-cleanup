@@ -84,6 +84,7 @@ class SyncEngineTest {
         scanner: FakeMediaSource,
         prefs: FakeSyncPrefs,
         uploader: ChunkUploader = EchoUploader(),
+        batchSize: Int = 100,
     ) = SyncEngine(
         api = api,
         scanner = scanner,
@@ -92,6 +93,7 @@ class SyncEngineTest {
         syncedCacheDao = db.syncedCacheDao(),
         pendingUploadDao = db.pendingUploadDao(),
         failureDao = db.failureDao(),
+        uploadBatchSize = batchSize,
     )
 
     /** Routes by request path so concurrent uploads don't depend on enqueue order. */
@@ -255,6 +257,142 @@ class SyncEngineTest {
     }
 
     @Test
+    fun reRunningDiscoveryDoesNotDuplicatePendingRowsForSameFile() = runTest {
+        // Reproduces the double-tap crash: a second run used to mint a fresh fileId
+        // for the same media file and insert a duplicate pending row (same
+        // mediaStoreId), which then collided on the UI grid key.
+        val a = item("a.jpg", 5)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
+                else -> resp("{}")
+            }
+        }
+        val scanner = FakeMediaSource(listOf(a))
+        val prefs = FakeSyncPrefs(concurrency = 1)
+        // Uploads always fail (IOException) so the file stays PENDING across runs.
+        engine(scanner, prefs, uploader = AlwaysFailUploader()).run()
+        engine(scanner, prefs, uploader = AlwaysFailUploader()).run()
+
+        val pending = db.pendingUploadDao().observeAll().first()
+        assertEquals(
+            "exactly one pending row per media file after two runs",
+            1,
+            pending.count { it.mediaStoreId == a.mediaStoreId },
+        )
+    }
+
+    @Test
+    fun uploadsEachBatchInItsOwnSessionSoPlacementIsIncremental() = runTest {
+        // With batchSize 1, three files become three independent sessions, each
+        // completed (and placed server-side) before the next — so "photos safe"
+        // grows incrementally instead of only after the whole library uploads.
+        val items = listOf(item("a.jpg", 5), item("b.jpg", 6), item("c.jpg", 7))
+        val sessionsOpened = java.util.concurrent.atomic.AtomicInteger(0)
+        val completes = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[
+                        {"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"b.jpg","created_on":"2024-01-01T00:00:00","size":6,"already_synced":false},
+                        {"name":"c.jpg","created_on":"2024-01-01T00:00:00","size":7,"already_synced":false}
+                    ]}""",
+                )
+                req.path!!.endsWith("/sessions") -> {
+                    sessionsOpened.incrementAndGet()
+                    resp("""{"session_id":"sess"}""")
+                }
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":7,"length":7}""")
+                req.path!!.endsWith("/complete") -> {
+                    completes.incrementAndGet()
+                    resp("""{"status":"complete"}""")
+                }
+                req.path!!.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
+                else -> resp("{}")
+            }
+        }
+
+        val engine = engine(FakeMediaSource(items), FakeSyncPrefs(concurrency = 1), batchSize = 1)
+        engine.run()
+
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        assertEquals("one session per batch of 1", 3, sessionsOpened.get())
+        assertEquals("one complete per batch", 3, completes.get())
+    }
+
+    @Test
+    fun resumesInterruptedSessionInsteadOfReuploadingFromScratch() = runTest {
+        // reconcile says the file is not synced yet, but its bytes are already in
+        // an open session from an interrupted run. The engine must resume into
+        // that session — no new session opened, uploading the same file id from
+        // the offset the server reports — so already-uploaded bytes are kept.
+        val resume = item("resume.jpg", 10)
+        val newSessions = java.util.concurrent.atomic.AtomicInteger(0)
+        var completedSessionId: String? = null
+        dispatch { req ->
+            val path = req.path!!
+            when {
+                path.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"resume.jpg","created_on":"2024-01-01T00:00:00","size":10,
+                        "already_synced":false,"uploaded_offset":6,
+                        "resume_session_id":"oldsess","resume_file_id":"oldfid"}]}""",
+                )
+                path.endsWith("/sessions") -> {
+                    newSessions.incrementAndGet()
+                    resp("""{"session_id":"newsess"}""")
+                }
+                path.contains("/files/") -> resp("""{"offset":6}""")
+                path.endsWith("/complete") -> {
+                    completedSessionId = path.substringAfter("/sessions/").substringBefore("/complete")
+                    resp("""{"status":"complete"}""")
+                }
+                path.endsWith("/outcomes") -> resp(
+                    """{"outcomes":[{"file_id":"oldfid","name":"resume.jpg","status":"synced"}]}""",
+                )
+                else -> resp("{}")
+            }
+        }
+
+        val uploader = RecordingUploader()
+        engine(FakeMediaSource(listOf(resume)), FakeSyncPrefs(concurrency = 1), uploader = uploader).run()
+
+        assertEquals("no new session opened for a resumable file", 0, newSessions.get())
+        assertEquals("uploaded into the existing session", listOf("oldsess"), uploader.sessions)
+        assertEquals("reused the server's file id", listOf("oldfid"), uploader.fileIds)
+        assertEquals("resumed from the server-held offset", listOf(6L), uploader.offsets)
+        assertEquals("completed the existing session", "oldsess", completedSessionId)
+        // The file ended up placed and cached as synced.
+        assertTrue(db.syncedCacheDao().syncedItems().any { it.name == "resume.jpg" })
+    }
+
+    /** Records the session/file/offset each chunk upload was driven with. */
+    private class RecordingUploader : ChunkUploader {
+        val sessions = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val fileIds = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val offsets = java.util.Collections.synchronizedList(mutableListOf<Long>())
+        override suspend fun uploadChunk(
+            sessionId: String,
+            fileId: String,
+            item: MediaItem,
+            offset: Long,
+            length: Long,
+        ): ChunkResponse {
+            sessions.add(sessionId)
+            fileIds.add(fileId)
+            offsets.add(offset)
+            return ChunkResponse(offset = offset + length, length = length)
+        }
+    }
+
+    @Test
     fun uploadAllNeverExceedsConfiguredConcurrency() = runTest {
         val concurrency = 3
         val fileCount = 8
@@ -334,6 +472,16 @@ class SyncEngineTest {
             val body = "".toResponseBody(null)
             throw retrofit2.HttpException(retrofit2.Response.error<Any>(401, body))
         }
+    }
+
+    private class AlwaysFailUploader : ChunkUploader {
+        override suspend fun uploadChunk(
+            sessionId: String,
+            fileId: String,
+            item: MediaItem,
+            offset: Long,
+            length: Long,
+        ): ChunkResponse = throw java.io.IOException("boom")
     }
 
     private class FailFirstUploader : ChunkUploader {

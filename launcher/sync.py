@@ -403,6 +403,39 @@ class SessionManager:
                 fh.write(data)
             return part.stat().st_size
 
+    def uploaded_offsets(
+        self, device_id: str
+    ) -> dict[tuple[str, str, int], tuple[str, str, int]]:
+        """Map identity ``(name, created_on, size)`` -> ``(session_id, file_id,
+        uploaded_bytes)`` across this device's **incomplete** sessions.
+
+        Lets a fresh sync run resume an upload that was interrupted before its
+        session completed, instead of re-sending bytes the server already holds.
+        Completed sessions are excluded (they are finalized by
+        ``startup_reconcile``). When the same identity appears in several
+        incomplete sessions, the one with the most bytes uploaded wins.
+        """
+        result: dict[tuple[str, str, int], tuple[str, str, int]] = {}
+        device_dir = self._inbox / device_id
+        if not device_dir.is_dir():
+            return result
+        for sdir in device_dir.iterdir():
+            if not sdir.is_dir() or (sdir / _COMPLETE_MARKER).exists():
+                continue
+            for file_id in self.file_ids(sdir):
+                fmeta = self.file_meta(sdir, file_id)
+                if fmeta is None:
+                    continue
+                part = self._part_path(sdir, file_id)
+                offset = part.stat().st_size if part.exists() else 0
+                if offset <= 0:
+                    continue
+                key = (fmeta.name, fmeta.created_on, fmeta.size)
+                prev = result.get(key)
+                if prev is None or offset > prev[2]:
+                    result[key] = (sdir.name, file_id, offset)
+        return result
+
     def file_meta(self, sdir: Path, file_id: str) -> FileMeta | None:
         mp = self._meta_path(sdir, file_id)
         if not mp.exists():

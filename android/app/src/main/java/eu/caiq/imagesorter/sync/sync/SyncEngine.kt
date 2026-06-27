@@ -51,6 +51,7 @@ class SyncEngine(
     private val syncedCacheDao: SyncedCacheDao,
     private val pendingUploadDao: PendingUploadDao,
     private val failureDao: FailureDao,
+    private val uploadBatchSize: Int = UPLOAD_BATCH,
 ) {
     private val _progress = MutableStateFlow(SyncProgress())
     val progress: StateFlow<SyncProgress> = _progress.asStateFlow()
@@ -74,9 +75,7 @@ class SyncEngine(
                 return
             }
 
-            val sessionId = openSession(profileId)
-            uploadAll(sessionId, toUpload)
-            completeAndReport(sessionId)
+            uploadPending(profileId, toUpload)
             advanceWatermark()
 
             _progress.value = _progress.value.copy(phase = SyncPhase.DONE)
@@ -104,6 +103,7 @@ class SyncEngine(
         _progress.value = SyncProgress(phase = SyncPhase.RECONCILING, totalFiles = items.size)
 
         val notSynced = ArrayList<MediaItem>()
+        val resumeByMediaId = HashMap<Long, ResumePoint>()
         items.chunked(RECONCILE_BATCH).forEach { batch ->
             val response = api.reconcile(batch.map { it.identity.toDto() })
             response.results.forEach { result ->
@@ -113,12 +113,35 @@ class SyncEngine(
                     syncedCacheDao.upsert(item.identity.toSyncedCache(SyncStatus.SYNCED))
                 } else {
                     notSynced += item
+                    // The server still holds bytes from an interrupted run: resume
+                    // into that session instead of re-uploading from scratch.
+                    val sessionId = result.resumeSessionId
+                    val fileId = result.resumeFileId
+                    if (sessionId != null && fileId != null) {
+                        resumeByMediaId[item.mediaStoreId] =
+                            ResumePoint(sessionId, fileId, result.uploadedOffset)
+                    }
                 }
             }
         }
 
-        // Persist the pending queue (newest-first ordering via sortKey).
-        pendingUploadDao.upsert(notSynced.map { it.toPending() })
+        // Persist the pending queue (newest-first ordering via sortKey). Reuse the
+        // fileId of any row already pending for the same media file so a re-run
+        // (e.g. the user tapping "Back up now" twice) REPLACEs that row instead of
+        // inserting a duplicate — fileId is the primary key, so a fresh UUID per
+        // run would queue every file twice. A resumable file adopts the server's
+        // session/file id and offset so its already-uploaded bytes are kept.
+        val existingByMediaId = pendingUploadDao.pending().associateBy { it.mediaStoreId }
+        pendingUploadDao.upsert(
+            notSynced.map { item ->
+                val resume = resumeByMediaId[item.mediaStoreId]
+                item.toPending(
+                    fileId = resume?.fileId ?: existingByMediaId[item.mediaStoreId]?.fileId,
+                    sessionId = resume?.sessionId,
+                    serverOffset = resume?.offset ?: 0,
+                )
+            },
+        )
         return notSynced
     }
 
@@ -127,13 +150,62 @@ class SyncEngine(
     private suspend fun openSession(profileId: String): String =
         api.openSession(OpenSessionRequest(profileId)).sessionId
 
-    /** Upload all queued files with bounded concurrency, newest-first. */
-    private suspend fun uploadAll(sessionId: String, items: List<MediaItem>) = coroutineScope {
-        val concurrency = securePrefs.getUploadConcurrency()
-        val semaphore = Semaphore(concurrency)
+    /**
+     * Upload everything pending. Files the server already holds bytes for (an
+     * interrupted earlier run) are resumed into their existing session and that
+     * session is completed; the rest go into fresh, independent batches.
+     *
+     * Each session is completed and placed before the next starts, so the server
+     * classifies + moves files (the "photos safe" count grows) incrementally
+     * instead of only after the whole library has uploaded — essential for
+     * libraries of thousands of files — and each blocking `complete` call's
+     * server-side work stays bounded.
+     */
+    private suspend fun uploadPending(profileId: String, items: List<MediaItem>) {
         val total = items.size
         val completed = java.util.concurrent.atomic.AtomicInteger(0)
         _progress.value = SyncProgress(phase = SyncPhase.UPLOADING, totalFiles = total)
+
+        val sessionByMediaId = pendingUploadDao.pending()
+            .mapNotNull { row -> row.sessionId?.let { row.mediaStoreId to it } }
+            .toMap()
+        val (resumable, fresh) = items.partition { sessionByMediaId.containsKey(it.mediaStoreId) }
+
+        // Resume interrupted sessions first so already-uploaded bytes are kept.
+        resumable.groupBy { sessionByMediaId.getValue(it.mediaStoreId) }
+            .forEach { (sessionId, group) ->
+                uploadAll(sessionId, group, total, completed)
+                completeAndReportSafely(sessionId)
+            }
+
+        for (batch in fresh.chunked(uploadBatchSize)) {
+            val sessionId = openSession(profileId)
+            uploadAll(sessionId, batch, total, completed)
+            completeAndReportSafely(sessionId)
+        }
+    }
+
+    /** Complete + report, swallowing a timeout so one slow batch never aborts the run. */
+    private suspend fun completeAndReportSafely(sessionId: String) {
+        try {
+            completeAndReport(sessionId)
+        } catch (e: java.io.IOException) {
+            // A slow `complete` (server classifying the batch) may time out while
+            // the server keeps working; those files stay pending and reconcile
+            // marks them synced next run. Don't abort the whole sync.
+        }
+    }
+
+    /** Upload one batch with bounded concurrency, advancing the shared counter. */
+    private suspend fun uploadAll(
+        sessionId: String,
+        items: List<MediaItem>,
+        total: Int,
+        completed: java.util.concurrent.atomic.AtomicInteger,
+    ) = coroutineScope {
+        val concurrency = securePrefs.getUploadConcurrency()
+        val semaphore = Semaphore(concurrency)
+        _progress.value = _progress.value.copy(phase = SyncPhase.UPLOADING, totalFiles = total)
 
         // Reuse persisted file ids so resume keeps the same server-side identity.
         val pendingById = pendingUploadDao.pending().associateBy { it.mediaStoreId }
@@ -184,7 +256,7 @@ class SyncEngine(
                 recordFailure(outcome.fileId, identity, outcome.reason, outcome.retryable)
             }
         }
-        _progress.value = _progress.value.copy(failedFiles = failed)
+        _progress.value = _progress.value.copy(failedFiles = _progress.value.failedFiles + failed)
     }
 
     private suspend fun recordFailure(
@@ -237,17 +309,26 @@ class SyncEngine(
         syncedAt = if (status == SyncStatus.SYNCED) System.currentTimeMillis() else null,
     )
 
-    private fun MediaItem.toPending() = PendingUploadEntity(
-        fileId = UUID.randomUUID().toString(),
+    private fun MediaItem.toPending(
+        fileId: String? = null,
+        sessionId: String? = null,
+        serverOffset: Long = 0,
+    ) = PendingUploadEntity(
+        fileId = fileId ?: UUID.randomUUID().toString(),
         mediaStoreId = mediaStoreId,
         name = identity.name,
         createdOn = identity.createdOn,
         size = identity.size,
         mimeType = mimeType,
+        sessionId = sessionId,
+        serverOffset = serverOffset,
         status = SyncStatus.PENDING.name,
         // Newest-first ordering key: created_on as epoch millis (0 if unparseable).
         sortKey = createdOnEpochMillis(identity.createdOn),
     )
+
+    /** Where the server already holds bytes for a file from an interrupted run. */
+    private data class ResumePoint(val sessionId: String, val fileId: String, val offset: Long)
 
     /** Parse the ISO-8601 local date-time back to epoch millis for ordering. */
     private fun createdOnEpochMillis(iso: String): Long =
@@ -262,6 +343,10 @@ class SyncEngine(
 
     companion object {
         private const val RECONCILE_BATCH = 500
+        // Files per upload session. Each batch is completed and placed server-side
+        // before the next, so progress is incremental and each `complete` call's
+        // classification work stays bounded (keeping it under the HTTP read timeout).
+        private const val UPLOAD_BATCH = 100
         private const val HTTP_UNAUTHORIZED = 401
         private const val OUTCOME_SYNCED = "synced"
     }

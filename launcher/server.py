@@ -270,18 +270,29 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         items: list[_Identity],
         authorization: str | None = Header(default=None),
     ):
-        _require_device(authorization)
-        return {
-            "results": [
-                {
-                    "name": i.name,
-                    "created_on": i.created_on,
-                    "size": i.size,
-                    "already_synced": store.is_synced(i.name, i.created_on, i.size),
-                }
-                for i in items
-            ]
-        }
+        device = _require_device(authorization)
+        uploaded = sessions.uploaded_offsets(device["device_id"])
+        results = []
+        for i in items:
+            synced = store.is_synced(i.name, i.created_on, i.size)
+            row = {
+                "name": i.name,
+                "created_on": i.created_on,
+                "size": i.size,
+                "already_synced": synced,
+                "uploaded_offset": 0,
+                "resume_session_id": None,
+                "resume_file_id": None,
+            }
+            if not synced:
+                resume = uploaded.get((i.name, i.created_on, i.size))
+                if resume is not None:
+                    session_id, file_id, offset = resume
+                    row["resume_session_id"] = session_id
+                    row["resume_file_id"] = file_id
+                    row["uploaded_offset"] = offset
+            results.append(row)
+        return {"results": results}
 
     @app.post("/api/sync/sessions")
     async def sync_open_session(

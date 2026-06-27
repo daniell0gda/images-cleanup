@@ -66,6 +66,27 @@ def test_register_device_creates_pending_with_pairing_code(tmp_path):
     assert row == ("pending", None)
 
 
+def test_list_devices_returns_status_and_code_without_token(tmp_path):
+    """GET /api/sync/devices lists every device with its pairing fields for the
+    management UI, but never leaks the bearer token."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    register(client, "dev-1", "Pixel")
+    trust(client, "dev-2", "Galaxy")
+
+    r = client.get("/api/sync/devices")
+    assert r.status_code == 200, r.text
+    by_id = {d["device_id"]: d for d in r.json()}
+
+    assert by_id["dev-1"]["status"] == "pending"
+    assert re.match(r"^\d{6}$", by_id["dev-1"]["pairing_code"])
+    assert by_id["dev-2"]["status"] == "trusted"
+    assert by_id["dev-2"]["approved_at"]
+    for d in by_id.values():
+        assert "token" not in d
+
+
 def test_device_status_lifecycle_pending_trusted_revoked(tmp_path):
     """Status is pending (no token) before approval, trusted (with token)
     after approval, and revoked after revocation."""
@@ -205,6 +226,52 @@ def test_reconcile_size_disambiguates(tmp_path):
     body = [{"name": "c.jpg", "created_on": "2024-01-01T00:00:00", "size": 999}]
     results = client.post("/api/sync/reconcile", json=body, headers=auth(token)).json()["results"]
     assert results[0]["already_synced"] is False
+
+
+def test_reconcile_reports_uploaded_bytes_for_interrupted_session(tmp_path):
+    """A not-yet-synced file whose bytes are already in an open session is
+    reported with its uploaded offset and the session/file to resume into, so a
+    re-run continues instead of re-uploading from scratch."""
+    app = make_app(tmp_path)
+    _write_groupby_config(tmp_path)
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+    sid = _open_session(client, token)
+
+    meta = {"name": "p.jpg", "created_on": "2024-02-02T00:00:00",
+            "size": 16, "mime_type": "image/jpeg"}
+    _upload_chunk(client, token, sid, "f1", meta, 0, b"012345")  # 6 of 16 bytes
+
+    body = [{"name": "p.jpg", "created_on": "2024-02-02T00:00:00", "size": 16}]
+    result = client.post(
+        "/api/sync/reconcile", json=body, headers=auth(token)
+    ).json()["results"][0]
+    assert result["already_synced"] is False
+    assert result["uploaded_offset"] == 6
+    assert result["resume_session_id"] == sid
+    assert result["resume_file_id"] == "f1"
+
+
+def test_uploaded_offsets_skips_completed_sessions(tmp_path):
+    """uploaded_offsets only surfaces incomplete sessions; a completed one is
+    finalized by startup_reconcile rather than resumed."""
+    make_app(tmp_path)  # sets INBOX_BASE env
+    from launcher.sync import SessionManager, FileMeta
+    mgr = SessionManager(tmp_path / "inbox")
+
+    open_sid = mgr.create_session("dev-1", "alice_groupby")
+    mgr.write_chunk(
+        open_sid, "f1", FileMeta("p.jpg", "2024-02-02T00:00:00", 8, "image/jpeg"), 0, b"abcd"
+    )
+    done_sid = mgr.create_session("dev-1", "alice_groupby")
+    mgr.write_chunk(
+        done_sid, "f2", FileMeta("q.jpg", "2024-02-02T00:00:00", 8, "image/jpeg"), 0, b"abcd"
+    )
+    mgr.complete(done_sid)
+
+    assert mgr.uploaded_offsets("dev-1") == {
+        ("p.jpg", "2024-02-02T00:00:00", 8): (open_sid, "f1", 4)
+    }
 
 
 # ---------------------------------------------------------------------------
