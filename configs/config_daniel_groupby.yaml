@@ -1,0 +1,43 @@
+# --- General ------------------------------------------------------------------
+
+mode: GroupByTags            # "GroupByTags" | "SimilaritySearch"
+
+web_ui: true 
+source_folder: \\JUSZKOWO_NAS\quick_access_for_pc\daniel\sorted     # Directory to search for images
+recursive: true              # Search subfolders recursively
+
+copy_instead_of_move: false  # If true, copy files; if false, move them
+
+include_formats:             # Image file extensions to process (case-insensitive)
+  - .jpg
+  - .jpeg
+  - .png
+  - .webp
+
+threads: null                # Number of worker threads. null = cpu_count - 1
+
+# --- Logging ------------------------------------------------------------------
+
+log_level: WARNING              # DEBUG | INFO | WARNING | ERROR
+log_file: ./imagesorter.log  # Path to log file. null = console only
+on_collision: skip
+# --- GroupByTags mode ---------------------------------------------------------
+
+tag_groups:
+  - name: people             # Human-readable label (used in logs)
+    tags:                    # ALL tags must be detected for a match (AND logic)
+      - person
+    destination: \\JUSZKOWO_NAS\quick_access_for_pc\daniel\sorted
+    group_by_year: true
+    group_by_month: false
+
+unclassified:
+  enabled: true              # Move/copy unclassified images to the unclassified folder
+  folder_name: others        # Subfolder name inside destination root
+  destination: \\JUSZKOWO_NAS\quick_access_for_pc\daniel      # Root for the unclassified folder
+  group_by_year: true
+  group_by_month: false
+
+# --- SimilaritySearch mode ----------------------------------------------------
+
+similarity_threshold: 0.96   # 0.0-1.0. Images at or above this similarity are grouped
