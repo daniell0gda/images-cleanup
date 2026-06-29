@@ -11,6 +11,9 @@ import {
   Modal,
   ActionIcon,
   Badge,
+  Switch,
+  TextInput,
+  Code,
 } from "@mantine/core";
 import classes from "./App.module.css";
 
@@ -66,7 +69,7 @@ function modeTitle(mode: string): string {
   return MODE_INFO[mode]?.title ?? mode;
 }
 
-type Page = "launcher" | "devices";
+type Page = "launcher" | "devices" | "settings";
 
 type DeviceStatus = "pending" | "trusted" | "revoked";
 
@@ -209,6 +212,376 @@ function DevicesView() {
   );
 }
 
+interface DbRefreshSettings {
+  enabled: boolean;
+  schedule: string;
+  next_run: string | null;
+}
+
+interface RefreshResult {
+  checked: number;
+  removed: number;
+  at: string;
+}
+
+interface MediaLibrarySettings {
+  enabled: boolean;
+  folders: string[];
+  schedule: string;
+  next_run: string | null;
+}
+
+interface MediaBuildStatus {
+  state: "idle" | "building";
+  processed: number;
+  total: number | null;
+  added: number;
+  removed: number;
+  skipped_roots: string[];
+  last_built: string | null;
+  last_count: number | null;
+}
+
+interface SettingsPayload {
+  db_refresh: DbRefreshSettings;
+  last_refresh: RefreshResult | null;
+  media_library: MediaLibrarySettings;
+  media_build: MediaBuildStatus | null;
+}
+
+function SettingsView() {
+  const [enabled, setEnabled] = useState(true);
+  const [schedule, setSchedule] = useState("0 1 * * *");
+  const [nextRun, setNextRun] = useState<string | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<RefreshResult | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [mediaEnabled, setMediaEnabled] = useState(true);
+  const [mediaFolders, setMediaFolders] = useState<string[]>([]);
+  const [mediaSchedule, setMediaSchedule] = useState("0 2 * * *");
+  const [mediaNextRun, setMediaNextRun] = useState<string | null>(null);
+  const [mediaBuild, setMediaBuild] = useState<MediaBuildStatus | null>(null);
+  const [mediaSaving, setMediaSaving] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [building, setBuilding] = useState(false);
+
+  const applyPayload = useCallback((p: SettingsPayload) => {
+    setEnabled(p.db_refresh.enabled);
+    setSchedule(p.db_refresh.schedule);
+    setNextRun(p.db_refresh.next_run);
+    setLastRefresh(p.last_refresh);
+    setMediaEnabled(p.media_library.enabled);
+    setMediaFolders(p.media_library.folders);
+    setMediaSchedule(p.media_library.schedule);
+    setMediaNextRun(p.media_library.next_run);
+    setMediaBuild(p.media_build);
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then(applyPayload)
+      .catch(() => {});
+  }, [applyPayload]);
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ db_refresh: { enabled, schedule } }),
+      });
+      if (r.ok) {
+        applyPayload(await r.json());
+      } else {
+        const body = await r.json().catch(() => null);
+        setError(body?.detail ?? "Nie udało się zapisać ustawień.");
+      }
+    } catch {
+      setError("Serwer jest nieosiągalny.");
+    } finally {
+      setSaving(false);
+    }
+  }, [enabled, schedule, applyPayload]);
+
+  const refreshNow = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const r = await fetch("/api/settings/refresh", { method: "POST" });
+      if (r.ok) setLastRefresh(await r.json());
+    } catch {
+      /* ignore; the user can retry */
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
+  const addFolder = useCallback(() => {
+    setMediaFolders((f) => [...f, ""]);
+  }, []);
+
+  const removeFolder = useCallback((index: number) => {
+    setMediaFolders((f) => f.filter((_, i) => i !== index));
+  }, []);
+
+  const changeFolder = useCallback((index: number, value: string) => {
+    setMediaFolders((f) => f.map((v, i) => (i === index ? value : v)));
+  }, []);
+
+  const saveMedia = useCallback(async () => {
+    setMediaSaving(true);
+    setMediaError(null);
+    try {
+      const folders = mediaFolders.map((f) => f.trim()).filter((f) => f !== "");
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          media_library: {
+            enabled: mediaEnabled,
+            schedule: mediaSchedule,
+            folders,
+          },
+        }),
+      });
+      if (r.ok) {
+        applyPayload(await r.json());
+      } else {
+        const body = await r.json().catch(() => null);
+        setMediaError(body?.detail ?? "Nie udało się zapisać ustawień.");
+      }
+    } catch {
+      setMediaError("Serwer jest nieosiągalny.");
+    } finally {
+      setMediaSaving(false);
+    }
+  }, [mediaEnabled, mediaSchedule, mediaFolders, applyPayload]);
+
+  const buildNow = useCallback(async () => {
+    setBuilding(true);
+    try {
+      const r = await fetch("/api/media/build", { method: "POST" });
+      if (r.ok) setMediaBuild(await r.json());
+    } catch {
+      setBuilding(false);
+      return;
+    }
+    // Poll the build status until it returns to idle.
+    const poll = async () => {
+      try {
+        const r = await fetch("/api/media/build/status");
+        if (r.ok) {
+          const s: MediaBuildStatus = await r.json();
+          setMediaBuild(s);
+          if (s.state === "building") {
+            setTimeout(poll, 1000);
+            return;
+          }
+        }
+      } catch {
+        /* stop polling on error; the user can retry */
+      }
+      setBuilding(false);
+    };
+    setTimeout(poll, 1000);
+  }, []);
+
+  return (
+    <Box className={classes.view} key="settings">
+      <Box className={classes.hero}>
+        <Text component="span" className={classes.eyebrow}>
+          Synchronizacja telefonu
+        </Text>
+        <Title order={1} className={classes.title}>
+          Ustawienia
+        </Title>
+        <Text className={classes.subtitle}>
+          Odświeżanie bazy zsynchronizowanych plików
+        </Text>
+      </Box>
+
+      <Stack gap="md">
+        <Box className={classes.deviceCard}>
+          <Text className={classes.deviceName}>Automatyczne odświeżanie</Text>
+          <Text className={classes.deviceMeta} mb="md">
+            Sprawdza, czy zsynchronizowane pliki nadal istnieją w miejscu
+            docelowym. Usunięte ręcznie pliki zostaną oznaczone do ponownej
+            synchronizacji przy następnym połączeniu telefonu.
+          </Text>
+
+          <Stack gap="md">
+            <Switch
+              checked={enabled}
+              onChange={(e) => setEnabled(e.currentTarget.checked)}
+              label="Włączone"
+            />
+            <TextInput
+              label="Harmonogram (cron)"
+              description="np. 0 1 * * * — codziennie o 1:00"
+              value={schedule}
+              onChange={(e) => setSchedule(e.currentTarget.value)}
+              error={error}
+              disabled={!enabled}
+            />
+            {enabled && nextRun && (
+              <Text className={classes.deviceMeta}>
+                Następne odświeżanie: {formatWhen(nextRun)}
+              </Text>
+            )}
+            <Group justify="flex-end">
+              <Button onClick={save} loading={saving}>
+                Zapisz
+              </Button>
+            </Group>
+          </Stack>
+        </Box>
+
+        <Box className={classes.deviceCard}>
+          <Text className={classes.deviceName}>Odśwież teraz</Text>
+          <Text className={classes.deviceMeta} mb="md">
+            Uruchom odświeżanie ręcznie, np. zaraz po usunięciu plików z miejsca
+            docelowego.
+          </Text>
+          <Group justify="space-between" align="center">
+            <Text className={classes.deviceMeta}>
+              {lastRefresh ? (
+                <>
+                  Ostatnio: sprawdzono {lastRefresh.checked}, usunięto{" "}
+                  <Code>{lastRefresh.removed}</Code> ({formatWhen(lastRefresh.at)})
+                </>
+              ) : (
+                "Jeszcze nie uruchomiono."
+              )}
+            </Text>
+            <Button variant="light" onClick={refreshNow} loading={refreshing}>
+              Odśwież teraz
+            </Button>
+          </Group>
+        </Box>
+
+        <Box className={classes.deviceCard}>
+          <Text className={classes.deviceName}>Biblioteka zdjęć</Text>
+          <Text className={classes.deviceMeta} mb="md">
+            Indeksuje zdjęcia i filmy z wybranych folderów na serwerze, aby
+            przeglądać je w aplikacji na telefonie. Foldery są wspólne dla
+            wszystkich profili.
+          </Text>
+
+          <Stack gap="md">
+            <Switch
+              checked={mediaEnabled}
+              onChange={(e) => setMediaEnabled(e.currentTarget.checked)}
+              label="Włączone"
+            />
+
+            <Stack gap="xs">
+              <Text className={classes.deviceMeta}>Foldery</Text>
+              {mediaFolders.map((folder, i) => (
+                <Group key={i} gap="xs" wrap="nowrap">
+                  <TextInput
+                    style={{ flex: 1 }}
+                    placeholder="Ścieżka do folderu"
+                    value={folder}
+                    onChange={(e) => changeFolder(i, e.currentTarget.value)}
+                  />
+                  <ActionIcon
+                    variant="subtle"
+                    color="red"
+                    aria-label="Usuń folder"
+                    onClick={() => removeFolder(i)}
+                  >
+                    ✕
+                  </ActionIcon>
+                </Group>
+              ))}
+              <Group justify="flex-start">
+                <Button variant="subtle" size="xs" onClick={addFolder}>
+                  Dodaj folder
+                </Button>
+              </Group>
+            </Stack>
+
+            <TextInput
+              label="Harmonogram (cron)"
+              description="np. 0 2 * * * — codziennie o 2:00"
+              value={mediaSchedule}
+              onChange={(e) => setMediaSchedule(e.currentTarget.value)}
+              error={mediaError}
+              disabled={!mediaEnabled}
+            />
+            {mediaEnabled && mediaNextRun && (
+              <Text className={classes.deviceMeta}>
+                Następne indeksowanie: {formatWhen(mediaNextRun)}
+              </Text>
+            )}
+
+            {mediaBuild && (
+              <Box>
+                <Text className={classes.deviceMeta}>
+                  {mediaBuild.last_built ? (
+                    <>
+                      Ostatnie indeksowanie: <Code>{mediaBuild.last_count}</Code>{" "}
+                      plików ({formatWhen(mediaBuild.last_built)}); dodano{" "}
+                      {mediaBuild.added}, usunięto {mediaBuild.removed}
+                    </>
+                  ) : (
+                    "Jeszcze nie zindeksowano."
+                  )}
+                </Text>
+                {mediaBuild.skipped_roots.length > 0 && (
+                  <Text c="yellow.5" size="sm" mt="xs">
+                    Pominięto niedostępne foldery:{" "}
+                    {mediaBuild.skipped_roots.join(", ")}
+                  </Text>
+                )}
+              </Box>
+            )}
+
+            <Group justify="flex-end">
+              <Button onClick={saveMedia} loading={mediaSaving}>
+                Zapisz
+              </Button>
+            </Group>
+          </Stack>
+        </Box>
+
+        <Box className={classes.deviceCard}>
+          <Text className={classes.deviceName}>Indeksuj teraz</Text>
+          <Text className={classes.deviceMeta} mb="md">
+            Uruchom indeksowanie biblioteki zdjęć ręcznie, np. po dodaniu nowych
+            plików do folderów.
+          </Text>
+          <Group justify="space-between" align="center">
+            <Text className={classes.deviceMeta}>
+              {building ? (
+                <>
+                  Indeksowanie… przetworzono {mediaBuild?.processed ?? 0}
+                  {mediaBuild?.total != null ? ` / ${mediaBuild.total}` : ""}{" "}
+                  plików
+                </>
+              ) : (
+                "Gotowe."
+              )}
+            </Text>
+            <Button
+              variant="light"
+              onClick={buildNow}
+              loading={building}
+              disabled={building}
+            >
+              Odśwież teraz
+            </Button>
+          </Group>
+        </Box>
+      </Stack>
+    </Box>
+  );
+}
+
 function LauncherApp() {
   const [page, setPage] = useState<Page>("launcher");
   const [users, setUsers] = useState<UserEntry[]>([]);
@@ -294,19 +667,32 @@ function LauncherApp() {
   return (
     <Box className={classes.root}>
       <Box className={classes.topNav}>
-        <Button
-          variant="subtle"
-          color="gray"
-          size="xs"
-          onClick={() => setPage(page === "devices" ? "launcher" : "devices")}
-        >
-          {page === "devices" ? "← Sortownik" : "📱 Urządzenia"}
-        </Button>
+        <Group gap="xs">
+          {page !== "launcher" && (
+            <Button variant="subtle" color="gray" size="xs" onClick={() => setPage("launcher")}>
+              ← Sortownik
+            </Button>
+          )}
+          {page !== "devices" && (
+            <Button variant="subtle" color="gray" size="xs" onClick={() => setPage("devices")}>
+              📱 Urządzenia
+            </Button>
+          )}
+          {page !== "settings" && (
+            <Button variant="subtle" color="gray" size="xs" onClick={() => setPage("settings")}>
+              ⚙️ Ustawienia
+            </Button>
+          )}
+        </Group>
       </Box>
 
       {page === "devices" ? (
         <Box className={classes.inner}>
           <DevicesView />
+        </Box>
+      ) : page === "settings" ? (
+        <Box className={classes.inner}>
+          <SettingsView />
         </Box>
       ) : (
       <Box className={classes.inner}>
