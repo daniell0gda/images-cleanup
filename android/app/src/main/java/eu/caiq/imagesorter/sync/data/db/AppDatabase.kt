@@ -5,9 +5,12 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import eu.caiq.imagesorter.sync.data.db.dao.FailureDao
+import eu.caiq.imagesorter.sync.data.db.dao.MediaDao
 import eu.caiq.imagesorter.sync.data.db.dao.PendingUploadDao
 import eu.caiq.imagesorter.sync.data.db.dao.SyncedCacheDao
 import eu.caiq.imagesorter.sync.data.db.entity.FailureEntity
+import eu.caiq.imagesorter.sync.data.db.entity.MediaEntity
+import eu.caiq.imagesorter.sync.data.db.entity.MediaRemoteKey
 import eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity
 import eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity
 
@@ -21,8 +24,10 @@ import eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity
         SyncedCacheEntity::class,
         PendingUploadEntity::class,
         FailureEntity::class,
+        MediaEntity::class,
+        MediaRemoteKey::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -30,6 +35,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun syncedCacheDao(): SyncedCacheDao
     abstract fun pendingUploadDao(): PendingUploadDao
     abstract fun failureDao(): FailureDao
+    abstract fun mediaDao(): MediaDao
 
     companion object {
         fun build(context: Context): AppDatabase =

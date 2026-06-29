@@ -5,9 +5,11 @@ import android.content.Context
 import android.os.Build
 import com.squareup.moshi.Moshi
 import eu.caiq.imagesorter.sync.data.api.AuthInterceptor
+import eu.caiq.imagesorter.sync.data.api.MediaApi
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.UploadClient
 import eu.caiq.imagesorter.sync.data.db.AppDatabase
+import eu.caiq.imagesorter.sync.data.media.MediaRepository
 import eu.caiq.imagesorter.sync.data.media.MediaStoreScanner
 import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
 import eu.caiq.imagesorter.sync.pairing.PairingManager
@@ -103,6 +105,36 @@ class ServiceLocator(private val app: Context) {
             cachedBaseUrl = baseUrl
             return built
         }
+
+    private var cachedMediaApi: MediaApi? = null
+    private var cachedMediaBaseUrl: String? = null
+
+    /**
+     * Retrofit-backed [MediaApi] for the server timeline. Rebuilt on address
+     * change like [api], sharing the same OkHttp/Auth/Moshi wiring so the bearer
+     * token rides along on `GET /api/media`.
+     */
+    val mediaApi: MediaApi
+        get() {
+            val baseUrl = serverAddressToBaseUrl(securePrefs.getServerAddress()) ?: PLACEHOLDER_BASE_URL
+            val existing = cachedMediaApi
+            if (existing != null && baseUrl == cachedMediaBaseUrl) return existing
+            val built = Retrofit.Builder()
+                .baseUrl(baseUrl)
+                .client(okHttpClient)
+                .addConverterFactory(MoshiConverterFactory.create(moshi))
+                .build()
+                .create(MediaApi::class.java)
+            cachedMediaApi = built
+            cachedMediaBaseUrl = baseUrl
+            return built
+        }
+
+    /**
+     * Server media timeline as Paging 3 (Room `RemoteMediator`). Cluster 10's
+     * Photos screen observes [MediaRepository.timeline] and applies day headers.
+     */
+    val mediaRepository: MediaRepository by lazy { MediaRepository(mediaApi, database) }
 
     /**
      * Builds a throwaway [SyncApi] targeting [baseUrl], reusing the shared
