@@ -169,6 +169,14 @@ class SyncEngine(
 
         _progress.value = SyncProgress(phase = SyncPhase.RECONCILING, totalFiles = items.size)
 
+        // Identities the user reviewed / the server discarded as "not people".
+        // The server reports these already_synced=false forever, so skip them: they
+        // must never re-enter the upload set or the pending queue, and their cache
+        // row is left untouched so the Not People set stays visible.
+        val unclassified = syncedCacheDao.unclassifiedItems()
+            .map { Identity(it.name, it.createdOn, it.size) }
+            .toHashSet()
+
         val notSynced = ArrayList<MediaItem>()
         val resumeByMediaId = HashMap<Long, ResumePoint>()
         items.chunked(RECONCILE_BATCH).forEach { batch ->
@@ -176,6 +184,9 @@ class SyncEngine(
             response.results.forEach { result ->
                 val identity = Identity(result.name, result.createdOn, result.size)
                 val item = byIdentity[identity] ?: return@forEach
+                if (identity in unclassified) {
+                    return@forEach
+                }
                 if (result.alreadySynced) {
                     syncedCacheDao.upsert(
                         item.identity.toSyncedCache(
@@ -229,8 +240,43 @@ class SyncEngine(
 
     // --- Sessions + upload ----------------------------------------------------
 
-    private suspend fun openSession(profileId: String): String =
-        api.openSession(OpenSessionRequest(profileId)).sessionId
+    private suspend fun openSession(profileId: String, forcePlace: Boolean = false): String =
+        api.openSession(OpenSessionRequest(profileId, forcePlace)).sessionId
+
+    /**
+     * Force-upload a user-selected set of "not people" items ("Sync anyway").
+     * Clears their local UNCLASSIFIED mark so they enter the upload set, opens a
+     * dedicated session with force_place=true (the server skips classification and
+     * places them into the primary group), uploads them, and reports. A "synced"
+     * outcome flips each row to SYNCED so it leaves the Not People set; an
+     * unclassified/failed outcome cannot recur here because force_place always
+     * places, so completeAndReport handles the synced path.
+     */
+    suspend fun overrideUpload(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        if (!active.compareAndSet(false, true)) return
+        try {
+            val profileId = securePrefs.getProfileId()
+            if (profileId.isNullOrEmpty()) return
+
+            // Clear the not-syncable mark and queue them so the upload plumbing
+            // (uploadAll / completeAndReport) can find their file ids.
+            items.forEach { item ->
+                syncedCacheDao.delete(item.identity.name, item.identity.createdOn, item.identity.size)
+            }
+            pendingUploadDao.upsert(items.map { it.toPending() })
+
+            val total = items.size
+            val completed = java.util.concurrent.atomic.AtomicInteger(0)
+            for (batch in items.chunked(uploadBatchSize)) {
+                val sessionId = openSession(profileId, forcePlace = true)
+                uploadAll(sessionId, batch, total, completed)
+                completeAndReportSafely(sessionId)
+            }
+        } finally {
+            active.set(false)
+        }
+    }
 
     /**
      * Upload everything pending. Files the server already holds bytes for (an
@@ -337,6 +383,19 @@ class SyncEngine(
                 syncedCacheDao.upsert(
                     identity.toSyncedCache(
                         SyncStatus.SYNCED,
+                        mediaStoreId = pending.mediaStoreId,
+                        mimeType = pending.mimeType,
+                    ),
+                )
+                failureDao.clear(identity.name, identity.createdOn, identity.size)
+                pendingUploadDao.delete(pending.fileId)
+            } else if (outcome.status == OUTCOME_UNCLASSIFIED) {
+                // "Not people": the server discarded the bytes. Cache it so the user
+                // can review it in the Not People set; it is neither synced nor a
+                // failure, so don't record a failure or bump the failed count.
+                syncedCacheDao.upsert(
+                    identity.toSyncedCache(
+                        SyncStatus.UNCLASSIFIED,
                         mediaStoreId = pending.mediaStoreId,
                         mimeType = pending.mimeType,
                     ),
@@ -462,6 +521,7 @@ class SyncEngine(
         private const val UPLOAD_BATCH = 100
         private const val HTTP_UNAUTHORIZED = 401
         private const val OUTCOME_SYNCED = "synced"
+        private const val OUTCOME_UNCLASSIFIED = "unclassified"
 
         // Window during which a repeat discover() reuses the last full reconcile
         // instead of re-enumerating the whole library. run() is never debounced.

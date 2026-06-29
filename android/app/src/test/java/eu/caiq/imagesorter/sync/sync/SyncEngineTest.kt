@@ -765,6 +765,155 @@ class SyncEngineTest {
         assertTrue(db.pendingUploadDao().pending().none { it.name == "m3.jpg" })
     }
 
+    @Test
+    fun overrideUploadOpensForcePlaceSessionAndSyncsOverriddenItem() = runTest {
+        // The user picks a "not people" item and taps "Sync anyway". The engine
+        // must open a session with force_place=true, upload the selected item, and
+        // on a "synced" outcome flip its cache row from UNCLASSIFIED to SYNCED so it
+        // leaves the Not People set.
+        val np = item("np.jpg", 5)
+        db.syncedCacheDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = np.identity.name,
+                createdOn = np.identity.createdOn,
+                size = np.identity.size,
+                status = "UNCLASSIFIED",
+                mediaStoreId = np.mediaStoreId,
+                mimeType = np.mimeType,
+            ),
+        )
+        var openBody: String? = null
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/sessions") -> {
+                    openBody = req.body.readUtf8()
+                    resp("""{"session_id":"sess"}""")
+                }
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp(syncedOutcomeForQueued("np.jpg"))
+                else -> resp("{}")
+            }
+        }
+
+        val engine = engine(FakeMediaSource(listOf(np)), FakeSyncPrefs(concurrency = 1))
+        engine.overrideUpload(listOf(np))
+
+        assertTrue("session opened with force_place=true", openBody?.contains("\"force_place\":true") == true)
+        val row = db.syncedCacheDao().observeAll().first().firstOrNull { it.name == "np.jpg" }
+        assertEquals("overridden item becomes SYNCED", "SYNCED", row?.status)
+        assertTrue("pending cleared after sync", db.pendingUploadDao().pending().none { it.name == "np.jpg" })
+    }
+
+    private fun syncedOutcomeForQueued(name: String): String = runBlocking {
+        val fid = db.pendingUploadDao().pending().first { it.name == name }.fileId
+        """{"outcomes":[{"file_id":"$fid","name":"$name","status":"synced"}]}"""
+    }
+
+    @Test
+    fun discoverSkipsLocallyUnclassifiedItemsEvenWhenServerSaysNotSynced() = runTest {
+        // The server discards "not people" bytes, so it reports already_synced=false
+        // for them forever. An item the local cache already marks UNCLASSIFIED must
+        // NOT be re-queued for upload — it stays out of the not-synced/upload set
+        // and the pending queue. A genuinely not-synced item is still queued.
+        val np = item("np.jpg", 5)
+        val fresh = item("fresh.jpg", 7)
+        db.syncedCacheDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = np.identity.name,
+                createdOn = np.identity.createdOn,
+                size = np.identity.size,
+                status = "UNCLASSIFIED",
+                mediaStoreId = np.mediaStoreId,
+                mimeType = np.mimeType,
+            ),
+        )
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[
+                        {"name":"np.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"fresh.jpg","created_on":"2024-01-01T00:00:00","size":7,"already_synced":false}
+                    ]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(listOf(np, fresh)), FakeSyncPrefs()).discover()
+
+        val queued = db.pendingUploadDao().observeAll().first().map { it.name }.toSet()
+        assertTrue("genuinely not-synced item still queued", queued.contains("fresh.jpg"))
+        assertTrue("locally UNCLASSIFIED item not re-queued", !queued.contains("np.jpg"))
+    }
+
+    @Test
+    fun reconcileLeavesUnclassifiedRowPresentInCache() = runTest {
+        // An UNCLASSIFIED item must remain in synced_cache after reconcile (it is
+        // not deleted) so the Not People set stays visible in the UI.
+        val np = item("np.jpg", 5)
+        db.syncedCacheDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = np.identity.name,
+                createdOn = np.identity.createdOn,
+                size = np.identity.size,
+                status = "UNCLASSIFIED",
+                mediaStoreId = np.mediaStoreId,
+                mimeType = np.mimeType,
+            ),
+        )
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"np.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(listOf(np)), FakeSyncPrefs()).discover()
+
+        val row = db.syncedCacheDao().observeAll().first().firstOrNull { it.name == "np.jpg" }
+        assertEquals("UNCLASSIFIED row survives reconcile", "UNCLASSIFIED", row?.status)
+    }
+
+    @Test
+    fun unclassifiedOutcomeCachesUnclassifiedClearsPendingAndDoesNotCountAsFailed() = runTest {
+        // The server discards a "not people" image (status "unclassified"). The
+        // engine must cache it as UNCLASSIFIED (so it appears in the Not People
+        // set), drop its pending/failure rows, and NOT count it as a failure.
+        val np = item("np.jpg", 5)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"np.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp(unclassifiedOutcomeForQueued())
+                else -> resp("{}")
+            }
+        }
+
+        val engine = engine(FakeMediaSource(listOf(np)), FakeSyncPrefs(concurrency = 1))
+        engine.run()
+
+        val row = db.syncedCacheDao().observeAll().first().firstOrNull { it.name == "np.jpg" }
+        assertEquals("cached as UNCLASSIFIED", "UNCLASSIFIED", row?.status)
+        assertTrue("pending row cleared", db.pendingUploadDao().pending().none { it.name == "np.jpg" })
+        assertTrue("no failure recorded", db.failureDao().observeAll().first().none { it.name == "np.jpg" })
+        assertEquals("unclassified is not a failure", 0, engine.progress.value.failedFiles)
+    }
+
+    private fun unclassifiedOutcomeForQueued(): String = runBlocking {
+        val fid = db.pendingUploadDao().pending().first { it.name == "np.jpg" }.fileId
+        """{"outcomes":[{"file_id":"$fid","name":"np.jpg","status":"unclassified"}]}"""
+    }
+
     // Mixed outcomes: odd-indexed synced, even-indexed terminal failure.
     private fun outcomesMixedForQueued(): String = runBlocking {
         val rows = db.pendingUploadDao().pending().associateBy { it.name }

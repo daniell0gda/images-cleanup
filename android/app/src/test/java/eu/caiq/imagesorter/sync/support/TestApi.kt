@@ -2,6 +2,7 @@ package eu.caiq.imagesorter.sync.support
 
 import com.squareup.moshi.Moshi
 import eu.caiq.imagesorter.sync.data.api.AuthInterceptor
+import eu.caiq.imagesorter.sync.data.api.MediaApi
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.media.MediaSource
 import eu.caiq.imagesorter.sync.data.prefs.CredentialStore
@@ -85,4 +86,18 @@ fun buildSyncApi(server: MockWebServer, tokenStore: TokenStore? = null): SyncApi
         .addConverterFactory(MoshiConverterFactory.create(Moshi.Builder().build()))
         .build()
         .create(SyncApi::class.java)
+}
+
+/** Builds a [MediaApi] pointed at [server], optionally with an [AuthInterceptor]. */
+fun buildMediaApi(server: MockWebServer, tokenStore: TokenStore? = null): MediaApi {
+    val clientBuilder = OkHttpClient.Builder()
+    if (tokenStore != null) {
+        clientBuilder.addInterceptor(AuthInterceptor(tokenStore))
+    }
+    return Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .client(clientBuilder.build())
+        .addConverterFactory(MoshiConverterFactory.create(Moshi.Builder().build()))
+        .build()
+        .create(MediaApi::class.java)
 }

@@ -93,7 +93,13 @@ fun statusColor(status: SyncStatus): Color = when (status) {
     SyncStatus.IN_PROGRESS -> VaultTheme.colors.amber
     SyncStatus.FAILED -> VaultTheme.colors.coral
     SyncStatus.PENDING -> VaultTheme.colors.muted
+    // "Not people" is a deliberate not-sync decision, not in-flight/failed/pending —
+    // give it its own slate-blue so the badge reads as a distinct, neutral state.
+    SyncStatus.UNCLASSIFIED -> NotPeopleColor
 }
+
+/** Distinct slate-blue for the "Not people" (UNCLASSIFIED) state — see [statusColor]. */
+val NotPeopleColor = Color(0xFF7C8FB5)
 
 private val TILE_PALETTE = listOf(
     Color(0xFF3A6EA5) to Color(0xFFC0D6DF),

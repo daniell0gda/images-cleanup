@@ -17,4 +17,11 @@ enum class SyncStatus {
 
     /** Server reported a failure. See [FailureReason] for the cause. */
     FAILED,
+
+    /**
+     * Server classified the file as "not people" (matched no tag_group) and
+     * discarded its bytes. Kept in the local cache so the user can review these
+     * in the Not People set and optionally force-upload them.
+     */
+    UNCLASSIFIED,
 }

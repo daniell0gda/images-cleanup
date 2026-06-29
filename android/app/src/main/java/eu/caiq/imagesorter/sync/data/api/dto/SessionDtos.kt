@@ -7,6 +7,7 @@ import com.squareup.moshi.JsonClass
 @JsonClass(generateAdapter = true)
 data class OpenSessionRequest(
     @Json(name = "profile_id") val profileId: String,
+    @Json(name = "force_place") val forcePlace: Boolean = false,
 )
 
 /** Response from `POST /api/sync/sessions`. */

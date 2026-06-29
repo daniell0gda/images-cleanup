@@ -26,6 +26,14 @@ interface SyncedCacheDao {
     @Query("SELECT * FROM synced_cache WHERE status = 'SYNCED'")
     suspend fun syncedItems(): List<SyncedCacheEntity>
 
+    /**
+     * Rows the user has reviewed/the server discarded as "not people". The server
+     * reports these already_synced=false forever, so reconcile uses this set to
+     * skip re-queuing them for upload.
+     */
+    @Query("SELECT * FROM synced_cache WHERE status = 'UNCLASSIFIED'")
+    suspend fun unclassifiedItems(): List<SyncedCacheEntity>
+
     @Query(
         "UPDATE synced_cache SET lastVerifiedAt = :verifiedAt " +
             "WHERE name = :name AND createdOn = :createdOn AND size = :size",
