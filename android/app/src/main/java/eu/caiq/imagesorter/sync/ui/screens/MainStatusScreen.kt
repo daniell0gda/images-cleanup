@@ -9,8 +9,12 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.PersonOff
 import androidx.compose.material.icons.rounded.PriorityHigh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -61,14 +66,18 @@ import eu.caiq.imagesorter.sync.sync.SyncPhase
 import eu.caiq.imagesorter.sync.sync.SyncProgress
 import eu.caiq.imagesorter.sync.ui.components.AppearOnEntry
 import eu.caiq.imagesorter.sync.ui.components.Eyebrow
+import eu.caiq.imagesorter.sync.ui.components.MediaFullImage
+import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.MediaThumbnail
+import eu.caiq.imagesorter.sync.ui.components.SelectableMediaGrid
+import eu.caiq.imagesorter.sync.ui.components.SelectionTopBar
 import eu.caiq.imagesorter.sync.ui.components.clickableScale
 import eu.caiq.imagesorter.sync.ui.components.statusColor
 import eu.caiq.imagesorter.sync.ui.theme.MonoLabel
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 
 /** Filter chips on the main status view (working set is the default). */
-enum class StatusFilter { WORKING_SET, SYNCED_TODAY, ALL }
+enum class StatusFilter { WORKING_SET, SYNCED_TODAY, ALL, NOT_PEOPLE }
 
 /** Test tag on each status tile, so the rendered tile count is assertable. */
 const val STATUS_TILE_TAG = "statusTile"
@@ -126,8 +135,32 @@ fun MainStatusScreen(
     syncProgress: SyncProgress = SyncProgress(),
     totals: StatusTotals = StatusTotals.fromRows(rows),
     failures: List<FailureDetail> = emptyList(),
+    // "Not people" review actions; defaulted to no-ops so the read-only callers and
+    // the existing screen tests need not supply them.
+    onOverride: (List<StatusRow>) -> Unit = {},
+    onDelete: (List<StatusRow>) -> Unit = {},
 ) {
     val c = VaultTheme.colors
+    // Interactive state for the Not People review grid. Keyed on the active filter so
+    // switching away from Not People discards any preview/selection in progress.
+    var previewIndex by remember(selectedFilter) { mutableStateOf<Int?>(null) }
+    var selectionMode by remember(selectedFilter) { mutableStateOf(false) }
+    var selectedKeys by remember(selectedFilter) { mutableStateOf<Set<Any>>(emptySet()) }
+    val notPeople = selectedFilter == StatusFilter.NOT_PEOPLE
+
+    fun clearSelection() {
+        selectedKeys = emptySet()
+        selectionMode = false
+    }
+
+    fun toggle(row: StatusRow) {
+        val next = if (row.key in selectedKeys) selectedKeys - row.key else selectedKeys + row.key
+        selectedKeys = next
+        // Deselecting the last tile leaves selection mode (Google-Photos behavior).
+        selectionMode = next.isNotEmpty()
+    }
+
+    val selectedRows = rows.filter { it.key in selectedKeys }
     val safe = totals.safe
     val todo = totals.todo
     val failed = totals.failed
@@ -137,8 +170,9 @@ fun MainStatusScreen(
     val activeSync = syncProgress.phase != SyncPhase.IDLE && !syncProgress.isFinished
     val phaseText = phaseLabel(syncProgress)
 
+    Box(modifier = modifier.fillMaxSize()) {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .background(c.ground)
             .padding(horizontal = 22.dp)
@@ -202,24 +236,45 @@ fun MainStatusScreen(
         Spacer(Modifier.height(14.dp))
 
         Box(Modifier.weight(1f)) {
-            if (rows.isEmpty()) {
-                EmptyState()
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    itemsIndexed(rows, key = { _, r -> r.key }) { index, row ->
-                        AppearOnEntry(
-                            delayMs = (index % 12) * 26,
-                            key = row.key,
-                            modifier = Modifier.animateItem(),
-                        ) {
-                            MediaTile(row)
+            when {
+                rows.isEmpty() -> EmptyState()
+                notPeople -> Column {
+                    AnimatedVisibility(selectionMode) {
+                        Column {
+                            SelectionTopBar(
+                                count = selectedKeys.size,
+                                onSelectAll = {
+                                    selectedKeys = rows.map { it.key }.toSet()
+                                    selectionMode = true
+                                },
+                                onOverride = {
+                                    onOverride(selectedRows)
+                                    clearSelection()
+                                },
+                                onDelete = {
+                                    onDelete(selectedRows)
+                                    clearSelection()
+                                },
+                            )
+                            Spacer(Modifier.height(10.dp))
                         }
                     }
+                    SelectableMediaGrid(
+                        items = rows,
+                        keyOf = { it.key },
+                        selectedKeys = selectedKeys,
+                        inSelectionMode = selectionMode,
+                        onTap = { index -> previewIndex = index },
+                        onToggle = { row -> toggle(row) },
+                        onLongPress = { row ->
+                            selectionMode = true
+                            selectedKeys = setOf(row.key)
+                        },
+                        tileTag = STATUS_TILE_TAG,
+                        modifier = Modifier.weight(1f),
+                    ) { row -> MediaTileContent(row) }
                 }
+                else -> ReadOnlyGrid(rows)
             }
             SweepOverlay(visible = activeSync)
         }
@@ -256,8 +311,45 @@ fun MainStatusScreen(
         }
     }
 
-    if (showFailures) {
-        FailureDialog(failures = failures, onDismiss = { showFailures = false })
+        // Fullscreen preview overlay — opens with a scale+fade expand from the grid.
+        AnimatedVisibility(
+            visible = notPeople && previewIndex != null,
+            enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.92f, animationSpec = tween(260)),
+            exit = fadeOut(tween(160)) + scaleOut(targetScale = 0.92f, animationSpec = tween(160)),
+        ) {
+            val idx = previewIndex
+            if (idx != null && idx in rows.indices) {
+                MediaPreviewPager(
+                    items = rows,
+                    startIndex = idx,
+                    onClose = { previewIndex = null },
+                    actions = { page ->
+                        val c = VaultTheme.colors
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(
+                                onClick = {
+                                    rows.getOrNull(page)?.let { onOverride(listOf(it)) }
+                                    previewIndex = null
+                                },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+                            ) { Text("Sync anyway", fontWeight = FontWeight.SemiBold) }
+                            OutlinedButton(
+                                onClick = {
+                                    rows.getOrNull(page)?.let { onDelete(listOf(it)) }
+                                    previewIndex = null
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) { Text("Delete") }
+                        }
+                    },
+                ) { row -> MediaFullImage(row.mediaStoreId, row.mimeType, row.name) }
+            }
+        }
+
+        if (showFailures) {
+            FailureDialog(failures = failures, onDismiss = { showFailures = false })
+        }
     }
 }
 
@@ -277,10 +369,14 @@ private fun phaseLabel(progress: SyncProgress): String? = when (progress.phase) 
 
 @Composable
 private fun FilterRow(selected: StatusFilter, onChange: (StatusFilter) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
+    ) {
         Pill("Working set", selected == StatusFilter.WORKING_SET) { onChange(StatusFilter.WORKING_SET) }
         Pill("Synced today", selected == StatusFilter.SYNCED_TODAY) { onChange(StatusFilter.SYNCED_TODAY) }
         Pill("All", selected == StatusFilter.ALL) { onChange(StatusFilter.ALL) }
+        Pill("Not people", selected == StatusFilter.NOT_PEOPLE) { onChange(StatusFilter.NOT_PEOPLE) }
     }
 }
 
@@ -300,18 +396,50 @@ private fun Pill(label: String, on: Boolean, onClick: () -> Unit) {
     }
 }
 
+/** Read-only 3-column status grid used by every filter except Not People. */
 @Composable
-private fun MediaTile(row: StatusRow, modifier: Modifier = Modifier) {
-    val c = VaultTheme.colors
-    val dim = row.status == SyncStatus.PENDING
-    Box(modifier = modifier.testTag(STATUS_TILE_TAG).aspectRatio(1f).clip(RoundedCornerShape(13.dp))) {
+private fun ReadOnlyGrid(rows: List<StatusRow>) {
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(3),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        itemsIndexed(rows, key = { _, r -> r.key }) { index, row ->
+            AppearOnEntry(
+                delayMs = (index % 12) * 26,
+                key = row.key,
+                modifier = Modifier.animateItem(),
+            ) {
+                Box(
+                    Modifier
+                        .testTag(STATUS_TILE_TAG)
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(13.dp)),
+                ) {
+                    MediaTileContent(row)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The visual content of a tile (thumbnail + dim + status badge), without the tile
+ * tag or click handling — shared by the read-only grid and the selectable Not People
+ * grid so both render identical tiles.
+ */
+@Composable
+private fun MediaTileContent(row: StatusRow, modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxSize()) {
         MediaThumbnail(
             mediaStoreId = row.mediaStoreId,
             mimeType = row.mimeType,
             fallbackSeed = row.name,
             modifier = Modifier.fillMaxSize(),
         )
-        if (dim) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.42f)))
+        if (row.status == SyncStatus.PENDING) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.42f)))
+        }
         StatusBadge(
             status = row.status,
             modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
@@ -328,12 +456,19 @@ private fun StatusBadge(status: SyncStatus, modifier: Modifier = Modifier) {
         SyncStatus.IN_PROGRESS -> "Uploading"
         SyncStatus.FAILED -> "Failed"
         SyncStatus.PENDING -> "Pending"
+        SyncStatus.UNCLASSIFIED -> "Not people"
     }
+    // Filled badges (a colored disc with a glyph) for the decided states — synced,
+    // uploading, failed and not-people; a small muted dot for the still-pending one.
+    val filled = status == SyncStatus.SYNCED ||
+        status == SyncStatus.IN_PROGRESS ||
+        status == SyncStatus.FAILED ||
+        status == SyncStatus.UNCLASSIFIED
     Box(
         modifier = modifier
             .size(22.dp)
             .clip(CircleShape)
-            .background(if (status == SyncStatus.SYNCED || status == SyncStatus.IN_PROGRESS || status == SyncStatus.FAILED) tint else Color.Black.copy(alpha = 0.45f))
+            .background(if (filled) tint else Color.Black.copy(alpha = 0.45f))
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
@@ -342,6 +477,7 @@ private fun StatusBadge(status: SyncStatus, modifier: Modifier = Modifier) {
             SyncStatus.IN_PROGRESS -> Icon(Icons.Rounded.CloudUpload, null, tint = Color(0xFF2A1B02), modifier = Modifier.size(13.dp))
             SyncStatus.FAILED -> Icon(Icons.Rounded.PriorityHigh, null, tint = Color(0xFF2A0B07), modifier = Modifier.size(14.dp))
             SyncStatus.PENDING -> Box(Modifier.size(6.dp).clip(CircleShape).background(c.muted))
+            SyncStatus.UNCLASSIFIED -> Icon(Icons.Rounded.PersonOff, null, tint = Color.White, modifier = Modifier.size(13.dp))
         }
     }
 }

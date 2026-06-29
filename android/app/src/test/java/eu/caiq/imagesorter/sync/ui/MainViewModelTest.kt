@@ -4,6 +4,9 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import eu.caiq.imagesorter.sync.ServiceLocator
 import eu.caiq.imagesorter.sync.data.api.SyncApi
+import eu.caiq.imagesorter.sync.domain.model.SyncStatus
+import eu.caiq.imagesorter.sync.ui.screens.StatusFilter
+import eu.caiq.imagesorter.sync.ui.screens.StatusRow
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -227,6 +230,47 @@ class MainViewModelTest {
 
         gated.release()
         dispatcher.scheduler.advanceUntilIdle()
+    }
+
+    @Test
+    fun applyFilterProjectsEachFilterToItsExpectedSlice() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+        val all = listOf(
+            StatusRow(name = "synced.jpg", status = SyncStatus.SYNCED),
+            StatusRow(name = "pending.jpg", status = SyncStatus.PENDING),
+            StatusRow(name = "failed.jpg", status = SyncStatus.FAILED, failureReason = "x"),
+            StatusRow(name = "inprogress.jpg", status = SyncStatus.IN_PROGRESS),
+            StatusRow(name = "notpeople.jpg", status = SyncStatus.UNCLASSIFIED),
+        )
+
+        fun names(f: StatusFilter) = vm.applyFilter(all, f).map { it.name }.toSet()
+
+        // ALL includes UNCLASSIFIED.
+        assertEquals(all.map { it.name }.toSet(), names(StatusFilter.ALL))
+        // SYNCED_TODAY shows only SYNCED.
+        assertEquals(setOf("synced.jpg"), names(StatusFilter.SYNCED_TODAY))
+        // NOT_PEOPLE shows only UNCLASSIFIED.
+        assertEquals(setOf("notpeople.jpg"), names(StatusFilter.NOT_PEOPLE))
+        // WORKING_SET excludes UNCLASSIFIED and synced-without-failure.
+        assertEquals(
+            setOf("pending.jpg", "failed.jpg", "inprogress.jpg"),
+            names(StatusFilter.WORKING_SET),
+        )
+    }
+
+    @Test
+    fun homeShellOpensOnPhotosTabByDefault() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+        assertEquals(HomeTab.PHOTOS, vm.homeTab.value)
+    }
+
+    @Test
+    fun selectHomeTabSwitchesBetweenPhotosAndSync() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+        vm.selectHomeTab(HomeTab.SYNC)
+        assertEquals(HomeTab.SYNC, vm.homeTab.value)
+        vm.selectHomeTab(HomeTab.PHOTOS)
+        assertEquals(HomeTab.PHOTOS, vm.homeTab.value)
     }
 
     @Test

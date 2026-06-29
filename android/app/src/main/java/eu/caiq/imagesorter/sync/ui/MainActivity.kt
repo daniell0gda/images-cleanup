@@ -12,15 +12,26 @@ import androidx.activity.viewModels
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import eu.caiq.imagesorter.sync.ServiceLocator
 import eu.caiq.imagesorter.sync.SyncApp
 import eu.caiq.imagesorter.sync.ui.screens.CleanupScreen
 import eu.caiq.imagesorter.sync.ui.screens.MainStatusScreen
 import eu.caiq.imagesorter.sync.ui.screens.PairingScreen
+import eu.caiq.imagesorter.sync.ui.screens.PhotosScreen
 import eu.caiq.imagesorter.sync.ui.screens.ProfilePickerScreen
 import eu.caiq.imagesorter.sync.ui.screens.ServerSetupScreen
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
@@ -58,6 +69,55 @@ class MainActivity : ComponentActivity() {
  */
 internal fun shouldStartPairing(screen: AppScreen): Boolean = screen == AppScreen.PAIRING
 
+/**
+ * The post-pairing screens render inside the home shell (a [Scaffold] with the
+ * Photos | Sync bottom [NavigationBar]); [AppScreen.SERVER_SETUP] and
+ * [AppScreen.PAIRING] stay full-screen with no bottom bar.
+ */
+internal fun showsBottomBar(screen: AppScreen): Boolean = when (screen) {
+    AppScreen.SERVER_SETUP, AppScreen.PAIRING -> false
+    AppScreen.PROFILE_PICKER, AppScreen.MAIN, AppScreen.CLEANUP -> true
+}
+
+/**
+ * The post-pairing home shell: a [Scaffold] with a Photos | Sync bottom
+ * [NavigationBar]. The selected [HomeTab] picks which slot is rendered in the
+ * content area; tapping a destination reports the new tab via [onTabSelected].
+ */
+@Composable
+internal fun HomeShell(
+    selectedTab: HomeTab,
+    onTabSelected: (HomeTab) -> Unit,
+    photos: @Composable () -> Unit,
+    sync: @Composable () -> Unit,
+) {
+    Scaffold(
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = selectedTab == HomeTab.PHOTOS,
+                    onClick = { onTabSelected(HomeTab.PHOTOS) },
+                    icon = { Icon(Icons.Rounded.PhotoLibrary, contentDescription = null) },
+                    label = { Text("Photos") },
+                )
+                NavigationBarItem(
+                    selected = selectedTab == HomeTab.SYNC,
+                    onClick = { onTabSelected(HomeTab.SYNC) },
+                    icon = { Icon(Icons.Rounded.Sync, contentDescription = null) },
+                    label = { Text("Sync") },
+                )
+            }
+        },
+    ) { padding ->
+        Surface(modifier = Modifier.padding(padding)) {
+            when (selectedTab) {
+                HomeTab.PHOTOS -> photos()
+                HomeTab.SYNC -> sync()
+            }
+        }
+    }
+}
+
 @Composable
 private fun AppRoot(viewModel: MainViewModel) {
     val screen by viewModel.screen.collectAsStateWithLifecycle()
@@ -83,6 +143,11 @@ private fun AppRoot(viewModel: MainViewModel) {
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { viewModel.onDeleteCompleted() }
 
+    // System delete dialog launcher for the Not People "Delete from phone" flow.
+    val notPeopleDeleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { viewModel.onNotPeopleDeleteCompleted() }
+
     when (screen) {
         AppScreen.SERVER_SETUP -> {
             val error by viewModel.serverSetupError.collectAsStateWithLifecycle()
@@ -94,6 +159,43 @@ private fun AppRoot(viewModel: MainViewModel) {
             val state by viewModel.pairingState.collectAsStateWithLifecycle()
             PairingScreen(state = state)
         }
+
+        // Post-pairing screens live inside the home shell (Photos | Sync). The
+        // Sync tab owns the profile/main/cleanup sub-flow; Photos is independent.
+        AppScreen.PROFILE_PICKER, AppScreen.MAIN, AppScreen.CLEANUP -> {
+            val homeTab by viewModel.homeTab.collectAsStateWithLifecycle()
+            HomeShell(
+                selectedTab = homeTab,
+                onTabSelected = viewModel::selectHomeTab,
+                photos = { PhotosScreen() },
+                sync = {
+                    SyncTabContent(
+                        viewModel = viewModel,
+                        screen = screen,
+                        onLaunchNotPeopleDelete = { request -> notPeopleDeleteLauncher.launch(request) },
+                        onLaunchCleanupDelete = { request -> deleteLauncher.launch(request) },
+                    )
+                },
+            )
+        }
+    }
+}
+
+/**
+ * The Sync tab's sub-flow: profile picker until a profile is chosen, then the main
+ * status screen, with the cleanup screen as a deeper sub-state. Mirrors the
+ * pre-shell routing exactly so the sync experience is unchanged.
+ */
+@Composable
+private fun SyncTabContent(
+    viewModel: MainViewModel,
+    screen: AppScreen,
+    onLaunchNotPeopleDelete: (IntentSenderRequest) -> Unit,
+    onLaunchCleanupDelete: (IntentSenderRequest) -> Unit,
+) {
+    when (screen) {
+        // Reachable only via the home-screen branch in AppRoot.
+        AppScreen.SERVER_SETUP, AppScreen.PAIRING -> Unit
 
         AppScreen.PROFILE_PICKER -> {
             val profiles by viewModel.profiles.collectAsStateWithLifecycle()
@@ -110,6 +212,15 @@ private fun AppRoot(viewModel: MainViewModel) {
             val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
             val totals by viewModel.totals.collectAsStateWithLifecycle()
             val failures by viewModel.failures.collectAsStateWithLifecycle()
+
+            // Fire the system delete dialog when the Not People grid requests it.
+            val notPeopleDeleteIds by viewModel.notPeopleDeleteIds.collectAsStateWithLifecycle()
+            LaunchedEffect(notPeopleDeleteIds) {
+                if (notPeopleDeleteIds.isNotEmpty()) {
+                    launchDelete(viewModel, notPeopleDeleteIds, onLaunchNotPeopleDelete)
+                }
+            }
+
             MainStatusScreen(
                 rows = rows,
                 selectedFilter = filter,
@@ -119,6 +230,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                 syncProgress = syncProgress,
                 totals = totals,
                 failures = failures,
+                onOverride = viewModel::overrideSelected,
+                onDelete = viewModel::requestNotPeopleDelete,
             )
         }
 
@@ -130,9 +243,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 verifiedPresentCount = deletableIds.size,
                 onStartCleanup = viewModel::startCleanup,
                 onRemoveSynced = {
-                    launchDelete(viewModel, deletableIds) { request ->
-                        deleteLauncher.launch(request)
-                    }
+                    launchDelete(viewModel, deletableIds, onLaunchCleanupDelete)
                 },
             )
         }

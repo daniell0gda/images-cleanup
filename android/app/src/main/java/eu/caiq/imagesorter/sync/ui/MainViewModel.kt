@@ -12,6 +12,7 @@ import eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity
 import eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity
 import eu.caiq.imagesorter.sync.domain.model.FailureReason
 import eu.caiq.imagesorter.sync.domain.model.Identity
+import eu.caiq.imagesorter.sync.domain.model.MediaItem
 import eu.caiq.imagesorter.sync.domain.model.SyncStatus
 import eu.caiq.imagesorter.sync.pairing.PairingState
 import eu.caiq.imagesorter.sync.ui.screens.CleanupPhase
@@ -32,6 +33,13 @@ import kotlinx.coroutines.launch
 
 /** Top-level screen the Activity should render. */
 enum class AppScreen { SERVER_SETUP, PAIRING, PROFILE_PICKER, MAIN, CLEANUP }
+
+/**
+ * The bottom-navigation destination shown inside the post-pairing home shell.
+ * [PHOTOS] browses the server media gallery (profile-independent); [SYNC] owns the
+ * existing pairing/profile/back-up flow as a sub-state.
+ */
+enum class HomeTab { PHOTOS, SYNC }
 
 /**
  * Narrow read/write seam over the prefs the routing + connect flow touches. Kept
@@ -62,6 +70,16 @@ class MainViewModel(
 
     private val _screen = MutableStateFlow(initialScreen())
     val screen: StateFlow<AppScreen> = _screen.asStateFlow()
+
+    private val _homeTab = MutableStateFlow(HomeTab.PHOTOS)
+
+    /** Selected bottom-nav destination in the post-pairing home shell; opens on Photos. */
+    val homeTab: StateFlow<HomeTab> = _homeTab.asStateFlow()
+
+    /** Switch the home shell's bottom-nav tab (Photos | Sync). */
+    fun selectHomeTab(tab: HomeTab) {
+        _homeTab.value = tab
+    }
 
     private val _serverSetupError = MutableStateFlow<String?>(null)
 
@@ -95,6 +113,10 @@ class MainViewModel(
     /** Verified-present items pending the system delete dialog (local ids). */
     private val _deletableMediaIds = MutableStateFlow<List<Long>>(emptyList())
     val deletableMediaIds: StateFlow<List<Long>> = _deletableMediaIds.asStateFlow()
+
+    /** Not-people items selected for deletion, awaiting the system delete dialog. */
+    private val _notPeopleDeleteIds = MutableStateFlow<List<Long>>(emptyList())
+    val notPeopleDeleteIds: StateFlow<List<Long>> = _notPeopleDeleteIds.asStateFlow()
 
     /**
      * Every status row, unfiltered, recomputed from the cache + queue. The filtered
@@ -293,6 +315,63 @@ class MainViewModel(
         _screen.value = AppScreen.MAIN
     }
 
+    // --- Not People review actions ---
+
+    /**
+     * "Sync anyway" override for selected not-people items: rebuild [MediaItem]s from
+     * the local cache (+ a MediaStore content uri) and force-upload them. The engine
+     * opens a force_place session so the server skips classification and places them
+     * in the primary group; each row flips to SYNCED on success and leaves the set.
+     */
+    fun overrideSelected(rows: List<StatusRow>) {
+        val ids = rows.mapNotNull { it.mediaStoreId }.toSet()
+        if (ids.isEmpty()) return
+        viewModelScope.launch(Dispatchers.Default) {
+            val items = locator.syncedCacheDao().unclassifiedItems()
+                .filter { it.mediaStoreId in ids }
+                .mapNotNull { entity ->
+                    val id = entity.mediaStoreId ?: return@mapNotNull null
+                    val mime = entity.mimeType ?: "image/jpeg"
+                    MediaItem(
+                        mediaStoreId = id,
+                        uri = mediaContentUri(id, mime),
+                        identity = Identity(entity.name, entity.createdOn, entity.size),
+                        mimeType = mime,
+                    )
+                }
+            locator.syncEngine.overrideUpload(items)
+        }
+    }
+
+    /** Queue selected not-people items for the system delete dialog (Activity-owned). */
+    fun requestNotPeopleDelete(rows: List<StatusRow>) {
+        _notPeopleDeleteIds.value = rows.mapNotNull { it.mediaStoreId }
+    }
+
+    /**
+     * After the system delete dialog returns: prune the cache rows for the deleted
+     * ids so they leave the grid (reconcile never deletes UNCLASSIFIED rows itself).
+     */
+    fun onNotPeopleDeleteCompleted() {
+        val ids = _notPeopleDeleteIds.value.toSet()
+        _notPeopleDeleteIds.value = emptyList()
+        if (ids.isEmpty()) return
+        viewModelScope.launch(Dispatchers.Default) {
+            locator.syncedCacheDao().unclassifiedItems()
+                .filter { it.mediaStoreId in ids }
+                .forEach { locator.syncedCacheDao().delete(it.name, it.createdOn, it.size) }
+        }
+    }
+
+    private fun mediaContentUri(id: Long, mimeType: String): android.net.Uri {
+        val collection = if (mimeType.startsWith("video/")) {
+            android.provider.MediaStore.Video.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL)
+        } else {
+            android.provider.MediaStore.Images.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL)
+        }
+        return android.content.ContentUris.withAppendedId(collection, id)
+    }
+
     // --- Row projection ---
 
     private fun buildAllRows(
@@ -339,11 +418,23 @@ class MainViewModel(
             retryable = retryable,
         )
 
-    private fun applyFilter(all: List<StatusRow>, filter: StatusFilter): List<StatusRow> =
+    /**
+     * Maps the full row set to the slice the active filter shows. `internal` (not
+     * private) so it can be unit-tested as the pure projection it is, without
+     * standing up the DAO/DB seam the public `rows` flow needs.
+     *
+     * WORKING_SET excludes UNCLASSIFIED ("Not people" was a deliberate not-sync
+     * decision); NOT_PEOPLE shows only those.
+     */
+    internal fun applyFilter(all: List<StatusRow>, filter: StatusFilter): List<StatusRow> =
         when (filter) {
             StatusFilter.ALL -> all
             StatusFilter.SYNCED_TODAY -> all.filter { it.status == SyncStatus.SYNCED }
+            StatusFilter.NOT_PEOPLE -> all.filter { it.status == SyncStatus.UNCLASSIFIED }
             StatusFilter.WORKING_SET ->
-                all.filter { it.status != SyncStatus.SYNCED || it.failureReason != null }
+                all.filter {
+                    it.status != SyncStatus.UNCLASSIFIED &&
+                        (it.status != SyncStatus.SYNCED || it.failureReason != null)
+                }
         }
 }
