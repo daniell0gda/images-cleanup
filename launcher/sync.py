@@ -329,6 +329,36 @@ class SyncStore:
             ).fetchone()
         return row["stored_path"] if row else None
 
+    def refresh_index(self) -> dict:
+        """Re-validate the synced-file index against the destination on disk.
+
+        A file deleted from the destination outside the app (manually, or by
+        another tool) would otherwise stay "synced" forever and never be
+        re-uploaded. This drops the index row for every recorded file whose
+        ``stored_path`` is gone, so the next device reconcile re-queues it.
+
+        Returns ``{"checked": N, "removed": M}``. Disk stats run outside the
+        lock — a full destination may live on a slow share — and each prune
+        takes the lock only briefly.
+        """
+        with self._lock:
+            rows = self._conn().execute(
+                "SELECT name, created_on, size, stored_path FROM synced_files"
+            ).fetchall()
+        removed = 0
+        for r in rows:
+            stored = r["stored_path"]
+            if stored and Path(stored).exists():
+                continue
+            with self._lock:
+                self._conn().execute(
+                    "DELETE FROM synced_files WHERE name=? AND created_on=? AND size=?",
+                    (r["name"], r["created_on"], r["size"]),
+                )
+                self._conn().commit()
+            removed += 1
+        return {"checked": len(rows), "removed": removed}
+
 
 # ---------------------------------------------------------------------------
 # Upload-session lifecycle
@@ -385,14 +415,21 @@ class SessionManager:
                 return candidate
         return None
 
-    def create_session(self, device_id: str, profile_id: str) -> str:
+    def create_session(
+        self, device_id: str, profile_id: str, force_place: bool = False
+    ) -> str:
         session_id = secrets.token_hex(8)
         with self._lock:
             sdir = self.session_dir(device_id, session_id)
             sdir.mkdir(parents=True, exist_ok=True)
             (sdir / _SESSION_META).write_text(
                 json.dumps(
-                    {"device_id": device_id, "profile_id": profile_id, "created_at": _now()}
+                    {
+                        "device_id": device_id,
+                        "profile_id": profile_id,
+                        "force_place": force_place,
+                        "created_at": _now(),
+                    }
                 ),
                 encoding="utf-8",
             )
@@ -568,6 +605,23 @@ def _is_path_within(child: Path, parent: Path) -> bool:
         return False
 
 
+class _Discarded:
+    """Sentinel returned by :func:`place_file` in the ``stored`` slot when an
+    image is discarded (matched no tag_group under ``discard_unclassified``).
+
+    It marks a result that is neither synced (``ok`` + a real path) nor failed
+    (a ``FailureReason``): the file was intentionally not placed anywhere.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return "DISCARDED"
+
+
+DISCARDED = _Discarded()
+
+
 def _is_video(mime_type: str) -> bool:
     return mime_type.lower().startswith("video/")
 
@@ -585,7 +639,9 @@ def place_file(
     meta: FileMeta,
     config,
     detect_tags,
-) -> tuple[bool, Path | None, FailureReason | None]:
+    discard_unclassified: bool = False,
+    force_place: bool = False,
+) -> tuple[bool, Path | None | _Discarded, FailureReason | None]:
     """Route a single uploaded file to its destination, honoring the profile's
     ``on_collision`` policy on a genuine filename clash.
 
@@ -597,6 +653,15 @@ def place_file(
     ``detect_tags`` is a callable ``(Path) -> set[str]`` used to classify
     images; it is never called for videos. Returns
     ``(ok, stored_path, failure_reason)``.
+
+    The sync lane passes ``discard_unclassified=True`` so an image matching no
+    tag_group is not placed in the unclassified folder; instead the result is
+    ``(False, DISCARDED, None)`` — distinguishable from synced and failed. The
+    default (``discard_unclassified=False``) keeps the CLI sorter's behavior of
+    placing such images in the unclassified destination.
+
+    ``force_place=True`` skips image classification entirely and places every
+    image into the primary tag_group (``config.tag_groups[0]``).
     """
     from imagesorter.sorter import _select_group, _build_dest_dir, _transfer_with_policy
 
@@ -622,6 +687,12 @@ def place_file(
             dest_dir = _build_dest_dir(
                 video.destination, dt, video.group_by_year, video.group_by_month
             )
+        elif force_place:
+            # Force mode: skip classification and place into the primary group.
+            primary = config.tag_groups[0]
+            dest_dir = _build_dest_dir(
+                primary.destination, dt, primary.group_by_year, primary.group_by_month
+            )
         else:
             try:
                 detected = detect_tags(named)
@@ -633,6 +704,12 @@ def place_file(
                 dest_dir = _build_dest_dir(
                     group.destination, dt, group.group_by_year, group.group_by_month
                 )
+            elif discard_unclassified:
+                # Sync lane: do not place unclassified images anywhere. Remove
+                # the renamed copy so it does not linger in the session folder.
+                if named.exists():
+                    named.unlink()
+                return False, DISCARDED, None
             else:
                 base = str(
                     Path(config.unclassified.destination) / config.unclassified.folder_name
@@ -738,6 +815,7 @@ class SyncLane:
         config = self._load_config(meta["profile_id"])
         device_id = meta["device_id"]
         profile_id = meta["profile_id"]
+        force_place = bool(meta.get("force_place"))
 
         outcomes: list[dict] = []
         for file_id in self._sessions.file_ids(sdir):
@@ -745,8 +823,14 @@ class SyncLane:
             if fmeta is None:
                 continue
             part = sdir / f"{file_id}.part"
-            ok, stored, reason = self._attempt_with_retry(part, fmeta, config)
-            if ok and stored is not None:
+            ok, stored, reason = self._attempt_with_retry(part, fmeta, config, force_place)
+            if stored is DISCARDED:
+                # Matched no tag_group in the sync lane: not placed, not failed.
+                # place_file already removed the renamed copy; drop the .part too.
+                if part.exists():
+                    part.unlink()
+                outcome = {"file_id": file_id, "name": fmeta.name, "status": "unclassified"}
+            elif ok and stored is not None:
                 self._store.record_synced(
                     fmeta.name, fmeta.created_on, fmeta.size, fmeta.mime_type,
                     str(stored), device_id, profile_id,
@@ -778,18 +862,23 @@ class SyncLane:
         self._cleanup_if_empty(sdir)
         return outcomes
 
-    def _attempt_with_retry(self, part: Path, fmeta: FileMeta, config):
+    def _attempt_with_retry(self, part: Path, fmeta: FileMeta, config, force_place: bool = False):
         """Place a file, auto-retrying retryable failures up to max_attempts.
 
-        A terminal failure (e.g. an unreadable file) is never retried.
+        A terminal failure (e.g. an unreadable file) is never retried. The sync
+        lane never places unclassified images (``discard_unclassified=True``); in
+        ``force_place`` mode images skip classification and go to the primary group.
         """
         ok, stored, reason = False, None, FailureReason.INTERNAL_ERROR
         for _ in range(self._max_attempts):
             try:
-                ok, stored, reason = place_file(part, fmeta, config, self._detect_tags)
+                ok, stored, reason = place_file(
+                    part, fmeta, config, self._detect_tags,
+                    discard_unclassified=True, force_place=force_place,
+                )
             except Exception:
                 ok, stored, reason = False, None, FailureReason.INTERNAL_ERROR
-            if ok:
+            if ok or stored is DISCARDED:
                 return ok, stored, reason
             if reason is None or not reason.retryable:
                 return ok, stored, reason

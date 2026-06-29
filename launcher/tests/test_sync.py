@@ -428,7 +428,8 @@ def test_image_matching_tag_group_goes_to_group_destination(tmp_path):
 
 
 def test_image_matching_nothing_goes_to_unclassified(tmp_path):
-    """An image matching no group lands in the unclassified destination."""
+    """By default (non-sync path), an image matching no group lands in the
+    unclassified destination — the CLI sorter behavior is unchanged."""
     from launcher.sync import place_file
     cfg = _make_config(tmp_path)
     part = _part(tmp_path, "img.part", b"hello")
@@ -437,6 +438,25 @@ def test_image_matching_nothing_goes_to_unclassified(tmp_path):
     ok, stored, reason = place_file(part, meta, cfg, lambda p: {"cat"})
     assert ok and reason is None
     assert stored.parent == tmp_path / "dest" / "others" / "2021"
+
+
+def test_discard_unclassified_does_not_place_and_is_distinguishable(tmp_path):
+    """With discard_unclassified=True, an image matching no group is NOT moved
+    into the unclassified/others destination, and the result is distinguishable
+    from both a synced result (ok+path) and a failed result (reason set)."""
+    from launcher.sync import place_file, DISCARDED
+    cfg = _make_config(tmp_path)
+    part = _part(tmp_path, "img.part", b"hello")
+    meta = _meta("img.jpg", 5)
+
+    ok, stored, reason = place_file(
+        part, meta, cfg, lambda p: {"cat"}, discard_unclassified=True
+    )
+
+    assert ok is False  # not synced
+    assert reason is None  # not failed
+    assert stored is DISCARDED  # distinguishable sentinel
+    assert not (tmp_path / "dest" / "others").exists()
 
 
 def test_video_skips_classification_and_goes_to_video_destination(tmp_path):
@@ -608,9 +628,10 @@ def test_malicious_session_id_cannot_escape_inbox(tmp_path):
     assert not (outside / ".complete").exists()
 
 
-def test_open_session_rejects_profile_without_unclassified(tmp_path):
-    """A sync profile whose unclassified destination is disabled is rejected at
-    session-open, not silently failed per-file at processing time."""
+def test_open_session_no_longer_gated_by_unclassified_enabled(tmp_path):
+    """The unclassified.enabled session-open gate is removed: the sync lane no
+    longer places unclassified images, so a profile with unclassified.enabled
+    false opens a session successfully instead of being rejected."""
     app = make_app(tmp_path)
     (tmp_path / "configs" / "config_alice_groupby.yaml").write_text(
         "mode: GroupByTags\n"
@@ -626,9 +647,8 @@ def test_open_session_rejects_profile_without_unclassified(tmp_path):
     token = trust(client, "dev-1")
 
     r = client.post("/api/sync/sessions", json={"profile_id": "alice_groupby"}, headers=auth(token))
-    assert r.status_code == 400, r.text
-    # No session directory was created for the rejected profile.
-    assert not list((tmp_path / "inbox" / "dev-1").glob("*")) if (tmp_path / "inbox" / "dev-1").exists() else True
+    assert r.status_code == 200, r.text
+    assert r.json()["session_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +703,70 @@ def test_outcomes_report_synced_and_failed(tmp_path):
     bad = client.get(f"/api/sync/sessions/{sid}/outcomes", headers=auth(token)).json()["outcomes"]
     assert bad[0]["status"] == "failed"
     assert bad[0]["reason"] == "size_mismatch"
+
+
+def test_force_place_flag_defaults_false_and_persists_in_session_meta(tmp_path):
+    """POST /api/sync/sessions accepts an optional force_place flag (default
+    false) and persists it into the on-disk session.json meta."""
+    import json
+    app = make_app(tmp_path, detect_tags=lambda p: {"person"})
+    _write_e2e_config(tmp_path)
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    # Default: omitted -> false.
+    sid_default = client.post(
+        "/api/sync/sessions", json={"profile_id": "alice_groupby"}, headers=auth(token)
+    ).json()["session_id"]
+    meta_default = json.loads(
+        (tmp_path / "inbox" / "dev-1" / sid_default / "session.json").read_text(encoding="utf-8")
+    )
+    assert meta_default.get("force_place", False) is False
+
+    # Explicit force_place=true is persisted.
+    sid_force = client.post(
+        "/api/sync/sessions",
+        json={"profile_id": "alice_groupby", "force_place": True},
+        headers=auth(token),
+    ).json()["session_id"]
+    meta_force = json.loads(
+        (tmp_path / "inbox" / "dev-1" / sid_force / "session.json").read_text(encoding="utf-8")
+    )
+    assert meta_force["force_place"] is True
+
+
+def test_force_place_skips_classification_and_places_in_primary_group(tmp_path):
+    """In a force_place session, place_file never classifies an image and routes
+    it to the primary tag_group destination, recorded as 'synced'."""
+    called = []
+    app = make_app(tmp_path, detect_tags=lambda p: called.append(p) or {"cat"})
+    _write_e2e_config(tmp_path)
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    sid = client.post(
+        "/api/sync/sessions",
+        json={"profile_id": "alice_groupby", "force_place": True},
+        headers=auth(token),
+    ).json()["session_id"]
+    meta = {"name": "forced.jpg", "created_on": "2021-01-01T00:00:00", "size": 4, "mime_type": "image/jpeg"}
+    _upload_chunk(client, token, sid, "f1", meta, 0, b"abcd")
+    client.post(f"/api/sync/sessions/{sid}/complete", headers=auth(token))
+    outcomes = client.get(f"/api/sync/sessions/{sid}/outcomes", headers=auth(token)).json()["outcomes"]
+
+    assert called == []  # classification skipped entirely
+    assert outcomes[0]["status"] == "synced"
+    # Placed under the primary group's destination (people).
+    import sqlite3
+    con = sqlite3.connect(str(tmp_path / "sync.db"))
+    con.row_factory = sqlite3.Row
+    row = con.execute("SELECT * FROM synced_files WHERE name='forced.jpg'").fetchone()
+    con.close()
+    assert row is not None
+    from pathlib import Path as _P
+    stored = _P(row["stored_path"])
+    assert stored.exists()
+    assert (tmp_path / "dest" / "people") in stored.parents
 
 
 def test_synced_files_row_records_full_identity_and_stored_path(tmp_path):
@@ -785,6 +869,49 @@ def test_empty_session_folder_is_removed_after_all_files_moved(tmp_path):
 
     sid, _ = _full_upload(client, token, {"person"}, name="ok.jpg", data=b"abcd")
     assert not (tmp_path / "inbox" / "dev-1" / sid).exists()
+
+
+def test_non_matching_image_is_unclassified_not_synced_and_cleaned_up(tmp_path):
+    """A sync-lane image matching no tag_group: no synced_files row, its .part
+    (and any renamed copy) is gone from the session folder, and the per-file
+    outcome status is 'unclassified' (persisted + returned by the outcomes API)."""
+    app = make_app(tmp_path, detect_tags=lambda p: {"cat"})
+    _write_e2e_config(tmp_path)
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    sid, outcomes = _full_upload(client, token, {"cat"}, name="np.jpg", data=b"abcd")
+
+    assert outcomes[0]["status"] == "unclassified"
+    # No synced_files row recorded for the discarded image.
+    import sqlite3
+    con = sqlite3.connect(str(tmp_path / "sync.db"))
+    assert con.execute("SELECT COUNT(*) FROM synced_files").fetchone()[0] == 0
+    con.close()
+    # The temp part (and any renamed copy) is gone from the session folder.
+    sdir = tmp_path / "inbox" / "dev-1" / sid
+    assert not sdir.exists() or (
+        not list(sdir.glob("*.part")) and not (sdir / "np.jpg").exists()
+    )
+    # The unclassified outcome was persisted and round-trips via the API.
+    again = client.get(f"/api/sync/sessions/{sid}/outcomes", headers=auth(token)).json()["outcomes"]
+    assert again[0]["status"] == "unclassified"
+
+
+def test_unclassified_outcome_row_carries_only_identity_keys(tmp_path):
+    """An 'unclassified' outcome row carries only file_id, name, status — no
+    reason/retryable — while failed rows still get reason/retryable."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.record_outcome("s1", {"file_id": "f1", "name": "np.jpg", "status": "unclassified"})
+    store.record_outcome("s1", {
+        "file_id": "f2", "name": "bad.jpg", "status": "failed",
+        "reason": "size_mismatch", "retryable": True,
+    })
+    by_status = {r["status"]: r for r in store.outcomes_for("s1")}
+
+    assert set(by_status["unclassified"].keys()) == {"file_id", "name", "status"}
+    assert set(by_status["failed"].keys()) == {"file_id", "name", "status", "reason", "retryable"}
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1084,93 @@ def test_verify_reports_present_and_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Index refresh + server settings
+# ---------------------------------------------------------------------------
+
+def test_refresh_index_prunes_missing_keeps_present(tmp_path):
+    """refresh_index drops rows whose stored file is gone and keeps the rest."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    keep = tmp_path / "keep.jpg"
+    keep.write_bytes(b"abcd")
+    store.record_synced("keep.jpg", "2021-01-01T00:00:00", 4, "image/jpeg",
+                        str(keep), "dev-1", "alice_groupby")
+    store.record_synced("gone.jpg", "2021-01-01T00:00:00", 4, "image/jpeg",
+                        str(tmp_path / "gone.jpg"), "dev-1", "alice_groupby")
+
+    result = store.refresh_index()
+    assert result == {"checked": 2, "removed": 1}
+    assert store.is_synced("keep.jpg", "2021-01-01T00:00:00", 4) is True
+    assert store.is_synced("gone.jpg", "2021-01-01T00:00:00", 4) is False
+
+
+def test_refresh_endpoint_requeues_deleted_destination(tmp_path):
+    """After a synced file is deleted from the destination, POST /api/sync/refresh
+    removes its index row so the next reconcile reports it as not-synced."""
+    app = make_app(tmp_path, detect_tags=lambda p: {"person"})
+    _write_e2e_config(tmp_path)
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    _full_upload(client, token, {"person"}, name="keep.jpg", data=b"abcd")
+    from launcher.sync import SyncStore
+    stored = SyncStore(tmp_path / "sync.db").stored_path_for("keep.jpg", "2021-01-01T00:00:00", 4)
+    ident = [{"name": "keep.jpg", "created_on": "2021-01-01T00:00:00", "size": 4}]
+
+    assert client.post("/api/sync/reconcile", json=ident, headers=auth(token)).json()["results"][0]["already_synced"] is True
+
+    from pathlib import Path as _P
+    _P(stored).unlink()
+    refreshed = client.post("/api/settings/refresh").json()
+    assert refreshed["removed"] == 1
+
+    after = client.post("/api/sync/reconcile", json=ident, headers=auth(token)).json()["results"]
+    assert after[0]["already_synced"] is False
+
+
+def test_settings_default_to_daily_1am(tmp_path):
+    """With no server.yaml, settings default to the index refresh enabled at 1am
+    and report a concrete next_run."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    body = client.get("/api/settings").json()
+    assert body["db_refresh"]["enabled"] is True
+    assert body["db_refresh"]["schedule"] == "0 1 * * *"
+    assert body["db_refresh"]["next_run"] is not None
+    assert body["last_refresh"] is None
+
+
+def test_settings_update_persists_and_validates(tmp_path):
+    """POST /api/settings writes server.yaml; a re-read reflects it, and an
+    invalid cron expression is rejected with 400 without persisting."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    ok = client.post("/api/settings", json={"db_refresh": {"enabled": False, "schedule": "30 3 * * *"}})
+    assert ok.status_code == 200
+    assert ok.json()["db_refresh"] == {"enabled": False, "schedule": "30 3 * * *", "next_run": None}
+    assert (tmp_path / "configs" / "server.yaml").is_file()
+    assert client.get("/api/settings").json()["db_refresh"]["schedule"] == "30 3 * * *"
+
+    bad = client.post("/api/settings", json={"db_refresh": {"enabled": True, "schedule": "not a cron"}})
+    assert bad.status_code == 400
+    # The rejected value did not overwrite the previously saved one.
+    assert client.get("/api/settings").json()["db_refresh"]["schedule"] == "30 3 * * *"
+
+
+def test_settings_last_refresh_reported_after_run(tmp_path):
+    """A manual refresh is reflected in the settings payload's last_refresh."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    client.post("/api/settings/refresh")
+    last = client.get("/api/settings").json()["last_refresh"]
+    assert last["checked"] == 0 and last["removed"] == 0
+    assert "at" in last
+
+
+# ---------------------------------------------------------------------------
 # Open-branch: failure taxonomy & retry classification
 # ---------------------------------------------------------------------------
 
@@ -986,7 +1200,7 @@ def test_retryable_reason_reattempted_terminal_not(tmp_path, monkeypatch):
     # Retryable: fail once, then succeed.
     calls = {"n": 0}
 
-    def flaky_place(part, meta, cfg, detect):
+    def flaky_place(part, meta, cfg, detect, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             return False, None, sync_mod.FailureReason.PLACEMENT_ERROR
@@ -1000,7 +1214,7 @@ def test_retryable_reason_reattempted_terminal_not(tmp_path, monkeypatch):
     # Terminal: never retried.
     term_calls = {"n": 0}
 
-    def terminal_place(part, meta, cfg, detect):
+    def terminal_place(part, meta, cfg, detect, **kwargs):
         term_calls["n"] += 1
         return False, None, sync_mod.FailureReason.UNREADABLE
 

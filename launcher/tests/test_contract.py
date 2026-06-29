@@ -253,7 +253,7 @@ def test_open_session_request_field_matches():
     import launcher.server as srv
     server_fields = set(srv._SessionRequest.model_fields.keys())
     client_fields = set(_json_fields_of_data_class(_read_kotlin("SessionDtos"), "OpenSessionRequest"))
-    assert server_fields == client_fields == {"profile_id"}
+    assert server_fields == client_fields == {"profile_id", "force_place"}
 
 
 # ===========================================================================
@@ -356,14 +356,17 @@ def test_outcome_row_keys_subset_of_outcome_dto(tmp_path):
         "file_id": "f2", "name": "bad.jpg", "status": "failed",
         "reason": "size_mismatch", "retryable": True,
     })
+    store.record_outcome("s1", {"file_id": "f3", "name": "np.jpg", "status": "unclassified"})
     rows = store.outcomes_for("s1")
     by_status = {r["status"]: set(r.keys()) for r in rows}
 
     client_fields = set(_json_fields_of_data_class(_read_kotlin("SessionDtos"), "OutcomeDto"))
     assert by_status["synced"] == {"file_id", "name", "status"}
     assert by_status["failed"] == {"file_id", "name", "status", "reason", "retryable"}
+    assert by_status["unclassified"] == {"file_id", "name", "status"}
     assert by_status["synced"] <= client_fields
     assert by_status["failed"] <= client_fields
+    assert by_status["unclassified"] <= client_fields
 
 
 # ===========================================================================
