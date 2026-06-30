@@ -29,6 +29,12 @@ def _make_image(path: Path, size=(20, 20), color=(10, 120, 200)) -> None:
     Image.new("RGB", size, color).save(path)
 
 
+def _make_corrupt_jpeg(path: Path) -> None:
+    """Write a JPEG SOI marker followed by garbage so PIL raises on decode."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+
+
 def _build_app(tmp_path: Path, folders, sync_scheduler=None):
     configs = tmp_path / "configs"
     inbox = tmp_path / "inbox"
@@ -191,6 +197,45 @@ def test_settings_media_build_null_before_then_real_after(tmp_path):
     assert mb is not None
     assert mb["last_count"] == 1
     assert mb["last_built"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Corrupt/truncated image does not abort the build
+# ---------------------------------------------------------------------------
+
+def test_corrupt_jpeg_does_not_abort_build_and_valid_row_present(tmp_path):
+    root = tmp_path / "lib"
+    _make_corrupt_jpeg(root / "broken.jpg")
+    _make_image(root / "good.jpg")
+    app = _build_app(tmp_path, [root])
+    indexer = app.state.media_indexer
+
+    # Build must not raise even though one image is unreadable.
+    snap = indexer.build()
+    assert snap["state"] == "idle"
+
+    rows = {Path(r["path"]).name: r for r in indexer.list_all()}
+    assert "good.jpg" in rows, "valid image was not indexed"
+    good = rows["good.jpg"]
+    assert good["width"] == 20 and good["height"] == 20
+
+
+def test_corrupt_jpeg_recorded_with_null_dims_and_mtime_date(tmp_path):
+    root = tmp_path / "lib"
+    corrupt = root / "broken.jpg"
+    _make_corrupt_jpeg(corrupt)
+    app = _build_app(tmp_path, [root])
+    indexer = app.state.media_indexer
+
+    indexer.build()
+
+    rows = {Path(r["path"]).name: r for r in indexer.list_all()}
+    assert "broken.jpg" in rows, "corrupt image was not recorded"
+    broken = rows["broken.jpg"]
+    assert broken["width"] is None
+    assert broken["height"] is None
+    import launcher.media as media
+    assert broken["date_taken"] == media._mtime_iso(corrupt.stat().st_mtime)
 
 
 # ---------------------------------------------------------------------------

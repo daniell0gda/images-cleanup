@@ -189,8 +189,9 @@ class _MediaLibrarySettings(BaseModel):
 
 
 class _SettingsRequest(BaseModel):
-    db_refresh: _DbRefreshSettings
+    db_refresh: _DbRefreshSettings | None = None
     media_library: _MediaLibrarySettings | None = None
+    public_base_url: str | None = None
 
 
 def _load_sync_config(profile_id: str):
@@ -359,6 +360,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             "media_library": {**ml, "next_run": ml_next},
             # Last-build summary; null until the media build subsystem exists.
             "media_build": getattr(app.state, "media_build_status", None),
+            "public_base_url": s["public_base_url"],
         }
 
     def _profile_ids() -> set[str]:
@@ -752,16 +754,26 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     @app.post("/api/settings")
     async def post_settings(req: _SettingsRequest):
         ml_in = req.media_library.model_dump() if req.media_library is not None else None
+        # db_refresh is optional: a media-only save (the React media settings
+        # page) keeps the stored db_refresh values and leaves its cron alone.
+        if req.db_refresh is not None:
+            db_enabled = req.db_refresh.enabled
+            db_schedule = req.db_refresh.schedule
+        else:
+            stored_db = settings_mod.load_settings(_configs_dir())["db_refresh"]
+            db_enabled = stored_db["enabled"]
+            db_schedule = stored_db["schedule"]
         try:
             saved = settings_mod.save_settings(
                 _configs_dir(),
-                req.db_refresh.enabled,
-                req.db_refresh.schedule,
+                db_enabled,
+                db_schedule,
                 media_library=ml_in,
+                public_base_url=req.public_base_url,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        if app.state.db_cron is not None:
+        if req.db_refresh is not None and app.state.db_cron is not None:
             app.state.db_cron.reschedule(
                 saved["db_refresh"]["schedule"], saved["db_refresh"]["enabled"]
             )

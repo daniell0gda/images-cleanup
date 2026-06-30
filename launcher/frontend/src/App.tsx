@@ -247,6 +247,7 @@ interface SettingsPayload {
   last_refresh: RefreshResult | null;
   media_library: MediaLibrarySettings;
   media_build: MediaBuildStatus | null;
+  public_base_url: string;
 }
 
 function SettingsView() {
@@ -267,6 +268,10 @@ function SettingsView() {
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
 
+  const [publicBaseUrl, setPublicBaseUrl] = useState("");
+  const [publicSaving, setPublicSaving] = useState(false);
+  const [publicError, setPublicError] = useState<string | null>(null);
+
   const applyPayload = useCallback((p: SettingsPayload) => {
     setEnabled(p.db_refresh.enabled);
     setSchedule(p.db_refresh.schedule);
@@ -277,6 +282,7 @@ function SettingsView() {
     setMediaSchedule(p.media_library.schedule);
     setMediaNextRun(p.media_library.next_run);
     setMediaBuild(p.media_build);
+    setPublicBaseUrl(p.public_base_url);
   }, []);
 
   useEffect(() => {
@@ -360,6 +366,28 @@ function SettingsView() {
       setMediaSaving(false);
     }
   }, [mediaEnabled, mediaSchedule, mediaFolders, applyPayload]);
+
+  const savePublicBaseUrl = useCallback(async () => {
+    setPublicSaving(true);
+    setPublicError(null);
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public_base_url: publicBaseUrl.trim() }),
+      });
+      if (r.ok) {
+        applyPayload(await r.json());
+      } else {
+        const body = await r.json().catch(() => null);
+        setPublicError(body?.detail ?? "Nie udało się zapisać ustawień.");
+      }
+    } catch {
+      setPublicError("Serwer jest nieosiągalny.");
+    } finally {
+      setPublicSaving(false);
+    }
+  }, [publicBaseUrl, applyPayload]);
 
   const buildNow = useCallback(async () => {
     setBuilding(true);
@@ -576,6 +604,30 @@ function SettingsView() {
               Odśwież teraz
             </Button>
           </Group>
+        </Box>
+
+        <Box className={classes.deviceCard}>
+          <Text className={classes.deviceName}>Adres publicznych linków</Text>
+          <Text className={classes.deviceMeta} mb="md">
+            Bazowy adres (schemat i host) używany do budowania linków do
+            udostępnionych albumów, np. https://photos.example.com. Pozostaw
+            puste, aby użyć adresu, z którego łączy się aplikacja.
+          </Text>
+
+          <Stack gap="md">
+            <TextInput
+              label="Publiczny adres bazowy"
+              placeholder="https://photos.example.com"
+              value={publicBaseUrl}
+              onChange={(e) => setPublicBaseUrl(e.currentTarget.value)}
+              error={publicError}
+            />
+            <Group justify="flex-end">
+              <Button onClick={savePublicBaseUrl} loading={publicSaving}>
+                Zapisz
+              </Button>
+            </Group>
+          </Stack>
         </Box>
       </Stack>
     </Box>

@@ -1,8 +1,4 @@
-media_library:
-  enabled: true
-  folders: ['\\JUSZKOWO_NAS\MediaPool\zdjecia\2026']
-  schedule: "0 2 * * *"
-
 db_refresh:
   enabled: true
-  schedule: "0 1 * * *"
+  schedule: 0 1 * * *
+public_base_url: http://192.168.5.11:7000

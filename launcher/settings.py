@@ -26,6 +26,9 @@ DEFAULTS = {
         "folders": [],
         "schedule": "0 2 * * *",
     },
+    # Outer hostname for shared-album links (e.g. https://photos.example.com).
+    # Empty = fall back to the incoming request base URL.
+    "public_base_url": "",
 }
 
 _SETTINGS_FILE = "server.yaml"
@@ -33,6 +36,21 @@ _SETTINGS_FILE = "server.yaml"
 
 def settings_path(configs_dir: Path) -> Path:
     return configs_dir / _SETTINGS_FILE
+
+
+def normalize_public_base_url(value: str) -> str:
+    """Strip a trailing slash and validate a non-empty value is a full
+    ``scheme://host`` URL. Returns the normalized string; raises ValueError on a
+    non-empty value lacking a scheme or host."""
+    from urllib.parse import urlparse
+
+    url = (value or "").strip().rstrip("/")
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"Invalid public_base_url: {value!r}")
+    return url
 
 
 def is_valid_schedule(schedule: str) -> bool:
@@ -66,6 +84,7 @@ def load_settings(configs_dir: Path) -> dict:
             raw = {}
     db = {**DEFAULTS["db_refresh"], **(raw.get("db_refresh") or {})}
     ml = {**DEFAULTS["media_library"], **(raw.get("media_library") or {})}
+    pub = raw.get("public_base_url")
     return {
         "db_refresh": {"enabled": bool(db["enabled"]), "schedule": db["schedule"]},
         "media_library": {
@@ -73,6 +92,7 @@ def load_settings(configs_dir: Path) -> dict:
             "folders": list(ml["folders"] or []),
             "schedule": ml["schedule"],
         },
+        "public_base_url": str(pub) if isinstance(pub, str) else "",
     }
 
 
@@ -81,6 +101,7 @@ def save_settings(
     enabled: bool,
     schedule: str,
     media_library: dict | None = None,
+    public_base_url: str | None = None,
 ) -> dict:
     """Validate and persist server settings, returning the stored dict.
 
@@ -92,7 +113,15 @@ def save_settings(
     """
     if not is_valid_schedule(schedule):
         raise ValueError(f"Invalid cron schedule: {schedule!r}")
-    data: dict = {"db_refresh": {"enabled": bool(enabled), "schedule": schedule}}
+    pub = (
+        load_settings(configs_dir)["public_base_url"]
+        if public_base_url is None
+        else normalize_public_base_url(public_base_url)
+    )
+    data: dict = {
+        "db_refresh": {"enabled": bool(enabled), "schedule": schedule},
+        "public_base_url": pub,
+    }
     if media_library is not None:
         ml = {**DEFAULTS["media_library"], **media_library}
         if not is_valid_schedule(ml["schedule"]):
