@@ -1,0 +1,4 @@
+1. download adb from https://developer.android.com/tools/releases/platform-tools
+2. On the phone, open Developer options > Wireless debugging and use the Pair device with pairing code entry there, because that screen gives you the pairing IP and port directly.
+3. In a terminal, try `adb pair <ip>:<pairing-port>` and then adb connect <ip>:<connect-port> using the values shown on the phone, since manual pairing often succeeds even when Android Studio does not show the device.
+4. in the same view on the phone there should be name of the device and an ip+port -> use it to execute `adb connect <ip>:<pairing-port>`

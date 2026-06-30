@@ -1,9 +1,3 @@
 1. rename config so that it's clear what sections are for images and what for videos
 2. sync should always start when app is opened
-3. sharing feature which works the same as at google images:
-- user can select items (photo/video) and (when selected then action is visible) "create album"/"add to album"/"create link" 
-- we need new view "albums" where user can remove remove album or copy share link
-- in a album user can remove from album or add new items to album
-
-4.
-Dockerfile was not updated. It still lacks ffmpeg/ffprobe (the transcode path needs them in production) and its explicit COPY launcher/... line does not copy the new launcher/media.py — and never copied launcher/settings.py (pre-existing gap). Without these, the container build/runtime will break. §4.11 of the plan spells out the exact edits
+3. split server.py into smaller modules
