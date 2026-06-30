@@ -1,8 +1,6 @@
 """Launcher FastAPI server — management UI for image-sorter."""
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 import os
 import re
@@ -13,14 +11,20 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Request
-from pydantic import BaseModel
+
+from .api_models import DbRefreshSettings as _DbRefreshSettings
+from .api_models import DeviceRequest as _DeviceRequest
+from .api_models import Identity as _Identity
+from .api_models import JobRequest as _JobRequest
+from .api_models import MediaLibrarySettings as _MediaLibrarySettings
+from .api_models import SessionRequest as _SessionRequest
+from .api_models import SettingsRequest as _SettingsRequest
+from .media_http import assert_within_root as _assert_within_root
+from .media_http import decode_cursor as _decode_cursor
+from .media_http import encode_cursor as _encode_cursor
+from .media_http import parse_from_date as _parse_from_date
 
 logger = logging.getLogger(__name__)
-
-
-class _JobRequest(BaseModel):
-    user: str
-    mode: str
 
 
 def _configs_dir() -> Path:
@@ -167,53 +171,6 @@ def create_app(
     return app
 
 
-class _DeviceRequest(BaseModel):
-    device_id: str
-    name: str
-
-
-class _Identity(BaseModel):
-    name: str
-    created_on: str
-    size: int
-
-
-class _SessionRequest(BaseModel):
-    profile_id: str
-    force_place: bool = False
-
-
-class _DbRefreshSettings(BaseModel):
-    enabled: bool
-    schedule: str
-
-
-class _MediaLibrarySettings(BaseModel):
-    enabled: bool
-    folders: list[str]
-    schedule: str
-
-
-class _SettingsRequest(BaseModel):
-    db_refresh: _DbRefreshSettings | None = None
-    media_library: _MediaLibrarySettings | None = None
-    public_base_url: str | None = None
-
-
-class _AlbumCreateRequest(BaseModel):
-    name: str
-    media_ids: list[int] = []
-    created_by: str | None = None
-
-
-class _AlbumRenameRequest(BaseModel):
-    name: str
-
-
-class _AlbumItemsRequest(BaseModel):
-    media_ids: list[int] = []
-
-
 def _load_sync_config(profile_id: str):
     """Load the GroupByTags Config backing a sync profile_id."""
     from imagesorter import config as config_mod
@@ -256,223 +213,6 @@ _MEDIA_PAGE_DEFAULT = 100
 _MEDIA_PAGE_MAX = 200
 
 
-def _encode_cursor(date_taken: str, media_id: int) -> str:
-    """Opaque keyset cursor for ``(date_taken, id)``: base64 of ``date_taken|id``."""
-    raw = f"{date_taken}|{media_id}".encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii")
-
-
-def _decode_cursor(cursor: str) -> tuple[str, int]:
-    """Decode a cursor produced by :func:`_encode_cursor` back to ``(date_taken, id)``."""
-    try:
-        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-        date_taken, last_id = raw.rsplit("|", 1)
-        return date_taken, int(last_id)
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Invalid cursor")
-
-
-def _parse_from_date(value: str) -> str:
-    """Validate a ``from_date`` query value as a ``YYYY-MM-DD`` calendar date.
-
-    Returns the normalised ``YYYY-MM-DD`` string; raises HTTP 422 for any
-    malformed or out-of-range date so the seek parameter never reaches SQL.
-    """
-    from fastapi import HTTPException
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Invalid from_date; expected YYYY-MM-DD")
-
-
-def _assert_within_root(path: Path, root: str) -> None:
-    """Raise 403 unless ``path`` resolves inside its indexed ``root``.
-
-    Each media row records the configured folder it was discovered under at index
-    time (the ``root`` column); ``path`` is under ``root`` by construction. We
-    validate against the row's OWN root rather than the live ``media_library``
-    folder list so that already-indexed media stay servable even after the folder
-    list is edited — while still rejecting any path that does not sit under the
-    root it was indexed from (anti-traversal defence-in-depth). Requesting only
-    works for ids that exist in the index (and, for share, are album members)."""
-    from fastapi import HTTPException
-    resolved = path.resolve()
-    root_resolved = Path(root).resolve()
-    if resolved == root_resolved or root_resolved in resolved.parents:
-        return
-    raise HTTPException(status_code=403, detail="Path outside configured roots")
-
-
-def _share_404_html() -> str:
-    """Friendly 404 page for unknown/revoked share tokens (never a stack trace)."""
-    return (
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<meta name=\"robots\" content=\"noindex,nofollow\">"
-        "<meta name=\"referrer\" content=\"no-referrer\">"
-        "<title>Link not found</title>"
-        "<style>body{margin:0;min-height:100vh;display:flex;align-items:center;"
-        "justify-content:center;font-family:system-ui,sans-serif;background:#111;"
-        "color:#eee}.box{text-align:center;padding:2rem}h1{font-size:1.5rem;"
-        "margin:0 0 .5rem}p{color:#aaa;margin:0}</style></head>"
-        "<body><div class=\"box\"><h1>Link not found</h1>"
-        "<p>This shared album link is no longer available.</p></div></body></html>"
-    )
-
-
-def _share_page_html(token: str, name: str, items: list[dict]) -> str:
-    """Self-contained HTML for a shared album: name header + thumbnail grid.
-
-    All internal asset URLs are RELATIVE (``/share/{token}/media/{id}/...``) so
-    the page resolves bytes through whatever host served it (spec §3.12). The
-    header shows the album name only — never creator/device info (§6).
-    """
-    import html
-
-    safe_name = html.escape(name)
-    cells = []
-    for item in items:
-        mid = item["id"]
-        base = f"/share/{token}/media/{mid}"
-        if item["kind"] == "video":
-            cells.append(
-                f'<button class="cell video" data-kind="video" data-src="{base}/stream" '
-                f'aria-label="Play video">'
-                f'<img loading="lazy" src="{base}/thumb" alt="">'
-                f'<span class="badge">&#9658;</span></button>'
-            )
-        else:
-            cells.append(
-                f'<button class="cell" data-kind="image" data-src="{base}/preview" '
-                f'aria-label="Open photo">'
-                f'<img loading="lazy" src="{base}/thumb" alt=""></button>'
-            )
-    grid = "".join(cells)
-    empty_state = (
-        '<p class="empty">This album has no photos yet.</p>' if not items else ""
-    )
-    return (
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<meta name=\"robots\" content=\"noindex,nofollow\">"
-        "<meta name=\"referrer\" content=\"no-referrer\">"
-        f"<title>{safe_name}</title>"
-        "<style>"
-        "*{box-sizing:border-box}"
-        "body{margin:0;font-family:system-ui,sans-serif;background:#111;color:#eee}"
-        "header{padding:1.25rem 1rem;font-size:1.4rem;font-weight:600}"
-        ".grid{display:grid;gap:4px;padding:0 4px 4px;"
-        # min(300px,100%) keeps a 300px floor on wide screens but never overflows
-        # a viewport narrower than 300px (collapses to a single full-width column).
-        "grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))}"
-        ".cell{position:relative;padding:0;border:0;background:#222;cursor:pointer;"
-        "aspect-ratio:1/1;overflow:hidden}"
-        ".cell img{width:100%;height:100%;object-fit:cover;display:block;"
-        "transition:transform .25s ease}"
-        ".cell:hover img{transform:scale(1.04)}"
-        ".cell:focus-visible{outline:2px solid #4da3ff;outline-offset:2px}"
-        ".badge{position:absolute;inset:0;display:flex;align-items:center;"
-        "justify-content:center;font-size:2rem;color:#fff;"
-        "text-shadow:0 1px 4px rgba(0,0,0,.6);pointer-events:none}"
-        ".empty{color:#aaa;padding:1rem;text-align:center}"
-        # Lightbox pager: fades via opacity+visibility (display toggles can't
-        # transition); always centered, media contained, chrome floats over it.
-        "#lightbox{position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:1000;"
-        "display:flex;align-items:center;justify-content:center;"
-        "opacity:0;visibility:hidden;transition:opacity .2s ease;"
-        "-webkit-user-select:none;user-select:none;touch-action:pan-y}"
-        "#lightbox.open{opacity:1;visibility:visible}"
-        ".lb-stage{display:flex;align-items:center;justify-content:center;"
-        "max-width:100%;max-height:100%;padding:1rem}"
-        ".lb-stage img,.lb-stage video{max-width:96vw;max-height:92vh;"
-        "object-fit:contain;display:block;border-radius:4px;"
-        "box-shadow:0 8px 40px rgba(0,0,0,.5)}"
-        ".lb-btn{position:absolute;border:0;color:#fff;cursor:pointer;"
-        "background:rgba(255,255,255,.12);backdrop-filter:blur(6px);"
-        "display:flex;align-items:center;justify-content:center;line-height:1;"
-        "transition:background .15s ease,transform .12s ease}"
-        ".lb-btn:hover{background:rgba(255,255,255,.24)}"
-        ".lb-btn:focus-visible{outline:2px solid #fff;outline-offset:2px}"
-        ".lb-nav{top:50%;transform:translateY(-50%);width:52px;height:52px;"
-        "border-radius:50%;font-size:2rem;padding-bottom:.15em}"
-        ".lb-nav:active{transform:translateY(-50%) scale(.92)}"
-        ".lb-prev{left:16px}.lb-next{right:16px}"
-        ".lb-close{top:14px;right:16px;width:44px;height:44px;border-radius:50%;"
-        "font-size:1.5rem}"
-        ".lb-counter{position:absolute;bottom:18px;left:50%;"
-        "transform:translateX(-50%);color:#fff;font-size:.85rem;"
-        "background:rgba(0,0,0,.45);backdrop-filter:blur(6px);"
-        "padding:.35rem .8rem;border-radius:999px}"
-        ".lb-hidden{display:none}"
-        "@media (max-width:600px){"
-        ".lb-nav{width:44px;height:44px;font-size:1.6rem}"
-        ".lb-prev{left:8px}.lb-next{right:8px}}"
-        "</style></head><body>"
-        f"<header>{safe_name}</header>"
-        f'<div class="grid">{grid}</div>'
-        f"{empty_state}"
-        # Lightbox pager: backdrop, prev/next, close, and a position counter.
-        # role=dialog + aria-modal so assistive tech treats it as a modal layer.
-        '<div id="lightbox" role="dialog" aria-modal="true" aria-label="Media viewer" '
-        'aria-hidden="true">'
-        '<button type="button" class="lb-btn lb-close" aria-label="Close">&#10005;</button>'
-        '<button type="button" class="lb-btn lb-nav lb-prev" aria-label="Previous">'
-        "&#8249;</button>"
-        '<div class="lb-stage"></div>'
-        '<button type="button" class="lb-btn lb-nav lb-next" aria-label="Next">'
-        "&#8250;</button>"
-        '<div class="lb-counter" aria-live="polite"></div>'
-        "</div>"
-        "<script>"
-        "(function(){"
-        "var lb=document.getElementById('lightbox');"
-        "var stage=lb.querySelector('.lb-stage');"
-        "var counter=lb.querySelector('.lb-counter');"
-        "var prev=lb.querySelector('.lb-prev');"
-        "var next=lb.querySelector('.lb-next');"
-        "var closeBtn=lb.querySelector('.lb-close');"
-        "var cells=Array.prototype.slice.call(document.querySelectorAll('.cell'));"
-        "var idx=-1,opener=null;"
-        # Single item: nothing to page through, so hide nav + counter.
-        "if(cells.length<2){prev.classList.add('lb-hidden');"
-        "next.classList.add('lb-hidden');counter.classList.add('lb-hidden');}"
-        "function render(){var c=cells[idx];var src=c.getAttribute('data-src');"
-        "if(c.getAttribute('data-kind')==='video'){"
-        "stage.innerHTML='<video controls autoplay playsinline src=\"'+src+'\"></video>';}"
-        "else{stage.innerHTML='<img alt=\"\" src=\"'+src+'\">';}"
-        "counter.textContent=(idx+1)+' / '+cells.length;}"
-        "function open(i){idx=i;opener=cells[i];render();lb.classList.add('open');"
-        "lb.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';"
-        "closeBtn.focus();}"
-        # Stop the video, restore scroll, and return focus to the opened cell.
-        "function close(){lb.classList.remove('open');"
-        "lb.setAttribute('aria-hidden','true');stage.innerHTML='';"
-        "document.body.style.overflow='';if(opener){opener.focus();}idx=-1;}"
-        "function go(d){if(idx<0)return;idx=(idx+d+cells.length)%cells.length;render();}"
-        "cells.forEach(function(c,i){c.addEventListener('click',function(){open(i);});});"
-        "prev.addEventListener('click',function(e){e.stopPropagation();go(-1);});"
-        "next.addEventListener('click',function(e){e.stopPropagation();go(1);});"
-        "closeBtn.addEventListener('click',function(e){e.stopPropagation();close();});"
-        # Click on the backdrop (not the media/chrome) closes.
-        "lb.addEventListener('click',function(e){if(e.target===lb||e.target===stage)close();});"
-        "document.addEventListener('keydown',function(e){"
-        "if(!lb.classList.contains('open'))return;"
-        "if(e.key==='Escape')close();"
-        "else if(e.key==='ArrowLeft')go(-1);"
-        "else if(e.key==='ArrowRight')go(1);});"
-        # Horizontal swipe on touch devices, ignoring mostly-vertical drags.
-        "var sx=0,sy=0;"
-        "stage.addEventListener('touchstart',function(e){var t=e.changedTouches[0];"
-        "sx=t.clientX;sy=t.clientY;},{passive:true});"
-        "stage.addEventListener('touchend',function(e){var t=e.changedTouches[0];"
-        "var dx=t.clientX-sx,dy=t.clientY-sy;"
-        "if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy))go(dx<0?1:-1);},{passive:true});"
-        "})();"
-        "</script></body></html>"
-    )
-
-
 def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     """Mount the android-phone-sync endpoints onto the launcher app.
 
@@ -485,6 +225,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     from . import settings as settings_mod
     from . import sync as sync_mod
     from .albums import AlbumStore
+    from .albums_api import register_album_routes
 
     store = sync_mod.SyncStore(_sync_db_path())
     sessions = sync_mod.SessionManager(_inbox_base())
@@ -1034,213 +775,24 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             time.sleep(0.001)
         return media_indexer.status()
 
-    # -- albums (device-facing) ------------------------------------------
-    # Album CRUD, membership, and share-link minting. All routes are device
-    # gated; an unknown album id is a 404. The server owns share_url building
-    # (spec §3.11) so the app never constructs it.
-
-    def _album_or_404(album_id: int) -> dict:
-        row = album_store._row(album_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="Unknown album")
-        return row
-
-    def _share_url(token: str, request: Request) -> str:
-        base = settings_mod.load_settings(_configs_dir())["public_base_url"]
-        if not base:
-            base = str(request.base_url).rstrip("/")
-        return f"{base}/share/{token}"
-
-    def _album_entry(row: dict, request: Request) -> dict:
-        token = row["share_token"]
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "created_by": row["created_by"],
-            "created_at": row["created_at"],
-            "item_count": album_store.count(row["id"]),
-            "cover_media_id": album_store.cover_media_id(row["id"]),
-            "shared": token is not None,
-            "share_url": _share_url(token, request) if token else None,
-        }
-
-    @app.get("/api/albums")
-    async def list_albums(
-        request: Request, authorization: str | None = Header(default=None)
-    ):
-        _require_device(authorization)
-        rows = album_store.list_albums()
-        return [_album_entry(r, request) for r in rows]
-
-    @app.post("/api/albums")
-    async def create_album(
-        req: _AlbumCreateRequest,
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ):
-        _require_device(authorization)
-        row = album_store.create(req.name, created_by=req.created_by)
-        if req.media_ids:
-            album_store.add_items(row["id"], req.media_ids)
-        return _album_entry(album_store._row(row["id"]), request)
-
-    @app.patch("/api/albums/{album_id}")
-    async def rename_album(
-        album_id: int,
-        req: _AlbumRenameRequest,
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ):
-        _require_device(authorization)
-        _album_or_404(album_id)
-        album_store.rename(album_id, req.name)
-        return _album_entry(album_store._row(album_id), request)
-
-    @app.delete("/api/albums/{album_id}")
-    async def delete_album(
-        album_id: int, authorization: str | None = Header(default=None)
-    ):
-        _require_device(authorization)
-        _album_or_404(album_id)
-        album_store.delete(album_id)
-        return {"deleted": album_id}
-
-    @app.post("/api/albums/{album_id}/items")
-    async def add_album_items(
-        album_id: int,
-        req: _AlbumItemsRequest,
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ):
-        _require_device(authorization)
-        _album_or_404(album_id)
-        album_store.add_items(album_id, req.media_ids)
-        return _album_entry(album_store._row(album_id), request)
-
-    @app.delete("/api/albums/{album_id}/items")
-    async def remove_album_items(
-        album_id: int,
-        req: _AlbumItemsRequest,
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ):
-        _require_device(authorization)
-        _album_or_404(album_id)
-        album_store.remove_items(album_id, req.media_ids)
-        return _album_entry(album_store._row(album_id), request)
-
-    @app.get("/api/albums/{album_id}/items")
-    async def list_album_items(
-        album_id: int, authorization: str | None = Header(default=None)
-    ):
-        _require_device(authorization)
-        _album_or_404(album_id)
-        return [_media_item(r) for r in album_store.items(album_id)]
-
-    @app.post("/api/albums/{album_id}/share")
-    async def share_album(
-        album_id: int,
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ):
-        _require_device(authorization)
-        _album_or_404(album_id)
-        token = album_store.share(album_id)
-        return {"share_token": token, "share_url": _share_url(token, request)}
-
-    @app.delete("/api/albums/{album_id}/share")
-    async def unshare_album(
-        album_id: int, authorization: str | None = Header(default=None)
-    ):
-        _require_device(authorization)
-        _album_or_404(album_id)
-        album_store.revoke(album_id)
-        return {"revoked": album_id}
-
-    # -- public share (no device token; token + membership IS the auth) ---
-    # Spec §5.2/§6/§3.10/§3.12. These routes carry no bearer token: the share
-    # token resolves to an album and the requested media_id must be a member.
-    # Non-member ids return 404 (not 403) so the surface never leaks ids.
-    from fastapi.responses import HTMLResponse
-
-    def _album_for_token_or_404(token: str) -> dict:
-        album = album_store.by_token(token)
-        if album is None:
-            raise HTTPException(status_code=404, detail="Share link not found")
-        return album
-
-    def _share_member_row_or_404(token: str, media_id: int):
-        album = _album_for_token_or_404(token)
-        if not album_store.is_member(album["id"], media_id):
-            raise HTTPException(status_code=404, detail="Not in this album")
-        return _media_row_or_404(media_id)
-
-    @app.get("/share/{token}", response_class=HTMLResponse)
-    async def share_page(token: str):
-        album = album_store.by_token(token)
-        if album is None:
-            return HTMLResponse(_share_404_html(), status_code=404,
-                                headers=_SHARE_NOBOT_HEADERS)
-        items = album_store.items(album["id"])
-        return HTMLResponse(_share_page_html(token, album["name"], items),
-                            headers=_SHARE_NOBOT_HEADERS)
-
-    @app.get("/share/{token}/media/{media_id}/thumb")
-    async def share_thumb(token: str, media_id: int):
-        row = _share_member_row_or_404(token, media_id)
-        _assert_within_root(Path(row["path"]), row["root"])
-        thumb = media_mod.media_thumbs_dir() / f"{media_id}.jpg"
-        if not row["thumb_ready"] or not thumb.exists():
-            try:
-                media_mod.generate_thumbnail(Path(row["path"]), row["kind"], thumb)
-                media_indexer.mark_thumb_ready(media_id)
-            except Exception:
-                raise HTTPException(status_code=404, detail="Thumbnail unavailable")
-        return FileResponse(
-            str(thumb), media_type="image/jpeg",
-            headers={"Cache-Control": _THUMB_CACHE, **_SHARE_NOBOT_HEADERS},
-        )
-
-    @app.get("/share/{token}/media/{media_id}/preview")
-    async def share_preview(token: str, media_id: int):
-        row = _share_member_row_or_404(token, media_id)
-        _assert_within_root(Path(row["path"]), row["root"])
-        preview = media_mod.media_previews_dir() / f"{media_id}.jpg"
-        if not preview.exists():
-            try:
-                media_mod.generate_preview(Path(row["path"]), preview)
-            except Exception:
-                raise HTTPException(status_code=404, detail="Preview unavailable")
-        return FileResponse(
-            str(preview), media_type="image/jpeg",
-            headers={"Cache-Control": _THUMB_CACHE, **_SHARE_NOBOT_HEADERS},
-        )
-
-    @app.get("/share/{token}/media/{media_id}/stream")
-    async def share_stream(token: str, media_id: int, request: Request):
-        row = _share_member_row_or_404(token, media_id)
-        if row["kind"] != "video":
-            raise HTTPException(status_code=404, detail="Not a video")
-        _assert_within_root(Path(row["path"]), row["root"])
-        range_header = request.headers.get("range")
-        # Browsers (unlike the app's ExoPlayer) cannot fall back on non-H.264
-        # codecs (e.g. HEVC), so the public page serves the original ONLY when it
-        # is KNOWN web-safe (video_websafe == 1); 0 or not-yet-probed NULL are
-        # transcoded to an H.264/AAC proxy. Requires ffmpeg/ffprobe on the server.
-        if row["video_websafe"] != 1:
-            try:
-                proxy = media_indexer.ensure_proxy(media_id, Path(row["path"]))
-            except Exception:
-                logger.warning(
-                    "share stream: transcode failed for media %s (%s)",
-                    media_id, row["path"], exc_info=True,
-                )
-                raise HTTPException(status_code=503, detail="Transcode unavailable")
-            resp = _serve_with_range(proxy, range_header)
-        else:
-            resp = _serve_with_range(Path(row["path"]), range_header)
-        resp.headers.update(_SHARE_NOBOT_HEADERS)
-        return resp
+    # -- albums + public share -------------------------------------------
+    # Mounted from albums_api so the album/share surface lives in one module;
+    # the shared helpers + stores it needs are passed in explicitly.
+    register_album_routes(
+        app,
+        album_store=album_store,
+        media_indexer=media_indexer,
+        media_mod=media_mod,
+        settings_mod=settings_mod,
+        _configs_dir=_configs_dir,
+        _require_device=_require_device,
+        _media_item=_media_item,
+        _media_row_or_404=_media_row_or_404,
+        _assert_within_root=_assert_within_root,
+        _serve_with_range=_serve_with_range,
+        _THUMB_CACHE=_THUMB_CACHE,
+        _SHARE_NOBOT_HEADERS=_SHARE_NOBOT_HEADERS,
+    )
 
 
 def _check_port(port: int = 7000) -> None:
