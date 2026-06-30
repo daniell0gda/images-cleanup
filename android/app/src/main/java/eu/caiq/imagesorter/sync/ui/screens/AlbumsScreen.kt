@@ -35,16 +35,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.paging.compose.collectAsLazyPagingItems
-import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
+import coil3.request.crossfade
 import eu.caiq.imagesorter.sync.SyncApp
 import eu.caiq.imagesorter.sync.data.api.dto.AlbumDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
@@ -54,6 +53,7 @@ import eu.caiq.imagesorter.sync.data.media.MediaListItem
 import eu.caiq.imagesorter.sync.data.media.MediaUrls
 import eu.caiq.imagesorter.sync.data.media.insertDayHeaders
 import eu.caiq.imagesorter.sync.serverAddressToBaseUrl
+import eu.caiq.imagesorter.sync.ui.components.MediaThumb
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -139,10 +139,8 @@ fun AlbumTile(
             contentAlignment = Alignment.Center,
         ) {
             if (coverModel != null) {
-                AsyncImage(
+                MediaThumb(
                     model = coverModel,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                 )
             } else {
@@ -346,10 +344,8 @@ private fun AlbumDetail(
                 onLongPress = { entity -> selectedIds = selectedIds + entity.id },
                 modifier = Modifier.weight(1f),
             ) { entity, cellModifier ->
-                AsyncImage(
+                MediaThumb(
                     model = albumRequest(context, urls.thumb(entity.id), token),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
                     modifier = cellModifier,
                 )
             }
@@ -555,10 +551,8 @@ private fun AddPhotosPicker(
             onLongPress = { entity -> selectedIds = selectedIds + entity.id },
             modifier = Modifier.weight(1f),
         ) { entity, cellModifier ->
-            AsyncImage(
+            MediaThumb(
                 model = albumRequest(context, urls.thumb(entity.id), token),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
                 modifier = cellModifier,
             )
         }
@@ -570,9 +564,16 @@ private fun coverRequest(context: android.content.Context, urls: MediaUrls, toke
     return albumRequest(context, urls.thumb(coverId), token)
 }
 
-/** A Coil [ImageRequest] for [url] carrying the bearer [token] as an HTTP header. */
+/**
+ * A Coil [ImageRequest] for [url] carrying the bearer [token] as an HTTP header.
+ * [crossfade] fades the thumbnail in over its skeleton; the stable [memoryCacheKey]
+ * (the url) lets the fullscreen preview reuse this bitmap as its placeholder.
+ */
 private fun albumRequest(context: android.content.Context, url: String, token: String?): ImageRequest {
-    val builder = ImageRequest.Builder(context).data(url)
+    val builder = ImageRequest.Builder(context)
+        .data(url)
+        .crossfade(true)
+        .memoryCacheKey(url)
     val headers = MediaUrls.authHeaders(token)
     if (headers.isNotEmpty()) {
         var net = NetworkHeaders.Builder()

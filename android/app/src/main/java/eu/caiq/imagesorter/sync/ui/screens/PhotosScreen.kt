@@ -22,6 +22,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +49,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -57,6 +59,7 @@ import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
+import coil3.request.crossfade
 import eu.caiq.imagesorter.sync.SyncApp
 import eu.caiq.imagesorter.sync.data.db.entity.MediaEntity
 import eu.caiq.imagesorter.sync.data.media.MediaListItem
@@ -66,6 +69,7 @@ import eu.caiq.imagesorter.sync.data.media.buildVideoMediaItem
 import eu.caiq.imagesorter.sync.data.media.insertDayHeaders
 import eu.caiq.imagesorter.sync.serverAddressToBaseUrl
 import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
+import eu.caiq.imagesorter.sync.ui.components.MediaThumb
 import eu.caiq.imagesorter.sync.ui.components.previewIndexAfterDelete
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 import kotlinx.coroutines.flow.first
@@ -281,10 +285,8 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
             },
             onLongPress = { entity -> selectedIds = selectedIds + entity.id },
         ) { entity, cellModifier ->
-            AsyncImage(
+            MediaThumb(
                 model = authedRequest(context, urls.thumb(entity.id), token),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
                 modifier = cellModifier,
             )
         }
@@ -638,7 +640,10 @@ fun MediaPreviewContent(entity: MediaEntity, urls: MediaUrls, token: String?) {
     } else {
         val context = LocalContext.current
         AsyncImage(
-            model = authedRequest(context, urls.preview(entity.id), token),
+            model = authedRequest(
+                context, urls.preview(entity.id), token,
+                placeholderUrl = urls.thumb(entity.id),
+            ),
             contentDescription = null,
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize(),
@@ -646,9 +651,24 @@ fun MediaPreviewContent(entity: MediaEntity, urls: MediaUrls, token: String?) {
     }
 }
 
-/** A Coil [ImageRequest] for [url] carrying the bearer [token] as an HTTP header. */
-private fun authedRequest(context: android.content.Context, url: String, token: String?): ImageRequest {
-    val builder = ImageRequest.Builder(context).data(url)
+/**
+ * A Coil [ImageRequest] for [url] carrying the bearer [token] as an HTTP header.
+ * [crossfade] fades the decoded image in over its skeleton; the stable [memoryCacheKey]
+ * lets a later request reuse this bitmap as a placeholder. When [placeholderUrl] is set
+ * (the matching thumb of a full preview), its already-cached bitmap shows instantly while
+ * the larger image loads.
+ */
+private fun authedRequest(
+    context: android.content.Context,
+    url: String,
+    token: String?,
+    placeholderUrl: String? = null,
+): ImageRequest {
+    val builder = ImageRequest.Builder(context)
+        .data(url)
+        .crossfade(true)
+        .memoryCacheKey(url)
+    if (placeholderUrl != null) builder.placeholderMemoryCacheKey(placeholderUrl)
     val headers = MediaUrls.authHeaders(token)
     if (headers.isNotEmpty()) {
         var net = NetworkHeaders.Builder()
@@ -677,11 +697,33 @@ private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
                 prepare()
             }
     }
+    // Show the thumb poster + spinner until the first frame is ready. The first play of a
+    // non-web-safe video waits on a server-side transcode, so this can take a few seconds.
+    var ready by remember(id) { mutableStateOf(exoPlayer.playbackState == Player.STATE_READY) }
     DisposableEffect(id) {
-        onDispose { exoPlayer.release() }
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                ready = state == Player.STATE_READY
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
+        }
     }
-    AndroidView(
-        factory = { ctx -> PlayerView(ctx).apply { player = exoPlayer } },
-        modifier = Modifier.fillMaxSize(),
-    )
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { ctx -> PlayerView(ctx).apply { player = exoPlayer } },
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (!ready) {
+            MediaThumb(
+                model = authedRequest(context, urls.thumb(id), token),
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+            CircularProgressIndicator(color = VaultTheme.colors.accent)
+        }
+    }
 }
