@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import os
 import re
 import subprocess
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from fastapi import Request
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 class _JobRequest(BaseModel):
@@ -678,6 +681,10 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             try:
                 proxy = media_indexer.ensure_proxy(media_id, Path(row["path"]))
             except Exception:
+                logger.warning(
+                    "stream: transcode failed for media %s (%s)",
+                    media_id, row["path"], exc_info=True,
+                )
                 raise HTTPException(status_code=503, detail="Transcode unavailable")
             return _serve_with_range(proxy, range_header)
         return _serve_with_range(Path(row["path"]), range_header)

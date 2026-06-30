@@ -290,6 +290,9 @@ def transcode_to_mp4(src: Path, dest: Path) -> None:
             "ffmpeg", "-y", "-i", str(src),
             "-c:v", "libx264", "-c:a", "aac",
             "-movflags", "+faststart",
+            # The temp file ends in ``.tmp``, so ffmpeg cannot infer the muxer
+            # from the extension — name the MP4 format explicitly.
+            "-f", "mp4",
             str(tmp),
         ],
         capture_output=True, check=True,
