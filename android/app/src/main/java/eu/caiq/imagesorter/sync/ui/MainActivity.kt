@@ -14,6 +14,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Collections
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Icon
@@ -28,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import eu.caiq.imagesorter.sync.ServiceLocator
 import eu.caiq.imagesorter.sync.SyncApp
+import eu.caiq.imagesorter.sync.ui.screens.AlbumsScreen
 import eu.caiq.imagesorter.sync.ui.screens.CleanupScreen
 import eu.caiq.imagesorter.sync.ui.screens.MainStatusScreen
 import eu.caiq.imagesorter.sync.ui.screens.PairingScreen
@@ -89,6 +91,7 @@ internal fun HomeShell(
     selectedTab: HomeTab,
     onTabSelected: (HomeTab) -> Unit,
     photos: @Composable () -> Unit,
+    albums: @Composable () -> Unit,
     sync: @Composable () -> Unit,
 ) {
     Scaffold(
@@ -99,6 +102,12 @@ internal fun HomeShell(
                     onClick = { onTabSelected(HomeTab.PHOTOS) },
                     icon = { Icon(Icons.Rounded.PhotoLibrary, contentDescription = null) },
                     label = { Text("Photos") },
+                )
+                NavigationBarItem(
+                    selected = selectedTab == HomeTab.ALBUMS,
+                    onClick = { onTabSelected(HomeTab.ALBUMS) },
+                    icon = { Icon(Icons.Rounded.Collections, contentDescription = null) },
+                    label = { Text("Albums") },
                 )
                 NavigationBarItem(
                     selected = selectedTab == HomeTab.SYNC,
@@ -112,6 +121,7 @@ internal fun HomeShell(
         Surface(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
                 HomeTab.PHOTOS -> photos()
+                HomeTab.ALBUMS -> albums()
                 HomeTab.SYNC -> sync()
             }
         }
@@ -168,6 +178,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 selectedTab = homeTab,
                 onTabSelected = viewModel::selectHomeTab,
                 photos = { PhotosScreen() },
+                albums = { AlbumsScreen() },
                 sync = {
                     SyncTabContent(
                         viewModel = viewModel,
@@ -256,10 +267,10 @@ private fun SyncTabContent(
  */
 private fun launchDelete(
     viewModel: MainViewModel,
-    mediaIds: List<Long>,
+    uris: List<android.net.Uri>,
     launch: (IntentSenderRequest) -> Unit,
 ) {
-    val sender: IntentSender = viewModel.buildDeleteRequest(mediaIds) ?: return
+    val sender: IntentSender = viewModel.buildDeleteRequest(uris) ?: return
     launch(IntentSenderRequest.Builder(sender).build())
 }
 

@@ -420,6 +420,7 @@ class MediaIndexer:
                 self._db_path.parent.mkdir(parents=True, exist_ok=True)
                 con = sqlite3.connect(str(self._db_path), check_same_thread=False)
                 con.row_factory = sqlite3.Row
+                con.execute("PRAGMA foreign_keys=ON")
                 self._con = con
                 self._init_schema(con)
             return con
@@ -443,6 +444,22 @@ class MediaIndexer:
                 );
                 CREATE INDEX IF NOT EXISTS idx_media_timeline
                     ON media (date_taken DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS album (
+                    id           INTEGER PRIMARY KEY,
+                    name         TEXT NOT NULL,
+                    created_by   TEXT,
+                    created_at   TEXT NOT NULL,
+                    share_token  TEXT UNIQUE
+                );
+                CREATE TABLE IF NOT EXISTS album_item (
+                    album_id   INTEGER NOT NULL REFERENCES album(id) ON DELETE CASCADE,
+                    media_id   INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+                    added_at   TEXT NOT NULL,
+                    PRIMARY KEY (album_id, media_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_album_item_album
+                    ON album_item (album_id);
                 """
             )
             con.commit()

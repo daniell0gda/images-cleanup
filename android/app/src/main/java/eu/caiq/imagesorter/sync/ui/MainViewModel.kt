@@ -39,7 +39,7 @@ enum class AppScreen { SERVER_SETUP, PAIRING, PROFILE_PICKER, MAIN, CLEANUP }
  * [PHOTOS] browses the server media gallery (profile-independent); [SYNC] owns the
  * existing pairing/profile/back-up flow as a sub-state.
  */
-enum class HomeTab { PHOTOS, SYNC }
+enum class HomeTab { PHOTOS, ALBUMS, SYNC }
 
 /**
  * Narrow read/write seam over the prefs the routing + connect flow touches. Kept
@@ -110,13 +110,13 @@ class MainViewModel(
     private val _cleanupPhase = MutableStateFlow(CleanupPhase.IDLE)
     val cleanupPhase: StateFlow<CleanupPhase> = _cleanupPhase.asStateFlow()
 
-    /** Verified-present items pending the system delete dialog (local ids). */
-    private val _deletableMediaIds = MutableStateFlow<List<Long>>(emptyList())
-    val deletableMediaIds: StateFlow<List<Long>> = _deletableMediaIds.asStateFlow()
+    /** Verified-present items pending the system delete dialog (MediaStore URIs). */
+    private val _deletableMediaIds = MutableStateFlow<List<android.net.Uri>>(emptyList())
+    val deletableMediaIds: StateFlow<List<android.net.Uri>> = _deletableMediaIds.asStateFlow()
 
-    /** Not-people items selected for deletion, awaiting the system delete dialog. */
-    private val _notPeopleDeleteIds = MutableStateFlow<List<Long>>(emptyList())
-    val notPeopleDeleteIds: StateFlow<List<Long>> = _notPeopleDeleteIds.asStateFlow()
+    /** Not-people items selected for deletion, awaiting the system delete dialog (MediaStore URIs). */
+    private val _notPeopleDeleteIds = MutableStateFlow<List<android.net.Uri>>(emptyList())
+    val notPeopleDeleteIds: StateFlow<List<android.net.Uri>> = _notPeopleDeleteIds.asStateFlow()
 
     /**
      * Every status row, unfiltered, recomputed from the cache + queue. The filtered
@@ -303,11 +303,11 @@ class MainViewModel(
      * MediaStore by (name, created_on, size) so only files still on the phone are
      * offered for deletion.
      */
-    private fun resolveLocalIds(present: List<Identity>): List<Long> = emptyList()
+    private fun resolveLocalIds(present: List<Identity>): List<android.net.Uri> = emptyList()
 
-    /** Build the system delete request for the verified-present local ids. */
-    fun buildDeleteRequest(mediaIds: List<Long>): android.content.IntentSender? =
-        locator.cleanupManager.buildDeleteRequest(mediaIds)
+    /** Build the system delete request for the verified-present MediaStore URIs. */
+    fun buildDeleteRequest(uris: List<android.net.Uri>): android.content.IntentSender? =
+        locator.cleanupManager.buildDeleteRequest(uris)
 
     fun onDeleteCompleted() {
         _deletableMediaIds.value = emptyList()
@@ -345,7 +345,10 @@ class MainViewModel(
 
     /** Queue selected not-people items for the system delete dialog (Activity-owned). */
     fun requestNotPeopleDelete(rows: List<StatusRow>) {
-        _notPeopleDeleteIds.value = rows.mapNotNull { it.mediaStoreId }
+        _notPeopleDeleteIds.value = rows.mapNotNull { row ->
+            val id = row.mediaStoreId ?: return@mapNotNull null
+            mediaContentUri(id, row.mimeType ?: "image/jpeg")
+        }
     }
 
     /**
@@ -353,9 +356,10 @@ class MainViewModel(
      * ids so they leave the grid (reconcile never deletes UNCLASSIFIED rows itself).
      */
     fun onNotPeopleDeleteCompleted() {
-        val ids = _notPeopleDeleteIds.value.toSet()
+        val uris = _notPeopleDeleteIds.value
         _notPeopleDeleteIds.value = emptyList()
-        if (ids.isEmpty()) return
+        if (uris.isEmpty()) return
+        val ids = uris.map { android.content.ContentUris.parseId(it) }.toSet()
         viewModelScope.launch(Dispatchers.Default) {
             locator.syncedCacheDao().unclassifiedItems()
                 .filter { it.mediaStoreId in ids }

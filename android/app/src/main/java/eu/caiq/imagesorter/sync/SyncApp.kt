@@ -4,11 +4,13 @@ import android.app.Application
 import android.content.Context
 import android.os.Build
 import com.squareup.moshi.Moshi
+import eu.caiq.imagesorter.sync.data.api.AlbumApi
 import eu.caiq.imagesorter.sync.data.api.AuthInterceptor
 import eu.caiq.imagesorter.sync.data.api.MediaApi
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.UploadClient
 import eu.caiq.imagesorter.sync.data.db.AppDatabase
+import eu.caiq.imagesorter.sync.data.media.AlbumRepository
 import eu.caiq.imagesorter.sync.data.media.MediaRepository
 import eu.caiq.imagesorter.sync.data.media.MediaStoreScanner
 import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
@@ -135,6 +137,33 @@ class ServiceLocator(private val app: Context) {
      * Photos screen observes [MediaRepository.timeline] and applies day headers.
      */
     val mediaRepository: MediaRepository by lazy { MediaRepository(mediaApi, database) }
+
+    private var cachedAlbumApi: AlbumApi? = null
+    private var cachedAlbumBaseUrl: String? = null
+
+    /**
+     * Retrofit-backed [AlbumApi] for the shared-albums API. Rebuilt on address
+     * change like [mediaApi], sharing the same OkHttp/Auth/Moshi wiring so the
+     * bearer token rides along on `/api/albums*`.
+     */
+    private val albumApi: AlbumApi
+        get() {
+            val baseUrl = serverAddressToBaseUrl(securePrefs.getServerAddress()) ?: PLACEHOLDER_BASE_URL
+            val existing = cachedAlbumApi
+            if (existing != null && baseUrl == cachedAlbumBaseUrl) return existing
+            val built = Retrofit.Builder()
+                .baseUrl(baseUrl)
+                .client(okHttpClient)
+                .addConverterFactory(MoshiConverterFactory.create(moshi))
+                .build()
+                .create(AlbumApi::class.java)
+            cachedAlbumApi = built
+            cachedAlbumBaseUrl = baseUrl
+            return built
+        }
+
+    /** Shared-albums repository for the Photos selection actions and Albums tab. */
+    val albumRepository: AlbumRepository by lazy { AlbumRepository(albumApi) }
 
     /**
      * Builds a throwaway [SyncApi] targeting [baseUrl], reusing the shared

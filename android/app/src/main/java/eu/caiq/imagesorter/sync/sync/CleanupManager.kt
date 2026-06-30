@@ -1,8 +1,8 @@
 package eu.caiq.imagesorter.sync.sync
 
 import android.content.ContentResolver
-import android.content.ContentUris
 import android.content.IntentSender
+import android.net.Uri
 import android.provider.MediaStore
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.dto.IdentityDto
@@ -60,11 +60,8 @@ class CleanupManager(
      * Only the *local copy* is removed; the NAS copy is the backup and is never
      * touched. `createDeleteRequest` is always available at minSdk 33.
      */
-    fun buildDeleteRequest(mediaStoreIds: List<Long>): IntentSender? {
-        if (mediaStoreIds.isEmpty()) return null
-        val uris = mediaStoreIds.map {
-            ContentUris.withAppendedId(MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL), it)
-        }
+    fun buildDeleteRequest(uris: List<Uri>): IntentSender? {
+        if (uris.isEmpty()) return null
         return MediaStore.createDeleteRequest(contentResolver, uris).intentSender
     }
 

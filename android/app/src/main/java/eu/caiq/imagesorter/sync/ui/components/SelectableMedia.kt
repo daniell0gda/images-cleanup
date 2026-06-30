@@ -59,6 +59,28 @@ import kotlinx.coroutines.withContext
 /** Test tag on the fullscreen preview overlay, so its presence is assertable. */
 const val PREVIEW_TAG = "mediaPreview"
 
+/**
+ * The preview pager may page horizontally only when the current page is at rest (1:1).
+ * While zoomed the swipe pans the zoomed page instead, so paging is disabled.
+ */
+fun previewPagingEnabled(scale: Float): Boolean = scale == 1f
+
+/**
+ * Whether a single-finger drag should pan the (zoomed) page. At 1:1 this is false so
+ * the drag falls through to the [HorizontalPager] and the swipe advances the page;
+ * the two-finger pinch that initiates a zoom is unaffected.
+ */
+fun previewCanPan(scale: Float): Boolean = scale > 1f
+
+/**
+ * The preview index to show after deleting the item that was at [deletedIndex], given
+ * that [remainingCount] items remain. Returns null when nothing is left (the caller
+ * closes the preview). Otherwise the index is clamped into the remaining bounds so a
+ * last-item or stale out-of-range [deletedIndex] never produces an out-of-range page.
+ */
+fun previewIndexAfterDelete(remainingCount: Int, deletedIndex: Int): Int? =
+    if (remainingCount <= 0) null else deletedIndex.coerceIn(0, remainingCount - 1)
+
 /** Test tag on the selection-mode action/top bar. */
 const val SELECTION_BAR_TAG = "selectionBar"
 
@@ -217,7 +239,7 @@ fun <T> MediaPreviewPager(
         HorizontalPager(
             state = pagerState,
             // Only page when at rest (1:1); while zoomed the gesture pans instead.
-            userScrollEnabled = scale == 1f,
+            userScrollEnabled = previewPagingEnabled(scale),
             modifier = Modifier.fillMaxSize(),
         ) { page ->
             val pageZoomable = zoomable(items[page])
@@ -225,7 +247,15 @@ fun <T> MediaPreviewPager(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .then(if (transformed) Modifier.transformable(transformState) else Modifier)
+                    // canPan only at scale > 1f so a 1:1 single-finger drag falls
+                    // through to the pager (otherwise transformable eats the swipe).
+                    .then(
+                        if (transformed) {
+                            Modifier.transformable(transformState, canPan = { previewCanPan(scale) })
+                        } else {
+                            Modifier
+                        },
+                    )
                     .then(
                         if (transformed) {
                             Modifier.graphicsLayer {

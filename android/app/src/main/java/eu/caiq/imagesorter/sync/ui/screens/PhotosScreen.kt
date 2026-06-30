@@ -3,7 +3,7 @@ package eu.caiq.imagesorter.sync.ui.screens
 import androidx.annotation.OptIn as AndroidOptIn
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
@@ -18,6 +18,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
@@ -82,6 +84,9 @@ const val PHOTOS_CELL_TAG = "photosCell"
 /** Content description on the video play badge overlay (one per video cell). */
 const val PHOTOS_VIDEO_BADGE_DESC = "Video"
 
+/** Content description on a selected cell's check overlay (one per selected cell). */
+const val PHOTOS_SELECTED_DESC = "Selected"
+
 /** Marks a [MediaEntity] as video (server `kind`). */
 private const val KIND_VIDEO = "video"
 
@@ -110,6 +115,10 @@ fun PhotosGrid(
     onOpen: (mediaIndex: Int) -> Unit,
     modifier: Modifier = Modifier,
     state: LazyGridState = rememberLazyGridState(),
+    selectedIds: Set<Long> = emptySet(),
+    inSelectionMode: Boolean = false,
+    onToggle: (MediaEntity) -> Unit = {},
+    onLongPress: (MediaEntity) -> Unit = {},
     cell: @Composable (MediaEntity, Modifier) -> Unit,
 ) {
     val c = VaultTheme.colors
@@ -150,8 +159,15 @@ fun PhotosGrid(
                 }
                 is MediaListItem.Media -> {
                     val mediaIndex = mediaIndexAt[i]
-                    item(key = "m:${item.entity.id}") {
-                        MediaCell(item.entity, onClick = { onOpen(mediaIndex) }, cell = cell)
+                    val entity = item.entity
+                    item(key = "m:${entity.id}") {
+                        MediaCell(
+                            entity = entity,
+                            selected = entity.id in selectedIds,
+                            onClick = { if (inSelectionMode) onToggle(entity) else onOpen(mediaIndex) },
+                            onLongClick = { onLongPress(entity) },
+                            cell = cell,
+                        )
                     }
                 }
             }
@@ -159,22 +175,42 @@ fun PhotosGrid(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MediaCell(
     entity: MediaEntity,
+    selected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     cell: @Composable (MediaEntity, Modifier) -> Unit,
 ) {
     Box(
         modifier = Modifier
             .testTag(PHOTOS_CELL_TAG)
             .aspectRatio(1f)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         cell(entity, Modifier.fillMaxSize())
         if (entity.kind == KIND_VIDEO) {
             VideoBadge(Modifier.align(Alignment.BottomEnd).padding(4.dp))
         }
+        if (selected) SelectedBadge(Modifier.align(Alignment.TopStart).padding(4.dp))
+    }
+}
+
+/** A filled accent disc with a check, marking a selected cell. */
+@Composable
+private fun SelectedBadge(modifier: Modifier = Modifier) {
+    val c = VaultTheme.colors
+    Box(
+        modifier = modifier
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(c.accent)
+            .semantics { contentDescription = PHOTOS_SELECTED_DESC },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Rounded.Check, null, tint = c.onAccent, modifier = Modifier.size(14.dp))
     }
 }
 
@@ -222,11 +258,29 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     var previewIndex by remember { mutableStateOf<Int?>(null) }
     var datePickerOpen by remember { mutableStateOf(false) }
     var pendingSeekDate by remember { mutableStateOf<String?>(null) }
+    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var nameDialogAction by remember { mutableStateOf<AlbumSelectionAction?>(null) }
+    var addPickerOpen by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
+    val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val albumRepo = remember(locator) { runCatching { locator.albumRepository }.getOrNull() }
+    val deviceName = remember { android.os.Build.MODEL }
+    val inSelectionMode = selectedIds.isNotEmpty()
 
     Box(modifier = modifier.fillMaxSize()) {
-        PhotosGrid(items = items, onOpen = { previewIndex = it }, state = gridState) { entity, cellModifier ->
+        PhotosGrid(
+            items = items,
+            onOpen = { previewIndex = it },
+            state = gridState,
+            selectedIds = selectedIds,
+            inSelectionMode = inSelectionMode,
+            onToggle = { entity ->
+                selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
+            },
+            onLongPress = { entity -> selectedIds = selectedIds + entity.id },
+        ) { entity, cellModifier ->
             AsyncImage(
                 model = authedRequest(context, urls.thumb(entity.id), token),
                 contentDescription = null,
@@ -234,6 +288,65 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                 modifier = cellModifier,
             )
         }
+
+        if (inSelectionMode) {
+            SelectionActionsBar(
+                count = selectedIds.size,
+                onClose = { selectedIds = emptySet() },
+                onAction = { action ->
+                    when (action) {
+                        AlbumSelectionAction.AddToAlbum -> addPickerOpen = true
+                        else -> nameDialogAction = action
+                    }
+                },
+                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+            )
+        }
+
+        nameDialogAction?.let { action ->
+            if (albumRepo != null) {
+                AlbumNameDialog(
+                    defaultName = defaultAlbumName(java.time.LocalDate.now()),
+                    onDismiss = { nameDialogAction = null },
+                    onConfirm = { name ->
+                        val ids = selectedIds.toList()
+                        nameDialogAction = null
+                        selectedIds = emptySet()
+                        scope.launch {
+                            runCatching {
+                                runAlbumNameAction(
+                                    action = action,
+                                    name = name,
+                                    mediaIds = ids,
+                                    createdBy = deviceName,
+                                    repo = albumRepo,
+                                    copyToClipboard = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) },
+                                    confirm = { scope.launch { snackbarHostState.showSnackbar("Link copied") } },
+                                )
+                            }
+                        }
+                    },
+                )
+            }
+        }
+
+        if (addPickerOpen && albumRepo != null) {
+            AddToAlbumPicker(
+                loadAlbums = { albumRepo.albums() },
+                onPick = { albumId ->
+                    val ids = selectedIds.toList()
+                    addPickerOpen = false
+                    selectedIds = emptySet()
+                    scope.launch { runCatching { albumRepo.addItems(albumId, ids) } }
+                },
+                onDismiss = { addPickerOpen = false },
+            )
+        }
+
+        androidx.compose.material3.SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
 
         val idx = previewIndex
         if (idx != null && idx in mediaItems.indices) {
@@ -247,18 +360,7 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                     // delete API. For now, close/advance the pager without touching storage.
                     previewIndex = previewIndexAfterDelete(mediaItems.size - 1, deletedIndex)
                 },
-            ) { entity ->
-                if (entity.kind == KIND_VIDEO) {
-                    VideoPlayerPage(urls = urls, token = token, id = entity.id)
-                } else {
-                    AsyncImage(
-                        model = authedRequest(context, urls.preview(entity.id), token),
-                        contentDescription = null,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
-            }
+            ) { entity -> MediaPreviewContent(entity, urls, token) }
         }
 
         val repository = remember(locator) { runCatching { locator.mediaRepository }.getOrNull() }
@@ -332,10 +434,14 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                 },
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
             )
-            DatePickerFab(
-                onClick = { datePickerOpen = true },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            )
+            // The Go-To-Date FAB shares the bottom edge with the selection action bar;
+            // hide it while selecting so it doesn't sit under (and fight) that bar.
+            if (!inSelectionMode) {
+                DatePickerFab(
+                    onClick = { datePickerOpen = true },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                )
+            }
             if (datePickerOpen) {
                 DatePickerModal(
                     loadDates = { repository.availableDates() },
@@ -380,6 +486,166 @@ fun PhotosPreview(
     )
 }
 
+/** The three album actions offered over a Photos-grid selection (§7.1). */
+enum class AlbumSelectionAction { CreateAlbum, AddToAlbum, CreateLink }
+
+/** Test tag on the Photos selection-mode action bar. */
+const val ALBUM_SELECTION_BAR_TAG = "albumSelectionBar"
+
+/** The default name both create actions prefill: `Album <ISO date>` (§3.6). */
+fun defaultAlbumName(today: java.time.LocalDate): String = "Album $today"
+
+/**
+ * Runs a name-dialog confirm for the two create actions (§7.1). Create album just
+ * creates; Create link creates, then shares, then copies the server-built
+ * [eu.caiq.imagesorter.sync.data.api.dto.ShareDto.shareUrl] VERBATIM (§3.11) and
+ * confirms it. [AlbumSelectionAction.AddToAlbum] does not flow through here.
+ */
+suspend fun runAlbumNameAction(
+    action: AlbumSelectionAction,
+    name: String,
+    mediaIds: List<Long>,
+    createdBy: String?,
+    repo: eu.caiq.imagesorter.sync.data.media.AlbumRepository,
+    copyToClipboard: (String) -> Unit,
+    confirm: (String) -> Unit,
+) {
+    val album = repo.create(name, mediaIds, createdBy)
+    if (action == AlbumSelectionAction.CreateLink) {
+        val share = repo.share(album.id)
+        copyToClipboard(share.shareUrl)
+        confirm(share.shareUrl)
+    }
+}
+
+/**
+ * The Photos selection-mode action bar: selected count, a close control, and the
+ * three album actions (§7.1). Stateless — actions are reported to [onAction].
+ */
+@Composable
+fun SelectionActionsBar(
+    count: Int,
+    onAction: (AlbumSelectionAction) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val c = VaultTheme.colors
+    androidx.compose.foundation.layout.Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag(ALBUM_SELECTION_BAR_TAG)
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(14.dp))
+            .background(c.surfaceHigh)
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+    ) {
+        androidx.compose.foundation.layout.Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(Icons.Rounded.Close, contentDescription = "Cancel selection", tint = c.text)
+            }
+            Text("$count selected", color = c.text)
+        }
+        androidx.compose.foundation.layout.Row(
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            androidx.compose.material3.TextButton(onClick = { onAction(AlbumSelectionAction.CreateAlbum) }) { Text("Create album") }
+            androidx.compose.material3.TextButton(onClick = { onAction(AlbumSelectionAction.AddToAlbum) }) { Text("Add to album") }
+            androidx.compose.material3.TextButton(onClick = { onAction(AlbumSelectionAction.CreateLink) }) { Text("Create link") }
+        }
+    }
+}
+
+/**
+ * The shared name dialog for Create album / Create link (§3.6). Prefilled with
+ * [defaultName]; confirm reports the trimmed name (Create disabled when blank).
+ */
+@Composable
+fun AlbumNameDialog(
+    defaultName: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+    title: String = "Name album",
+    confirmLabel: String = "Create",
+) {
+    var name by remember { mutableStateOf(defaultName) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            androidx.compose.material3.OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(
+                onClick = { onConfirm(name.trim()) },
+                enabled = name.isNotBlank(),
+            ) { Text(confirmLabel) }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+/**
+ * Picks an existing album to add the current selection to (§7.1). Loads the list
+ * lazily via [loadAlbums]; tapping an entry reports its id to [onPick].
+ */
+@Composable
+fun AddToAlbumPicker(
+    loadAlbums: suspend () -> List<eu.caiq.imagesorter.sync.data.api.dto.AlbumDto>,
+    onPick: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var albums by remember { mutableStateOf<List<eu.caiq.imagesorter.sync.data.api.dto.AlbumDto>>(emptyList()) }
+    LaunchedEffect(Unit) { albums = runCatching { loadAlbums() }.getOrDefault(emptyList()) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add to album") },
+        text = {
+            androidx.compose.foundation.layout.Column {
+                if (albums.isEmpty()) {
+                    Text("No albums yet")
+                } else {
+                    albums.forEach { album ->
+                        androidx.compose.material3.TextButton(onClick = { onPick(album.id) }) { Text(album.name) }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+/**
+ * Renders one media entity full-screen for the preview pager: an autoplaying
+ * ExoPlayer page for video, otherwise a Coil preview image. Shared by the Photos
+ * tab and album detail so both get identical (autoplaying) video playback.
+ */
+@Composable
+fun MediaPreviewContent(entity: MediaEntity, urls: MediaUrls, token: String?) {
+    if (entity.kind == KIND_VIDEO) {
+        VideoPlayerPage(urls = urls, token = token, id = entity.id)
+    } else {
+        val context = LocalContext.current
+        AsyncImage(
+            model = authedRequest(context, urls.preview(entity.id), token),
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
 /** A Coil [ImageRequest] for [url] carrying the bearer [token] as an HTTP header. */
 private fun authedRequest(context: android.content.Context, url: String, token: String?): ImageRequest {
     val builder = ImageRequest.Builder(context).data(url)
@@ -407,6 +673,7 @@ private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
             .build()
             .apply {
                 setMediaItem(buildVideoMediaItem(urls, id))
+                playWhenReady = true
                 prepare()
             }
     }

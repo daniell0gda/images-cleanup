@@ -37,6 +37,7 @@ class HomeShellComposeTest {
                     selectedTab = HomeTab.PHOTOS,
                     onTabSelected = {},
                     photos = { PhotosScreen() },
+                    albums = {},
                     sync = { Text("sync-content") },
                 )
             }
@@ -57,6 +58,7 @@ class HomeShellComposeTest {
                     selectedTab = HomeTab.PHOTOS,
                     onTabSelected = { selections.add(it) },
                     photos = { PhotosScreen() },
+                    albums = {},
                     sync = { Text("sync-content") },
                 )
             }
@@ -73,6 +75,7 @@ class HomeShellComposeTest {
                     selectedTab = HomeTab.SYNC,
                     onTabSelected = {},
                     photos = { PhotosScreen() },
+                    albums = {},
                     sync = { Text("sync-content") },
                 )
             }
