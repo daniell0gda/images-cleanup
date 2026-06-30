@@ -48,6 +48,42 @@ class MediaApiWireTest {
     }
 
     @Test
+    fun datesParsesYearMonthDayTreeFromResponse() = runTest {
+        server.enqueue(
+            MockResponse().setBody("""{"2024":{"03":[1,5,12],"12":[24,25]},"2023":{"01":[2]}}"""),
+        )
+        val api = buildMediaApi(server)
+
+        val tree = api.dates()
+
+        assertEquals(listOf(1, 5, 12), tree["2024"]?.get("03"))
+        assertEquals(listOf(24, 25), tree["2024"]?.get("12"))
+        assertEquals(listOf(2), tree["2023"]?.get("01"))
+        assertEquals("/api/media/dates", server.takeRequest().path)
+    }
+
+    @Test
+    fun mediaPassesFromDateAsQuery() = runTest {
+        server.enqueue(MockResponse().setBody("""{"items":[],"next_cursor":null}"""))
+        val api = buildMediaApi(server)
+
+        api.media(fromDate = "2023-12-31")
+
+        assertEquals("/api/media?from_date=2023-12-31", server.takeRequest().path)
+    }
+
+    @Test
+    fun mediaParsesPrevCursorAndPassesBeforeAsQuery() = runTest {
+        server.enqueue(MockResponse().setBody("""{"items":[],"next_cursor":null,"prev_cursor":"p1"}"""))
+        val api = buildMediaApi(server)
+
+        val page = api.media(before = "anchor", limit = 50)
+
+        assertEquals("p1", page.prevCursor)
+        assertEquals("/api/media?limit=50&before=anchor", server.takeRequest().path)
+    }
+
+    @Test
     fun mediaFinalPageHasNullCursorAndPassesCursorAsQuery() = runTest {
         server.enqueue(MockResponse().setBody("""{"items":[],"next_cursor":null}"""))
         val api = buildMediaApi(server, tokenStore = FakeTokenStore("tok-1"))

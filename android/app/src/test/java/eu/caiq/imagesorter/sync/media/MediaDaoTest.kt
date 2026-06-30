@@ -59,7 +59,7 @@ class MediaDaoTest {
     fun clearAndRemoteKeyRoundTrip() = runTest {
         val dao = db.mediaDao()
         dao.insertAll(listOf(MediaEntity(1, "image", "2024-01-01T00:00:00", orderKey = 0)))
-        dao.setRemoteKey(MediaRemoteKey(nextCursor = "cur", nextOrderKey = 1))
+        dao.setRemoteKey(MediaRemoteKey(nextCursor = "cur", nextOrderKey = 1, prevCursor = null, prevOrderKey = -1))
 
         assertEquals("cur", dao.remoteKey()?.nextCursor)
 

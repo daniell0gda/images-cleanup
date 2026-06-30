@@ -14,6 +14,8 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -23,18 +25,33 @@ import org.robolectric.annotation.Config
 private class QueueMediaApi(private val pages: List<MediaPageDto>) : MediaApi {
     var calls = 0
         private set
-    override suspend fun media(cursor: String?, limit: Int?): MediaPageDto =
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto =
         pages[calls++]
+
+    override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+}
+
+/** Records the `from_date` of every refresh and always returns one terminal page. */
+private class RecordingMediaApi : MediaApi {
+    val fromDates = mutableListOf<String?>()
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto {
+        if (cursor == null && before == null) fromDates.add(fromDate)
+        return MediaPageDto(items = emptyList(), nextCursor = null)
+    }
+
+    override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
 }
 
 /** Records whether the network was hit; returns a terminal empty page. */
 private class TerminalMediaApi : MediaApi {
     var hit = false
         private set
-    override suspend fun media(cursor: String?, limit: Int?): MediaPageDto {
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto {
         hit = true
         return MediaPageDto(items = emptyList(), nextCursor = null)
     }
+
+    override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -85,7 +102,7 @@ class MediaRepositoryTest {
                 MediaEntity(20, "image", "2024-03-02T00:00:00", orderKey = 1),
             ),
         )
-        db.mediaDao().setRemoteKey(MediaRemoteKey(nextCursor = null, nextOrderKey = 2))
+        db.mediaDao().setRemoteKey(MediaRemoteKey(nextCursor = null, nextOrderKey = 2, prevCursor = null, prevOrderKey = -1))
         // On restart the mediator skips the initial refresh (cache + key present),
         // so the Room-backed timeline is served straight from cache. The end-cursor
         // is null, so paging does not fetch from the network at all.
@@ -96,5 +113,40 @@ class MediaRepositoryTest {
 
         assertEquals(listOf(30L, 20L), ids)
         assertFalse("cache must serve before any network call", api.hit)
+    }
+
+    @Test
+    fun seekToDateStoresCursorSoNextRefreshSendsFromDate() = runTest {
+        val api = RecordingMediaApi()
+        val repo = MediaRepository(api, db, pageSize = 2)
+
+        repo.seekToDate("2023-12-31")
+        repo.timeline().asSnapshot()
+
+        assertEquals("2023-12-31", api.fromDates.first())
+    }
+
+    @Test
+    fun resetToLatestClearsCursorSoNextRefreshSendsNullFromDate() = runTest {
+        val api = RecordingMediaApi()
+        val repo = MediaRepository(api, db, pageSize = 2)
+
+        repo.seekToDate("2023-12-31")
+        repo.resetToLatest()
+        repo.timeline().asSnapshot()
+
+        assertNull(api.fromDates.first())
+    }
+
+    @Test
+    fun isSeekActiveEmitsTrueAfterSeekAndFalseAfterReset() = runTest {
+        val api = RecordingMediaApi()
+        val repo = MediaRepository(api, db, pageSize = 2)
+
+        assertFalse(repo.isSeekActive().value)
+        repo.seekToDate("2023-12-31")
+        assertTrue(repo.isSeekActive().value)
+        repo.resetToLatest()
+        assertFalse(repo.isSeekActive().value)
     }
 }

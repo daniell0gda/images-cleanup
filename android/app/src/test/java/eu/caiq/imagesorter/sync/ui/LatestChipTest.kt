@@ -1,0 +1,98 @@
+package eu.caiq.imagesorter.sync.ui
+
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import eu.caiq.imagesorter.sync.ui.screens.LATEST_CHIP_TAG
+import eu.caiq.imagesorter.sync.ui.screens.LatestChip
+import eu.caiq.imagesorter.sync.ui.screens.handleLatestTap
+import eu.caiq.imagesorter.sync.ui.screens.shouldShowLatestChip
+import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+
+/**
+ * Behaviour of the "↑ Latest" chip: when it is shown (scroll position) and what a
+ * tap does depending on whether a date seek is active. Kept free of Compose so the
+ * decision logic is unit-tested directly; the chip itself is a thin AnimatedVisibility
+ * wrapper over these decisions.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class LatestChipTest {
+
+    @get:Rule
+    val composeRule = createComposeRule()
+
+    @Test
+    fun chipHiddenAtTopOfGridWhenNotSeeking() {
+        assertFalse(shouldShowLatestChip(firstVisibleItemIndex = 0, isSeekActive = false))
+    }
+
+    @Test
+    fun chipShownWhenScrolledPastFirstItem() {
+        assertTrue(shouldShowLatestChip(firstVisibleItemIndex = 1, isSeekActive = false))
+        assertTrue(shouldShowLatestChip(firstVisibleItemIndex = 42, isSeekActive = false))
+    }
+
+    @Test
+    fun chipShownWhileSeekActiveEvenAtTop() {
+        // After a seek the user is anchored at index 0 but still needs a way back.
+        assertTrue(shouldShowLatestChip(firstVisibleItemIndex = 0, isSeekActive = true))
+    }
+
+    @Test
+    fun tapWithActiveSeekResetsThenScrolls() = runTest {
+        val calls = mutableListOf<String>()
+        handleLatestTap(
+            isSeekActive = true,
+            resetToLatest = { calls.add("reset") },
+            scrollToTop = { calls.add("scroll") },
+        )
+        // Reset (pager invalidation) must precede the scroll to the new top.
+        assertEquals(listOf("reset", "scroll"), calls)
+    }
+
+    @Test
+    fun tapWithoutSeekOnlyScrolls() = runTest {
+        val calls = mutableListOf<String>()
+        handleLatestTap(
+            isSeekActive = false,
+            resetToLatest = { calls.add("reset") },
+            scrollToTop = { calls.add("scroll") },
+        )
+        // No seek active → no pager invalidation, just scroll to top.
+        assertEquals(listOf("scroll"), calls)
+    }
+
+    @Test
+    fun chipFadesInAndOutAsVisibilityToggles() {
+        var visible by mutableStateOf(false)
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                LatestChip(visible = visible, onClick = {})
+            }
+        }
+        // Hidden initially (AnimatedVisibility with no content composed).
+        composeRule.onNodeWithTag(LATEST_CHIP_TAG).assertDoesNotExist()
+
+        visible = true
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(LATEST_CHIP_TAG).assertExists()
+
+        visible = false
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(LATEST_CHIP_TAG).assertDoesNotExist()
+    }
+}
