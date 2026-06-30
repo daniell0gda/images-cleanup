@@ -34,4 +34,7 @@ interface MediaDao {
 
     @Query("DELETE FROM media_remote_key")
     suspend fun clearRemoteKey()
+
+    @Query("SELECT COUNT(*) FROM media")
+    suspend fun count(): Int
 }

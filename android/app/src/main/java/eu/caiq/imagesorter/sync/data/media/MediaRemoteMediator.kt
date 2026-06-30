@@ -35,9 +35,13 @@ class MediaRemoteMediator(
      * On a restart with a populated cache, skip the automatic initial refresh so
      * the Room-backed timeline is served first; an explicit refresh (pull / launch
      * policy) still goes to the network. An empty cache triggers a normal refresh.
+     *
+     * A remote key can exist with 0 media rows when the server previously returned
+     * an empty index (e.g. the build had not run yet). In that case there is nothing
+     * worth caching, so still launch a refresh rather than staying stuck on empty.
      */
     override suspend fun initialize(): InitializeAction =
-        if (dao.remoteKey() != null) {
+        if (dao.remoteKey() != null && dao.count() > 0) {
             InitializeAction.SKIP_INITIAL_REFRESH
         } else {
             InitializeAction.LAUNCH_INITIAL_REFRESH

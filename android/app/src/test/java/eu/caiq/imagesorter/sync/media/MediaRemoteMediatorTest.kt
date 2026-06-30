@@ -111,8 +111,13 @@ class MediaRemoteMediatorTest {
         // Empty cache → refresh from network on first launch.
         assertEquals(InitializeAction.LAUNCH_INITIAL_REFRESH, mediator.initialize())
 
-        // Prior run left a remote key (and cache) → serve cache before refreshing.
-        db.mediaDao().setRemoteKey(MediaRemoteKey(nextCursor = "c1", nextOrderKey = 1))
+        // Remote key present but no rows (previous run fetched 0 items from server) →
+        // still refresh so new server items become visible without reinstalling.
+        db.mediaDao().setRemoteKey(MediaRemoteKey(nextCursor = null, nextOrderKey = 0))
+        assertEquals(InitializeAction.LAUNCH_INITIAL_REFRESH, mediator.initialize())
+
+        // Remote key + actual rows → serve cache before refreshing.
+        db.mediaDao().insertAll(listOf(MediaEntity(1, "image", "2024-01-01T00:00:00", orderKey = 0)))
         assertEquals(InitializeAction.SKIP_INITIAL_REFRESH, mediator.initialize())
     }
 
