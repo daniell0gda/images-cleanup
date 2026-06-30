@@ -1,5 +1,6 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -159,6 +160,10 @@ fun MainStatusScreen(
         // Deselecting the last tile leaves selection mode (Google-Photos behavior).
         selectionMode = next.isNotEmpty()
     }
+
+    // Back exits multi-select instead of leaving the screen. (The fullscreen
+    // preview handles its own back via MediaPreviewPager and wins while open.)
+    BackHandler(enabled = selectionMode) { clearSelection() }
 
     val selectedRows = rows.filter { it.key in selectedKeys }
     val safe = totals.safe

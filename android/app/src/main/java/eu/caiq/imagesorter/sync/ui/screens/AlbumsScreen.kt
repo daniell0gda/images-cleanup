@@ -1,5 +1,6 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -190,6 +191,11 @@ fun AlbumsScreen(modifier: Modifier = Modifier) {
         if (repo != null) albums = runCatching { repo.albums() }.getOrDefault(emptyList())
     }
 
+    // Back from album detail returns to the list (detail is local state, not a
+    // nav destination); a deeper preview/selection handler takes precedence while
+    // one is active, since it is composed after this.
+    BackHandler(enabled = selectedAlbumId != null) { selectedAlbumId = null; reloadKey++ }
+
     val openAlbum = selectedAlbumId?.let { id -> albums.find { it.id == id } }
     if (openAlbum != null && repo != null) {
         AlbumDetail(
@@ -271,6 +277,9 @@ private fun AlbumDetail(
 
     val listItems = remember(entities) { entities.map { MediaListItem.Media(it) } }
     val inSelectionMode = selectedIds.isNotEmpty()
+
+    // Back exits selection first (rather than leaving the album) when selecting.
+    BackHandler(enabled = inSelectionMode) { selectedIds = emptySet() }
 
     Box(modifier = Modifier.fillMaxSize().testTag(ALBUM_DETAIL_TAG)) {
         Column(modifier = Modifier.fillMaxSize()) {

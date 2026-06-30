@@ -1,5 +1,6 @@
 package eu.caiq.imagesorter.sync.ui.components
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -211,6 +212,10 @@ fun <T> MediaPreviewPager(
     image: @Composable (T) -> Unit,
 ) {
     if (items.isEmpty()) return
+    // The preview is a fullscreen overlay, not a nav destination, so the system
+    // back gesture/button would otherwise fall through to the screen behind it
+    // (or exit). Intercept it to close the preview instead.
+    BackHandler { onClose() }
     val pagerState = rememberPagerState(
         initialPage = startIndex.coerceIn(0, items.size - 1),
     ) { items.size }

@@ -1,6 +1,7 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
 import androidx.annotation.OptIn as AndroidOptIn
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -272,6 +273,10 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     val albumRepo = remember(locator) { runCatching { locator.albumRepository }.getOrNull() }
     val deviceName = remember { android.os.Build.MODEL }
     val inSelectionMode = selectedIds.isNotEmpty()
+
+    // Back exits multi-select instead of leaving the tab. (The fullscreen preview
+    // handles its own back via MediaPreviewPager and takes precedence when open.)
+    BackHandler(enabled = inSelectionMode) { selectedIds = emptySet() }
 
     Box(modifier = modifier.fillMaxSize()) {
         PhotosGrid(
