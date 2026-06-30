@@ -1,5 +1,6 @@
 # Generated / runtime
 .gen/
+.playwright-cli/
 *.log
 *.pt
 sorted/
