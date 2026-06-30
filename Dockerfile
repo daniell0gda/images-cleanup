@@ -22,9 +22,10 @@ FROM python:3.11-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# System libraries required by opencv / ultralytics
+# System libraries required by opencv / ultralytics, plus ffmpeg/ffprobe for
+# the video probe + transcode path (launcher/media.py shells out to both).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+ && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -35,9 +36,11 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
       ultralytics imagehash PyYAML Pillow \
       fastapi "uvicorn[standard]" sse-starlette pydantic
 
-# Application source
+# Application source. Copy every top-level launcher module (not the tests/
+# frontend subdirs) so new modules ship automatically instead of silently
+# breaking the runtime when this list falls behind the imports in server.py.
 COPY imagesorter/ ./imagesorter/
-COPY launcher/__init__.py launcher/__main__.py launcher/server.py launcher/sync.py ./launcher/
+COPY launcher/*.py ./launcher/
 
 # Built frontends from stage 1
 COPY --from=frontend-build /build/frontend/dist   ./frontend/dist
