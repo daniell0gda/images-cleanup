@@ -179,3 +179,26 @@ def test_serve_path_outside_roots_rejected(tmp_path):
     conn.commit()
 
     assert client.get(f"/api/media/{mid}/preview", headers=_auth(token)).status_code == 403
+
+
+def test_serve_survives_emptied_folder_list(tmp_path):
+    # Regression: byte serving validates against the media row's OWN indexed root,
+    # not the live media_library.folders. Clearing the folder list after a build
+    # (e.g. a settings edit) must NOT 403 already-indexed media — the bug behind
+    # the shared-album "Path outside configured roots" failure.
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+    app = _build_app(tmp_path, [root])
+    _index(app)
+    client = TestClient(app)
+    token = _trust(client)
+    mid = app.state.media_indexer.list_all()[0]["id"]
+
+    # Simulate the configured folder list being emptied after the index was built.
+    (tmp_path / "configs" / "server.yaml").write_text(
+        yaml.safe_dump({"media_library": {"enabled": True, "folders": [],
+                                          "schedule": "0 2 * * *"}}),
+        encoding="utf-8",
+    )
+
+    assert client.get(f"/api/media/{mid}/preview", headers=_auth(token)).status_code == 200

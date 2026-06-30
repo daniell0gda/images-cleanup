@@ -498,25 +498,66 @@ class MediaIndexer:
                 self._proxy_locks[media_id] = lock
             return lock
 
-    def timeline(self, limit: int = 100, after=None) -> list[dict]:
-        """Newest-first timeline page ordered by ``(date_taken DESC, id DESC)``.
+    def timeline(self, limit: int = 100, after=None, on_or_before: str | None = None,
+                 before=None) -> list[dict]:
+        """Timeline page ordered by ``(date_taken, id)``.
 
         ``after`` is the keyset cursor ``(date_taken, id)`` of the last item of
         the previous page; when given, only strictly-older items are returned so
         the cursor is total and stable across concurrent inserts. The ordering
         and tiebreak are downstream pagination's (Cluster 5) foundation.
+
+        ``on_or_before`` is a ``YYYY-MM-DD`` date that, when given, restricts the
+        page to rows whose ``date_taken`` calendar day is on or before it — the
+        seek used by ``GET /api/media?from_date=``.
+
+        ``before`` is the keyset cursor of an anchor; when given, only strictly
+        *newer* items are returned, **ascending** (``date_taken ASC, id ASC``) so
+        the closest-newer photo comes first — the upward (prepend) page used by
+        ``GET /api/media?before=`` for bidirectional seek. Otherwise the page is
+        newest-first (``date_taken DESC, id DESC``).
         """
-        sql = "SELECT * FROM media"
+        clauses: list[str] = []
         params: list = []
         if after is not None:
             date_taken, last_id = after
-            sql += " WHERE (date_taken < ?) OR (date_taken = ? AND id < ?)"
+            clauses.append("((date_taken < ?) OR (date_taken = ? AND id < ?))")
             params += [date_taken, date_taken, last_id]
-        sql += " ORDER BY date_taken DESC, id DESC LIMIT ?"
+        if before is not None:
+            date_taken, last_id = before
+            clauses.append("((date_taken > ?) OR (date_taken = ? AND id > ?))")
+            params += [date_taken, date_taken, last_id]
+        if on_or_before is not None:
+            clauses.append("substr(date_taken, 1, 10) <= ?")
+            params.append(on_or_before)
+        sql = "SELECT * FROM media"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        order = "ASC" if before is not None else "DESC"
+        sql += f" ORDER BY date_taken {order}, id {order} LIMIT ?"
         params.append(limit)
         with self._lock:
             rows = self._conn().execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    def available_dates(self) -> dict[str, dict[str, list[int]]]:
+        """Year -> month -> sorted unique days tree of all indexed media.
+
+        Derived from the live ``date_taken`` column (ISO strings). Only
+        year/month/day branches that have at least one indexed row appear, days
+        are sorted ascending and de-duplicated. Backs ``GET /api/media/dates``.
+        """
+        with self._lock:
+            rows = self._conn().execute("SELECT date_taken FROM media").fetchall()
+        tree: dict[str, dict[str, set[int]]] = {}
+        for r in rows:
+            iso = r["date_taken"]
+            year, month, day = iso[0:4], iso[5:7], int(iso[8:10])
+            tree.setdefault(year, {}).setdefault(month, set()).add(day)
+        return {
+            year: {month: sorted(days) for month, days in sorted(months.items())}
+            for year, months in sorted(tree.items())
+        }
 
     # -- build -----------------------------------------------------------
 

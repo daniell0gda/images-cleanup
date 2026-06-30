@@ -252,6 +252,19 @@ def _decode_cursor(cursor: str) -> tuple[str, int]:
         raise HTTPException(status_code=400, detail="Invalid cursor")
 
 
+def _parse_from_date(value: str) -> str:
+    """Validate a ``from_date`` query value as a ``YYYY-MM-DD`` calendar date.
+
+    Returns the normalised ``YYYY-MM-DD`` string; raises HTTP 422 for any
+    malformed or out-of-range date so the seek parameter never reaches SQL.
+    """
+    from fastapi import HTTPException
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid from_date; expected YYYY-MM-DD")
+
+
 def _assert_within_roots(path: Path, roots: list[str]) -> None:
     """Raise 403 unless ``path`` resolves inside one of the configured ``roots``."""
     from fastapi import HTTPException
@@ -589,20 +602,59 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     async def media_timeline(
         cursor: str | None = None,
         limit: int = _MEDIA_PAGE_DEFAULT,
+        from_date: str | None = None,
+        before: str | None = None,
         authorization: str | None = Header(default=None),
     ):
         _require_device(authorization)
         limit = max(1, min(limit, _MEDIA_PAGE_MAX))
+
+        if before is not None:
+            # Upward (prepend) page for bidirectional seek: photos strictly newer
+            # than the anchor, ascending so the closest-newer photo comes first.
+            before_key = _decode_cursor(before)
+            rows = media_indexer.timeline(limit=limit + 1, before=before_key)
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            prev_cursor = (
+                _encode_cursor(page[-1]["date_taken"], page[-1]["id"])
+                if has_more and page else None
+            )
+            return {
+                "items": [_media_item(r) for r in page],
+                "next_cursor": None,
+                "prev_cursor": prev_cursor,
+            }
+
+        on_or_before = _parse_from_date(from_date) if from_date is not None else None
         after = _decode_cursor(cursor) if cursor else None
-        # Fetch one extra row to know whether a further page exists.
-        rows = media_indexer.timeline(limit=limit + 1, after=after)
+        # Fetch one extra row to know whether a further (older) page exists.
+        rows = media_indexer.timeline(limit=limit + 1, after=after, on_or_before=on_or_before)
         has_more = len(rows) > limit
         page = rows[:limit]
         next_cursor = (
             _encode_cursor(page[-1]["date_taken"], page[-1]["id"])
             if has_more and page else None
         )
-        return {"items": [_media_item(r) for r in page], "next_cursor": next_cursor}
+        # On an initial/seek load (no append cursor), expose a prev_cursor when
+        # newer photos exist above the first item so the client can page upward.
+        prev_cursor = None
+        if after is None and page:
+            newer = media_indexer.timeline(
+                limit=1, before=(page[0]["date_taken"], page[0]["id"])
+            )
+            if newer:
+                prev_cursor = _encode_cursor(page[0]["date_taken"], page[0]["id"])
+        return {
+            "items": [_media_item(r) for r in page],
+            "next_cursor": next_cursor,
+            "prev_cursor": prev_cursor,
+        }
+
+    @app.get("/api/media/dates")
+    async def media_dates(authorization: str | None = Header(default=None)):
+        _require_device(authorization)
+        return media_indexer.available_dates()
 
     def _serve_with_range(path: Path, range_header: str | None,
                           media_type: str = "video/mp4") -> Response:
