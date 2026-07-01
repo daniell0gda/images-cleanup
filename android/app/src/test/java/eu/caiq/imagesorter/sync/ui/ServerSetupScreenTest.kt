@@ -3,7 +3,6 @@ package eu.caiq.imagesorter.sync.ui
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import eu.caiq.imagesorter.sync.ui.screens.ServerSetupScreen
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
@@ -24,47 +23,42 @@ class ServerSetupScreenTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun rendersHostAndPortInputsAndConnectButton() {
+    fun rendersAddressInputAndConnectButton() {
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {
-                ServerSetupScreen(error = null, onConnect = { _, _ -> })
+                ServerSetupScreen(error = null, onConnect = {})
             }
         }
-        composeRule.onNodeWithText("Host").assertExists()
-        composeRule.onNodeWithText("Port").assertExists()
+        composeRule.onNodeWithText("Server address").assertExists()
         composeRule.onNodeWithText("Connect").assertExists()
     }
 
     @Test
-    fun tappingConnectInvokesCallbackWithEnteredHostAndPort() {
-        var connectedHost: String? = null
-        var connectedPort: String? = null
+    fun tappingConnectInvokesCallbackWithEnteredAddress() {
+        var connectedAddress: String? = null
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {
                 ServerSetupScreen(
                     error = null,
-                    onConnect = { h, p -> connectedHost = h; connectedPort = p },
+                    onConnect = { a -> connectedAddress = a },
                 )
             }
         }
-        composeRule.onNodeWithText("Host").performTextInput("192.168.1.50")
-        composeRule.onNodeWithText("Port").performTextClearance()
-        composeRule.onNodeWithText("Port").performTextInput("8080")
+        composeRule.onNodeWithText("Server address").performTextInput("https://media.example.com")
         composeRule.onNodeWithText("Connect").performClick()
 
-        assertEquals("192.168.1.50", connectedHost)
-        assertEquals("8080", connectedPort)
+        assertEquals("https://media.example.com", connectedAddress)
     }
 
     @Test
-    fun tappingConnectWithBlankHostDoesNotInvokeCallback() {
+    fun tappingConnectWithBlankAddressDoesNotInvokeCallback() {
         var invoked = false
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {
-                ServerSetupScreen(error = null, onConnect = { _, _ -> invoked = true })
+                ServerSetupScreen(error = null, onConnect = { invoked = true })
             }
         }
-        // Host starts blank; tapping Connect must be a no-op.
+        // Address starts blank; tapping Connect must be a no-op.
         composeRule.onNodeWithText("Connect").performClick()
         assertEquals(false, invoked)
     }
@@ -77,11 +71,11 @@ class ServerSetupScreenTest {
                 ServerSetupScreen(
                     error = null,
                     connecting = true,
-                    onConnect = { _, _ -> invoked = true },
+                    onConnect = { invoked = true },
                 )
             }
         }
-        composeRule.onNodeWithText("Host").performTextInput("192.0.2.1")
+        composeRule.onNodeWithText("Server address").performTextInput("192.0.2.1:7000")
         // While connecting the action is blocked even with valid input.
         composeRule.onNodeWithText("Connecting…").performClick()
         assertEquals(false, invoked)
@@ -91,7 +85,7 @@ class ServerSetupScreenTest {
     fun errorStateRendersVisibleMessage() {
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {
-                ServerSetupScreen(error = "Could not reach server", onConnect = { _, _ -> })
+                ServerSetupScreen(error = "Could not reach server", onConnect = {})
             }
         }
         composeRule.onNodeWithText("Could not reach server").assertExists()
@@ -101,7 +95,7 @@ class ServerSetupScreenTest {
     fun rendersEyebrowHeaderInsideTheme() {
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {
-                ServerSetupScreen(error = null, onConnect = { _, _ -> })
+                ServerSetupScreen(error = null, onConnect = {})
             }
         }
         // Eyebrow uppercases its text.

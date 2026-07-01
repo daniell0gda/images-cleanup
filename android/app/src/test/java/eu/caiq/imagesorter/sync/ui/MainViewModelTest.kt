@@ -150,7 +150,7 @@ class MainViewModelTest {
         val prefs = FakeRoutingPrefs(address = null)
         val vm = vmWith(prefs) { ProbeOnlyApi(200) }
 
-        vm.connect("nas.local", "7000")
+        vm.connect("nas.local:7000")
         dispatcher.scheduler.advanceUntilIdle()
 
         assertEquals("nas.local:7000", prefs.getServerAddress())
@@ -163,7 +163,7 @@ class MainViewModelTest {
         val prefs = FakeRoutingPrefs(address = null)
         val vm = vmWith(prefs) { throw IllegalStateException("must not probe on invalid input") }
 
-        vm.connect("   ", "7000")
+        vm.connect("   ")
         dispatcher.scheduler.advanceUntilIdle()
 
         assertNotNull(vm.serverSetupError.value)
@@ -176,7 +176,7 @@ class MainViewModelTest {
         val prefs = FakeRoutingPrefs(address = null)
         val vm = vmWith(prefs) { ProbeOnlyApi(500) }
 
-        vm.connect("nas.local", "7000")
+        vm.connect("nas.local:7000")
         dispatcher.scheduler.advanceUntilIdle()
 
         assertNotNull(vm.serverSetupError.value)
@@ -189,8 +189,8 @@ class MainViewModelTest {
         val api = GatedProbeApi()
         val vm = vmWith(FakeRoutingPrefs(address = null)) { api }
 
-        vm.connect("nas.local", "7000")
-        vm.connect("nas.local", "7000")
+        vm.connect("nas.local:7000")
+        vm.connect("nas.local:7000")
         dispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(1, api.calls)
@@ -203,7 +203,7 @@ class MainViewModelTest {
         val api = GatedProbeApi()
         val vm = vmWith(FakeRoutingPrefs(address = null)) { api }
 
-        vm.connect("nas.local", "7000")
+        vm.connect("nas.local:7000")
         dispatcher.scheduler.advanceUntilIdle()
         assertTrue(vm.connecting.value)
 
@@ -219,11 +219,11 @@ class MainViewModelTest {
         var attempt = 0
         val vm = vmWith(prefs) { if (attempt++ == 0) ProbeOnlyApi(500) else gated }
 
-        vm.connect("bad.host", "7000")
+        vm.connect("bad.host:7000")
         dispatcher.scheduler.advanceUntilIdle()
         assertNotNull(vm.serverSetupError.value)
 
-        vm.connect("good.host", "7000")
+        vm.connect("good.host:7000")
         dispatcher.scheduler.advanceUntilIdle()
         // The probe is still in flight (gated), yet the stale error is already cleared.
         assertNull(vm.serverSetupError.value)
@@ -278,7 +278,7 @@ class MainViewModelTest {
         val prefs = FakeRoutingPrefs(address = null)
         val vm = vmWith(prefs) { ProbeOnlyApi(null) }
 
-        vm.connect("nas.local", "7000")
+        vm.connect("nas.local:7000")
         dispatcher.scheduler.advanceUntilIdle()
 
         assertNotNull(vm.serverSetupError.value)

@@ -26,31 +26,33 @@ class ServerProbeTest {
     }
 
     @Test
-    fun parsesHostAndPortIntoNormalizedBaseUrl() {
-        val result = ServerProbe.parse("nas.local", "7000")
+    fun parsesBareHostAndPortIntoHttpBaseUrl() {
+        val result = ServerProbe.parse("nas.local:7000")
         assertTrue(result is ParseResult.Valid)
         assertEquals("http://nas.local:7000/", (result as ParseResult.Valid).baseUrl)
     }
 
     @Test
-    fun rejectsBlankHostAsInvalid() {
-        assertTrue(ServerProbe.parse("   ", "7000") is ParseResult.Invalid)
+    fun parsesHttpsUrlKeepingSchemeAndAddingTrailingSlash() {
+        val result = ServerProbe.parse("https://media.example.com")
+        assertTrue(result is ParseResult.Valid)
+        assertEquals("https://media.example.com/", (result as ParseResult.Valid).baseUrl)
+    }
+
+    @Test
+    fun rejectsBlankAddressAsInvalid() {
+        assertTrue(ServerProbe.parse("   ") is ParseResult.Invalid)
     }
 
     @Test
     fun rejectsNonNumericPortAsInvalid() {
-        assertTrue(ServerProbe.parse("nas.local", "abc") is ParseResult.Invalid)
+        assertTrue(ServerProbe.parse("nas.local:abc") is ParseResult.Invalid)
     }
 
     @Test
     fun rejectsOutOfRangePortAsInvalid() {
-        assertTrue(ServerProbe.parse("nas.local", "70000") is ParseResult.Invalid)
-        assertTrue(ServerProbe.parse("nas.local", "0") is ParseResult.Invalid)
-    }
-
-    @Test
-    fun rejectsBlankPortAsInvalid() {
-        assertTrue(ServerProbe.parse("nas.local", "") is ParseResult.Invalid)
+        assertTrue(ServerProbe.parse("nas.local:70000") is ParseResult.Invalid)
+        assertTrue(ServerProbe.parse("nas.local:0") is ParseResult.Invalid)
     }
 
     @Test

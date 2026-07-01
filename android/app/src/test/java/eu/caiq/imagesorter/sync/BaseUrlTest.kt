@@ -12,6 +12,16 @@ class BaseUrlTest {
     }
 
     @Test
+    fun explicitHttpsSchemeIsPreservedWithTrailingSlash() {
+        assertEquals("https://media.example.com/", serverAddressToBaseUrl("https://media.example.com"))
+    }
+
+    @Test
+    fun existingTrailingSlashIsNotDuplicated() {
+        assertEquals("https://media.example.com/", serverAddressToBaseUrl("https://media.example.com/"))
+    }
+
+    @Test
     fun nullAddressDoesNotFallBackToHardcodedDefault() {
         val url = serverAddressToBaseUrl(null)
         assertNull(url)

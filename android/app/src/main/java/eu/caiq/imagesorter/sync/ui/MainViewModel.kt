@@ -168,22 +168,22 @@ class MainViewModel(
      * input is rejected without probing; an unreachable / bad-response server
      * surfaces an error and the screen stays on server setup.
      */
-    fun connect(host: String, port: String) {
+    fun connect(address: String) {
         if (_connecting.value) return
-        when (val parsed = ServerProbe.parse(host, port)) {
+        when (val parsed = ServerProbe.parse(address)) {
             is ParseResult.Invalid -> _serverSetupError.value = parsed.reason
-            is ParseResult.Valid -> probeAndConnect(host.trim(), port.trim().toInt(), parsed.baseUrl)
+            is ParseResult.Valid -> probeAndConnect(address.trim(), parsed.baseUrl)
         }
     }
 
-    private fun probeAndConnect(host: String, port: Int, baseUrl: String) {
+    private fun probeAndConnect(address: String, baseUrl: String) {
         _serverSetupError.value = null
         _connecting.value = true
         viewModelScope.launch {
             try {
                 when (val result = ServerProbe.validate(apiFactory(baseUrl))) {
                     is ProbeResult.Success -> {
-                        routingPrefs.setServerAddress("$host:$port")
+                        routingPrefs.setServerAddress(address)
                         _serverSetupError.value = null
                         _screen.value = AppScreen.PAIRING
                     }

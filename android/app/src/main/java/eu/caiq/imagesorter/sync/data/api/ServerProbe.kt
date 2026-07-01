@@ -1,13 +1,15 @@
 package eu.caiq.imagesorter.sync.data.api
 
 import eu.caiq.imagesorter.sync.serverAddressToBaseUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * Outcome of parsing user-supplied server connection input.
  *
- * Input form: a host string plus a numeric port string. A valid pair is
- * normalized to the base URL `http://<host>:<port>/`; anything blank or with a
- * non-numeric / out-of-range port is rejected without contacting the network.
+ * Input form: a single address string — either a full URL
+ * (`https://media.example.com`) or a bare `host[:port]` that defaults to http.
+ * A valid address is normalized to a base URL ending in `/`; anything blank or
+ * not parseable as an HTTP(S) URL is rejected without contacting the network.
  */
 sealed interface ParseResult {
     data class Valid(val baseUrl: String) : ParseResult
@@ -32,18 +34,21 @@ sealed interface ProbeResult {
 object ServerProbe {
 
     /**
-     * Parses a [host] and [port] into a normalized base URL. Pure and offline:
-     * it never probes. Blank host or a non-numeric / out-of-range (1..65535)
-     * port yields [ParseResult.Invalid].
+     * Parses an [address] into a normalized base URL. Pure and offline: it never
+     * probes. A blank address, or one that is not a valid HTTP(S) URL once a
+     * default scheme is applied (bad host, non-numeric / out-of-range port),
+     * yields [ParseResult.Invalid].
      */
-    fun parse(host: String, port: String): ParseResult {
-        val trimmedHost = host.trim()
-        if (trimmedHost.isEmpty()) return ParseResult.Invalid("Host is required")
-        val portNumber = port.trim().toIntOrNull()
-            ?: return ParseResult.Invalid("Port must be a number")
-        if (portNumber !in 1..65535) return ParseResult.Invalid("Port must be between 1 and 65535")
-        val baseUrl = serverAddressToBaseUrl("$trimmedHost:$portNumber")
-            ?: return ParseResult.Invalid("Host and port are required")
+    fun parse(address: String): ParseResult {
+        val trimmed = address.trim()
+        if (trimmed.isEmpty()) return ParseResult.Invalid("Address is required")
+        val baseUrl = serverAddressToBaseUrl(trimmed)
+            ?: return ParseResult.Invalid("Address is required")
+        if (baseUrl.toHttpUrlOrNull() == null) {
+            return ParseResult.Invalid(
+                "Enter a valid address, e.g. https://media.example.com or 192.168.0.5:7000"
+            )
+        }
         return ParseResult.Valid(baseUrl)
     }
 

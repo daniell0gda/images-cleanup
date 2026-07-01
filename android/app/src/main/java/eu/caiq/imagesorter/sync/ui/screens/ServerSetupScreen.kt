@@ -31,22 +31,23 @@ import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 
 /**
  * One-time setup — point this phone at the launcher. The user enters the
- * launcher's IP/host and port; Connect probes reachability before advancing to
- * pairing. An [error] string (from a failed probe / invalid input) renders below
- * the fields in coral. While [connecting] is true the action is disabled and shows
- * a "Connecting…" label so a fast double-tap cannot fire a second probe.
+ * server's address as a single field: either a full URL (an HTTPS domain behind
+ * a reverse proxy) or a bare `host:port` on the local network, which defaults to
+ * http. Connect probes reachability before advancing to pairing. An [error]
+ * string (from a failed probe / invalid input) renders below the field in coral.
+ * While [connecting] is true the action is disabled and shows a "Connecting…"
+ * label so a fast double-tap cannot fire a second probe.
  */
 @Composable
 fun ServerSetupScreen(
     error: String?,
-    onConnect: (host: String, port: String) -> Unit,
+    onConnect: (address: String) -> Unit,
     connecting: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val c = VaultTheme.colors
-    var host by remember { mutableStateOf("") }
-    var port by remember { mutableStateOf("7000") }
-    val canConnect = host.isNotBlank() && port.isNotBlank() && !connecting
+    var address by remember { mutableStateOf("") }
+    val canConnect = address.isNotBlank() && !connecting
 
     Column(
         modifier = modifier
@@ -64,32 +65,25 @@ fun ServerSetupScreen(
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            "This is the launcher's IP address and port on your network.",
+            "A full URL for a public address, or the launcher's IP and port on " +
+                "your network.",
             style = MaterialTheme.typography.bodyMedium,
             color = c.muted,
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "Default port 7000",
+            "e.g. https://media.example.com  or  192.168.0.5:7000",
             style = MonoLabel.copy(fontSize = 12.sp),
             color = c.muted,
         )
         Spacer(Modifier.height(22.dp))
 
         OutlinedTextField(
-            value = host,
-            onValueChange = { host = it },
-            label = { Text("Host") },
+            value = address,
+            onValueChange = { address = it },
+            label = { Text("Server address") },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = port,
-            onValueChange = { port = it },
-            label = { Text("Port") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -104,7 +98,7 @@ fun ServerSetupScreen(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
                 .then(
-                    if (canConnect) Modifier.clickableScale { onConnect(host, port) }
+                    if (canConnect) Modifier.clickableScale { onConnect(address) }
                     else Modifier,
                 )
                 .background(if (canConnect) c.accent else c.line)

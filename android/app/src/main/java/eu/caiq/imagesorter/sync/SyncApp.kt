@@ -49,7 +49,12 @@ class SyncApp : Application() {
 fun serverAddressToBaseUrl(address: String?): String? {
     val trimmed = address?.trim().orEmpty()
     if (trimmed.isEmpty()) return null
-    return "http://$trimmed/"
+    // Respect an explicit scheme (e.g. an HTTPS domain behind a reverse proxy);
+    // otherwise default to http:// so a bare `host:port` keeps working.
+    val withScheme =
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed
+        else "http://$trimmed"
+    return if (withScheme.endsWith("/")) withScheme else "$withScheme/"
 }
 
 /**
