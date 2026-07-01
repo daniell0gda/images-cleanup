@@ -30,17 +30,21 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Install CPU-only torch first so ultralytics does not pull multi-GB CUDA wheels
-RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu \
- && pip install \
-      ultralytics imagehash PyYAML Pillow \
-      fastapi "uvicorn[standard]" sse-starlette pydantic
+# Install CPU-only torch first so ultralytics does not pull multi-GB CUDA wheels.
+# (Pre-installing satisfies ultralytics' torch requirement so `pip install .`
+# below won't drag in the default multi-GB CUDA wheels.)
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # Application source. Copy every top-level launcher module (not the tests/
 # frontend subdirs) so new modules ship automatically instead of silently
 # breaking the runtime when this list falls behind the imports in server.py.
 COPY imagesorter/ ./imagesorter/
 COPY launcher/*.py ./launcher/
+
+# Install the project and its web extras straight from pyproject.toml so the
+# runtime dependencies can never drift from the declared ones.
+COPY pyproject.toml ./
+RUN pip install ".[web]"
 
 # Built frontends from stage 1
 COPY --from=frontend-build /build/frontend/dist   ./frontend/dist
