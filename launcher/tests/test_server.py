@@ -439,6 +439,57 @@ def test_serve_wires_dist_dir_so_get_root_returns_200(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Criterion: saving a media folder makes the live indexer scan it (no restart)
+# ---------------------------------------------------------------------------
+
+def test_saving_media_folder_makes_build_scan_it(tmp_path, monkeypatch):
+    """POST /api/settings with a new media folder must update the live indexer so
+    a subsequent build scans that folder — without a container restart.
+
+    Regression: the indexer read its folder list once at startup, so folders
+    added via the settings UI were ignored until the process restarted, and a
+    build indexed nothing (0 photos).
+    """
+    import time
+    from PIL import Image
+
+    # Isolate all media storage under tmp so the build is self-contained.
+    monkeypatch.setenv("MEDIA_DB", str(tmp_path / "media.db"))
+    monkeypatch.setenv("MEDIA_THUMBS_DIR", str(tmp_path / "thumbs"))
+    monkeypatch.setenv("MEDIA_PROXIES_DIR", str(tmp_path / "proxies"))
+
+    # A source folder with one real image, added *after* the app is created.
+    src = tmp_path / "photos"
+    src.mkdir()
+    Image.new("RGB", (8, 8), "red").save(src / "pic.jpg")
+
+    from fastapi.testclient import TestClient
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    r = client.post("/api/settings", json={
+        "media_library": {
+            "enabled": True,
+            "folders": [str(src)],
+            "schedule": "0 2 * * *",
+        }
+    })
+    assert r.status_code == 200, f"settings save failed: {r.status_code} {r.text}"
+
+    client.post("/api/media/build")
+    deadline = time.monotonic() + 5.0
+    status = client.get("/api/media/build/status").json()
+    while status["state"] != "idle" and time.monotonic() < deadline:
+        time.sleep(0.02)
+        status = client.get("/api/media/build/status").json()
+
+    assert str(src) not in status["skipped_roots"], (
+        f"folder was skipped instead of scanned: {status}"
+    )
+    assert status["added"] >= 1, f"build indexed nothing: {status}"
+
+
+# ---------------------------------------------------------------------------
 # Criterion: launcher is runnable via python -m launcher (has __main__.py)
 # ---------------------------------------------------------------------------
 

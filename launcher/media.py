@@ -578,6 +578,12 @@ class MediaIndexer:
 
     # -- build -----------------------------------------------------------
 
+    def set_folders(self, folders: list[str]) -> None:
+        """Replace the configured scan roots (e.g. after a settings save) so the
+        next build sees folders added at runtime without a restart."""
+        with self._lock:
+            self._folders = list(folders)
+
     def status(self) -> dict:
         """Return the current build status snapshot (no build is triggered)."""
         return self._status.snapshot()

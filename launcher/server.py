@@ -728,6 +728,9 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         # save_settings only writes media_library when it was provided; merge in
         # the stored config so the payload (and cron) always see a full block.
         full = settings_mod.load_settings(_configs_dir())
+        # Push the (possibly changed) folder list into the live indexer so a build
+        # triggered after this save scans the new roots without a restart.
+        media_indexer.set_folders(full["media_library"]["folders"])
         if app.state.media_cron is not None:
             app.state.media_cron.reschedule(
                 full["media_library"]["schedule"], full["media_library"]["enabled"]
