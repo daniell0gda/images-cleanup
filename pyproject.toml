@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "imagesorter"
@@ -26,3 +26,9 @@ web = [
 
 [project.scripts]
 imagesorter = "imagesorter.__main__:main"
+
+# The repo root holds two top-level packages (imagesorter, launcher); only
+# imagesorter is a real distributable. Pin discovery so setuptools' flat-layout
+# auto-detection doesn't error on the ambiguity (launcher runs from source).
+[tool.setuptools.packages.find]
+include = ["imagesorter*"]
