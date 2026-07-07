@@ -79,10 +79,7 @@ import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 /** Test tag for the Photos tab root. */
 const val PHOTOS_TAG = "photosScreen"
@@ -101,13 +98,6 @@ private const val KIND_VIDEO = "video"
 
 /** Fixed column count for the gallery grid (square thumbnails). */
 private const val GRID_COLUMNS = 3
-
-/**
- * How long, after a Go-To-Date scroll, to keep re-asserting the anchor while eager PREPEND
- * pages settle above it. The viewport is correct after the first re-assert; this only bounds
- * the wait when no confirming emission arrives (we anchored off the edge, so no more fires).
- */
-private const val SEEK_SETTLE_TIMEOUT_MS = 2_000L
 
 /**
  * The server media gallery: a `LazyVerticalGrid` of square thumbnails with sticky
@@ -444,28 +434,14 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                 snapshotFlow { li.itemSnapshotList.items }.first { rows ->
                     rows.count { it is MediaListItem.Media } == signal.mediaWritten
                 }
-                // RE-ASSERT the anchor while eager PREPEND pages settle above it. We must NOT stop on
-                // loadState.prepend.endOfPaginationReached alone: that flag can flip to `true` a frame
-                // BEFORE itemSnapshotList reflects the freshly-prepended rows, so anchoring then would
-                // use the stale (shorter) snapshot and drift onto a newer date — the intermittent
-                // failure. Instead we re-scroll on every snapshot/loadState change, recomputing the
-                // anchor by identity (first orderKey>=0) each time, and stop only once PREPEND is
-                // exhausted AND the anchor index has held steady across two emissions (the top has
-                // truly stopped growing). The timeout bounds the case where no confirming emission
-                // arrives (anchored off the edge, so no further PREPEND fires).
-                var prevAnchor = -1
-                var settled = false
-                withTimeoutOrNull(SEEK_SETTLE_TIMEOUT_MS) {
-                    snapshotFlow { li.itemSnapshotList.items to li.loadState.prepend }
-                        .onEach { (rows, prepend) ->
-                            val a = seekAnchorFlatIndex(rows)
-                            gridState.scrollToItem(a)
-                            settled = prepend.endOfPaginationReached && a == prevAnchor
-                            prevAnchor = a
-                        }
-                        .takeWhile { !settled }
-                        .collect {}
-                }
+                // Anchor onto the seeked date exactly once. The rows are settled (the wait above
+                // matched this seek's written count), so the anchor is computed from a good snapshot.
+                // The grid's stable item keys (see PhotosGrid) hold this position as eager PREPEND
+                // pages settle above it, so scrolling stays put without re-asserting. Re-scrolling
+                // per emission — the old approach — dragged the view around (the flicker) AND kept
+                // poking the prepend edge, which cascaded PREPEND all the way back to latest; the
+                // further the target date, the longer that ran.
+                gridState.scrollToItem(seekAnchorFlatIndex(li.itemSnapshotList.items))
                 pendingSeekDate = null
             }
             val li = lazyItems
