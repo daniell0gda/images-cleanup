@@ -5,8 +5,8 @@ services:
     container_name: image-sorter
     restart: unless-stopped
     ports:
-      - "7000:7000"   # launcher UI  -> open http://<nas-ip>:7000
-      - "8080:8080"   # sorter UI    -> opened from the launcher's "Open UI" link
+      - "7123:7000"   # launcher UI  -> open http://<nas-ip>:7000
+      - "8123:8080"   # sorter UI    -> opened from the launcher's "Open UI" link
     # If you change the HOST side of the port mappings above, set these to match
     # so the in-browser links point at the right ports:
     # environment:
@@ -14,7 +14,16 @@ services:
     #   - SORTER_PUBLIC_PORT=8080     # host port mapped to container 8080
     volumes:
       # Config files (config_<user>_<groupby|similarity>.yaml). Read-only.
-      - ./configs:/configs:ro
+      - ./configs:/configs
       # Your photo library + sort destinations. Point your configs at /data/...
-      # Change the host path to your TrueNAS dataset:
-      - /mnt/YOUR_POOL/photos:/data
+      - photos:/data
+
+volumes:
+  photos:
+    driver: local
+    driver_opts:
+      type: cifs
+      # No leading backslashes; use forward slashes for the share path.
+      device: \\JUSZKOWO_NAS\MediaPool\zdjecia
+      # Set credentials for the NAS user that can read/write the share.
+      o: "username=YOUR_USER,password=YOUR_PASS,uid=0,gid=0,file_mode=0777,dir_mode=0777"

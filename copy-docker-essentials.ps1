@@ -18,7 +18,7 @@
     Repo root to copy from. Defaults to the folder this script lives in.
 
 .EXAMPLE
-    ./copy-docker-essentials.ps1 -Destination \\truenas\quick_access_for_pc\daniel\image-sorter
+    ./copy-docker-essentials.ps1 -Destination \\JUSZKOWO_NAS\quick_access_for_pc\daniel\image-sorter
 #>
 [CmdletBinding()]
 param(
@@ -31,9 +31,10 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Single files that live at the repo root and are part of the build context.
+# docker-compose.yml and the configs/ tree are intentionally NOT copied: they
+# are environment-specific and managed separately at the destination.
 $files = @(
     'Dockerfile',
-    'docker-compose.yml',
     '.dockerignore',
     'pyproject.toml',
     'yolo11s.pt'
@@ -48,8 +49,8 @@ $dirs = @(
 
 # Directory / file names excluded everywhere, matching .dockerignore so the
 # copied bundle equals the real build context.
-$excludeDirs  = @('node_modules', 'dist', '__pycache__', 'tests', '.egg-info', '.idea')
-$excludeFiles = @('*.log')
+$excludeDirs  = @('node_modules', 'dist', '__pycache__', 'tests', '.egg-info', '.idea', 'configs')
+$excludeFiles = @('*.log', 'docker-compose.yml')
 
 if (-not (Test-Path -LiteralPath $Source)) {
     throw "Source path not found: $Source"
@@ -58,8 +59,11 @@ if (-not (Test-Path -LiteralPath $Destination)) {
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 }
 
-$srcFull = (Resolve-Path -LiteralPath $Source).Path
-$dstFull = (Resolve-Path -LiteralPath $Destination).Path
+# Use ProviderPath (raw filesystem path) rather than Path: for UNC targets the
+# latter carries a "Microsoft.PowerShell.Core\FileSystem::" provider prefix that
+# native robocopy cannot parse (it fails with exit code 16).
+$srcFull = (Resolve-Path -LiteralPath $Source).ProviderPath
+$dstFull = (Resolve-Path -LiteralPath $Destination).ProviderPath
 Write-Host "Copying Docker essentials" -ForegroundColor Cyan
 Write-Host "  from: $srcFull"
 Write-Host "  to:   $dstFull`n"
@@ -86,13 +90,17 @@ foreach ($dir in $dirs) {
     # /MIR mirrors the tree (build-owned, so pruning stale files is desired).
     # /XD and /XF apply the .dockerignore exclusions. /NFL /NDL /NP /NJH /NJS
     # keep output quiet; robocopy exit codes 0-7 indicate success.
-    $roboArgs = @($srcDir, $dstDir, '/MIR', '/NFL', '/NDL', '/NP', '/NJH', '/NJS')
+    # /R and /W cap retries so a locked/inaccessible file fails fast instead of
+    # hanging on robocopy's default 1,000,000 retries.
+    $roboArgs = @($srcDir, $dstDir, '/MIR', '/R:2', '/W:2', '/NFL', '/NDL', '/NP', '/NJH', '/NJS')
     $roboArgs += '/XD'; $roboArgs += $excludeDirs
     $roboArgs += '/XF'; $roboArgs += $excludeFiles
 
-    robocopy @roboArgs | Out-Null
+    # Capture output rather than discarding it, so a failure can be explained.
+    $roboOut = robocopy @roboArgs 2>&1
     if ($LASTEXITCODE -ge 8) {
-        throw "robocopy failed for '$dir' with exit code $LASTEXITCODE"
+        $detail = ($roboOut | Where-Object { $_ -match '\S' }) -join "`n"
+        throw "robocopy failed for '$dir' with exit code $LASTEXITCODE`n$detail"
     }
 }
 
