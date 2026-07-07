@@ -48,6 +48,11 @@ class MediaRepository(
                 // SEEK_PAGE_SIZE so nothing auto-fires at rest; real upward scrolling still
                 // triggers it once the user nears the loaded edge.
                 prefetchDistance = SEEK_PREFETCH_DISTANCE,
+                // Left at the default (pageSize * 3), Paging tries to backfill the initial load
+                // up to that size, triggering extra automatic PREPEND calls beyond our own
+                // deliberate one to make up the difference. Match it to what a REFRESH actually
+                // supplies so nothing extra is requested purely to satisfy this target.
+                initialLoadSize = pageSize,
                 enablePlaceholders = false,
             ),
             remoteMediator = mediator,

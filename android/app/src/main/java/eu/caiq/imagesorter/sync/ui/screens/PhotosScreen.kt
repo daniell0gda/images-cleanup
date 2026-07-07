@@ -316,21 +316,35 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
             },
             modifier = Modifier.fillMaxSize(),
         ) {
-            PhotosGrid(
-                items = items,
-                onOpen = { previewIndex = it },
-                state = gridState,
-                selectedIds = selectedIds,
-                inSelectionMode = inSelectionMode,
-                onToggle = { entity ->
-                    selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
-                },
-                onLongPress = { entity -> selectedIds = selectedIds + entity.id },
-            ) { entity, cellModifier ->
-                MediaThumb(
-                    model = authedRequest(context, urls.thumb(entity.id), token),
-                    modifier = cellModifier,
-                )
+            // While a Go-To-Date jump is settling, don't compose the grid at all: the very
+            // first composition after `refresh()` would render the new data at whatever index
+            // the grid was already at (often near the top), and that read is enough for Paging
+            // to treat the viewport as sitting at the loaded edge and start auto-fetching newer
+            // pages — before `gridState.scrollToItem` below ever gets a chance to move it. A
+            // blank/loading state means nothing reads the list during that window, so the grid
+            // only ever appears already anchored on the target date, with the eager newer buffer
+            // pre-loaded (but out of view) above it, ready for a real scroll up to reveal.
+            if (pendingSeekDate != null) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                PhotosGrid(
+                    items = items,
+                    onOpen = { previewIndex = it },
+                    state = gridState,
+                    selectedIds = selectedIds,
+                    inSelectionMode = inSelectionMode,
+                    onToggle = { entity ->
+                        selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
+                    },
+                    onLongPress = { entity -> selectedIds = selectedIds + entity.id },
+                ) { entity, cellModifier ->
+                    MediaThumb(
+                        model = authedRequest(context, urls.thumb(entity.id), token),
+                        modifier = cellModifier,
+                    )
+                }
             }
         }
 
