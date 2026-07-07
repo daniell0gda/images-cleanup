@@ -55,9 +55,13 @@ def _build_app(tmp_path: Path):
 
 
 def _trust(client: TestClient, device_id: str = "dev-1", name: str = "Pixel") -> str:
-    client.post("/api/sync/devices", json={"device_id": device_id, "name": name})
+    code = client.post(
+        "/api/sync/devices", json={"device_id": device_id, "name": name}
+    ).json()["pairing_code"]
     client.post(f"/api/sync/devices/{device_id}/approve")
-    return client.get(f"/api/sync/devices/{device_id}/status").json()["token"]
+    return client.get(
+        f"/api/sync/devices/{device_id}/status", headers={"X-Pairing-Code": code}
+    ).json()["token"]
 
 
 def _auth(token: str) -> dict:

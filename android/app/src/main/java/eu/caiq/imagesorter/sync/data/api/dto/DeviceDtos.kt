@@ -10,11 +10,16 @@ data class RegisterDeviceRequest(
     @Json(name = "name") val name: String,
 )
 
-/** Response from `POST /api/sync/devices` — always `status:"pending"`. */
+/**
+ * Response from `POST /api/sync/devices`. Normally `status:"pending"` with a
+ * fresh [pairingCode]; re-registering an already-trusted device is a server
+ * no-op that returns `status:"trusted"` with NO code, so [pairingCode] is
+ * nullable.
+ */
 @JsonClass(generateAdapter = true)
 data class RegisterDeviceResponse(
     @Json(name = "status") val status: String,
-    @Json(name = "pairing_code") val pairingCode: String,
+    @Json(name = "pairing_code") val pairingCode: String? = null,
 )
 
 /**

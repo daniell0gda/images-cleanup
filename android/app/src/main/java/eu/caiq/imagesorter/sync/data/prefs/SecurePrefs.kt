@@ -69,6 +69,14 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.images
         }.apply()
     }
 
+    override fun getPairingCode(): String? = secure.getString(KEY_PAIRING_CODE, null)
+
+    override fun setPairingCode(code: String?) {
+        secure.edit().apply {
+            if (code == null) remove(KEY_PAIRING_CODE) else putString(KEY_PAIRING_CODE, code)
+        }.apply()
+    }
+
     override fun isTrusted(): Boolean = !getToken().isNullOrEmpty()
 
     /** Clears the token (e.g. after a 401) so the app routes back to pairing. */
@@ -122,6 +130,7 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.images
 
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_TOKEN = "token"
+        private const val KEY_PAIRING_CODE = "pairing_code"
         private const val KEY_PROFILE_ID = "profile_id"
         private const val KEY_MEDIA_GENERATION = "media_generation"
         private const val KEY_TRUSTED_SSID = "trusted_ssid"

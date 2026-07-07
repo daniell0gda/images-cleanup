@@ -490,6 +490,83 @@ def test_saving_media_folder_makes_build_scan_it(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Criterion: management/admin surface is LAN-only (hidden from proxied requests)
+# ---------------------------------------------------------------------------
+
+# A reverse proxy (Traefik) stamps this on every forwarded request; its presence
+# is what the guard uses to distinguish public traffic from a direct LAN client.
+_PROXIED = {"X-Forwarded-For": "203.0.113.9"}
+
+
+def test_is_public_path_classification():
+    """Unit-level contract for the public/admin split the guard enforces."""
+    from launcher.server import _is_public_path as pub
+
+    # Public: app + pairing + shares.
+    assert pub("GET", "/api/ping")
+    assert pub("GET", "/api/media")
+    assert pub("GET", "/api/media/42/thumb")
+    assert pub("GET", "/api/albums")
+    assert pub("POST", "/api/sync/reconcile")
+    assert pub("POST", "/api/sync/devices")               # register
+    assert pub("GET", "/api/sync/devices/abc/status")     # status poll
+    assert pub("GET", "/share/tok/media/1/thumb")
+
+    # Admin: UI, jobs, settings, build, device listing / approve / revoke.
+    assert not pub("GET", "/")
+    assert not pub("GET", "/api/users")
+    assert not pub("POST", "/api/jobs")
+    assert not pub("POST", "/api/settings")
+    assert not pub("POST", "/api/media/build")
+    assert not pub("GET", "/api/media/build/status")
+    assert not pub("GET", "/api/sync/devices")            # listing
+    assert not pub("POST", "/api/sync/devices/abc/approve")
+    assert not pub("POST", "/api/sync/devices/abc/revoke")
+
+
+def test_admin_route_hidden_from_proxied_requests(tmp_path):
+    """An admin route returns 404 when the request came through the proxy, but is
+    served normally on a direct LAN connection."""
+    (tmp_path / "config_alice_groupby.yaml").write_text("mode: GroupByTags\n")
+
+    from fastapi.testclient import TestClient
+    client = TestClient(make_app(tmp_path))
+
+    assert client.get("/api/users", headers=_PROXIED).status_code == 404
+    assert client.get("/api/users").status_code == 200
+
+
+def test_device_approve_hidden_from_proxied_requests(tmp_path):
+    """The unauthenticated approve/revoke routes must not be reachable publicly,
+    or a remote attacker could self-approve a device and mint a token."""
+    from fastapi.testclient import TestClient
+    client = TestClient(make_app(tmp_path))
+
+    assert client.post("/api/sync/devices/x/approve", headers=_PROXIED).status_code == 404
+    assert client.post("/api/sync/devices/x/revoke", headers=_PROXIED).status_code == 404
+
+
+def test_ping_is_reachable_when_proxied(tmp_path):
+    """The reachability probe stays public so the app can connect over HTTPS."""
+    from fastapi.testclient import TestClient
+    client = TestClient(make_app(tmp_path))
+
+    resp = client.get("/api/ping", headers=_PROXIED)
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_public_app_route_passes_guard_but_still_requires_token(tmp_path):
+    """A proxied request to a public app route is not hidden by the guard; it is
+    still rejected by its own auth (401) rather than 404."""
+    from fastapi.testclient import TestClient
+    client = TestClient(make_app(tmp_path))
+
+    # Reaches the handler (device auth), so it is NOT the guard's 404.
+    assert client.get("/api/albums", headers=_PROXIED).status_code == 401
+
+
+# ---------------------------------------------------------------------------
 # Criterion: launcher is runnable via python -m launcher (has __main__.py)
 # ---------------------------------------------------------------------------
 

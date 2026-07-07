@@ -393,6 +393,7 @@ class MediaIndexer:
         proxies_dir: Path,
         folders: list[str],
         thumbnail=None,
+        profile_for=None,
     ):
         self._db_path = Path(db_path)
         self._thumbs_dir = Path(thumbs_dir)
@@ -401,6 +402,10 @@ class MediaIndexer:
         # Thumbnail hook (Cluster 3). Default no-ops gracefully so the index
         # logic is testable without real thumbnail bytes.
         self._thumbnail = thumbnail or (lambda row_id, path, kind: False)
+        # Profile lookup: ``(path) -> str | None`` returning which sync profile
+        # placed the file (None for files not backed up via phone sync). Default
+        # no-ops so the index logic is testable without a sync store.
+        self._profile_for = profile_for or (lambda path: None)
         self._lock = threading.RLock()
         self._con: sqlite3.Connection | None = None
         self._build_lock = threading.Lock()
@@ -440,7 +445,8 @@ class MediaIndexer:
                     width          INTEGER,
                     height         INTEGER,
                     video_websafe  INTEGER,
-                    thumb_ready    INTEGER NOT NULL DEFAULT 0
+                    thumb_ready    INTEGER NOT NULL DEFAULT 0,
+                    profile        TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_media_timeline
                     ON media (date_taken DESC, id DESC);
@@ -462,6 +468,12 @@ class MediaIndexer:
                     ON album_item (album_id);
                 """
             )
+            # Migrate DBs created before the profile column existed, then index
+            # it (deferred until here so the column is guaranteed to exist).
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(media)")}
+            if "profile" not in cols:
+                con.execute("ALTER TABLE media ADD COLUMN profile TEXT")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_media_profile ON media (profile)")
             con.commit()
 
     # -- queries ---------------------------------------------------------
@@ -516,7 +528,7 @@ class MediaIndexer:
             return lock
 
     def timeline(self, limit: int = 100, after=None, on_or_before: str | None = None,
-                 before=None) -> list[dict]:
+                 before=None, profile: str | None = None) -> list[dict]:
         """Timeline page ordered by ``(date_taken, id)``.
 
         ``after`` is the keyset cursor ``(date_taken, id)`` of the last item of
@@ -547,6 +559,9 @@ class MediaIndexer:
         if on_or_before is not None:
             clauses.append("substr(date_taken, 1, 10) <= ?")
             params.append(on_or_before)
+        if profile is not None:
+            clauses.append("profile = ?")
+            params.append(profile)
         sql = "SELECT * FROM media"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -669,8 +684,9 @@ class MediaIndexer:
         if not date_taken:
             date_taken = _mtime_iso(st.st_mtime)
 
+        profile = self._profile_for(path_str)
         row_id = self._upsert(path_str, str(root), kind, st.st_size, st.st_mtime,
-                              date_taken, width, height)
+                              date_taken, width, height, profile)
         status.added += 1
         if kind == "video" and ffprobe_available():
             try:
@@ -689,20 +705,20 @@ class MediaIndexer:
                 "SELECT id, mtime, size FROM media WHERE path=?", (path,)
             ).fetchone()
 
-    def _upsert(self, path, root, kind, size, mtime, date_taken, width, height) -> int:
+    def _upsert(self, path, root, kind, size, mtime, date_taken, width, height, profile=None) -> int:
         websafe_clause = "NULL" if kind == "video" else "video_websafe"
         with self._lock:
             self._conn().execute(
                 "INSERT INTO media "
                 "(path, root, kind, size, mtime, date_taken, width, height, "
-                " video_websafe, thumb_ready) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0) "
+                " video_websafe, thumb_ready, profile) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?) "
                 "ON CONFLICT(path) DO UPDATE SET "
                 "  root=excluded.root, kind=excluded.kind, size=excluded.size, "
                 "  mtime=excluded.mtime, date_taken=excluded.date_taken, "
                 "  width=excluded.width, height=excluded.height, "
-                f"  video_websafe={websafe_clause}, thumb_ready=0",
-                (path, root, kind, size, mtime, date_taken, width, height),
+                f"  video_websafe={websafe_clause}, thumb_ready=0, profile=excluded.profile",
+                (path, root, kind, size, mtime, date_taken, width, height, profile),
             )
             self._conn().commit()
             row = self._conn().execute(

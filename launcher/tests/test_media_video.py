@@ -91,9 +91,13 @@ def _video_id(app):
 
 def _auth(client: TestClient, device_id="dev-1") -> dict:
     """Register + approve a device and return its bearer auth header."""
-    client.post("/api/sync/devices", json={"device_id": device_id, "name": "Pixel"})
+    code = client.post(
+        "/api/sync/devices", json={"device_id": device_id, "name": "Pixel"}
+    ).json()["pairing_code"]
     client.post(f"/api/sync/devices/{device_id}/approve")
-    token = client.get(f"/api/sync/devices/{device_id}/status").json()["token"]
+    token = client.get(
+        f"/api/sync/devices/{device_id}/status", headers={"X-Pairing-Code": code}
+    ).json()["token"]
     return {"Authorization": f"Bearer {token}"}
 
 

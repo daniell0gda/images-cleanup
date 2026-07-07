@@ -78,7 +78,7 @@ private class NotImplementedSyncApi : SyncApi {
     private fun fail(): Nothing = throw UnsupportedOperationException("not used in this test")
     override suspend fun ping() = fail()
     override suspend fun registerDevice(body: eu.caiq.imagesorter.sync.data.api.dto.RegisterDeviceRequest) = fail()
-    override suspend fun deviceStatus(deviceId: String) = fail()
+    override suspend fun deviceStatus(deviceId: String, pairingCode: String?) = fail()
     override suspend fun profiles() = fail()
     override suspend fun reconcile(identities: List<eu.caiq.imagesorter.sync.data.api.dto.IdentityDto>) = fail()
     override suspend fun verify(identities: List<eu.caiq.imagesorter.sync.data.api.dto.IdentityDto>) = fail()

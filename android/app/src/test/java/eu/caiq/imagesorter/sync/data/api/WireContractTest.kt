@@ -138,7 +138,7 @@ class WireContractTest {
         val api = buildSyncApi(server, tokenStore = FakeTokenStore("tok-abc"))
 
         api.registerDevice(RegisterDeviceRequest("dev-1", "Pixel"))
-        api.deviceStatus("dev-1")
+        api.deviceStatus("dev-1", null)
 
         assertNull(server.takeRequest().getHeader("Authorization"))
         assertNull(server.takeRequest().getHeader("Authorization"))

@@ -30,10 +30,16 @@ def register(client: TestClient, device_id="dev-1", name="Pixel"):
 
 
 def trust(client: TestClient, device_id="dev-1", name="Pixel") -> str:
-    """Register, approve, and return the bearer token."""
-    register(client, device_id, name)
+    """Register, approve, and return the bearer token.
+
+    The token is gated behind the pairing code, so we replay the code the
+    register response handed us via the X-Pairing-Code header.
+    """
+    code = register(client, device_id, name).json()["pairing_code"]
     client.post(f"/api/sync/devices/{device_id}/approve")
-    status = client.get(f"/api/sync/devices/{device_id}/status").json()
+    status = client.get(
+        f"/api/sync/devices/{device_id}/status", headers={"X-Pairing-Code": code}
+    ).json()
     return status["token"]
 
 
@@ -92,14 +98,16 @@ def test_device_status_lifecycle_pending_trusted_revoked(tmp_path):
     after approval, and revoked after revocation."""
     app = make_app(tmp_path)
     client = TestClient(app)
-    register(client, "dev-1")
+    code = register(client, "dev-1").json()["pairing_code"]
 
     before = client.get("/api/sync/devices/dev-1/status").json()
     assert before["status"] == "pending"
     assert "token" not in before
 
     client.post("/api/sync/devices/dev-1/approve")
-    after = client.get("/api/sync/devices/dev-1/status").json()
+    after = client.get(
+        "/api/sync/devices/dev-1/status", headers={"X-Pairing-Code": code}
+    ).json()
     assert after["status"] == "trusted"
     assert after["token"]
 
@@ -108,17 +116,67 @@ def test_device_status_lifecycle_pending_trusted_revoked(tmp_path):
     assert revoked["status"] == "revoked"
 
 
-def test_pending_status_returns_pairing_code(tmp_path):
-    """A pending device's status includes its pairing_code, so a phone that lost
-    local state can re-display the code instead of re-registering (which would
-    reset an already-approved device back to pending)."""
+def test_pending_status_does_not_echo_pairing_code(tmp_path):
+    """The pairing code now gates token retrieval, so it is a secret and must
+    not be echoed back in the status response body — the phone learns its code
+    from the register response, not from status polling."""
     app = make_app(tmp_path)
     client = TestClient(app)
-    code = register(client, "dev-1").json()["pairing_code"]
+    register(client, "dev-1")
 
     status = client.get("/api/sync/devices/dev-1/status").json()
     assert status["status"] == "pending"
-    assert status["pairing_code"] == code
+    assert "pairing_code" not in status
+
+
+def test_status_returns_token_only_with_correct_pairing_code(tmp_path):
+    """A trusted device's token is returned by status only when the caller
+    presents the matching pairing code via the X-Pairing-Code header."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    code = register(client, "dev-1").json()["pairing_code"]
+    approve = client.post("/api/sync/devices/dev-1/approve").json()
+    issued = approve["token"]
+
+    ok = client.get(
+        "/api/sync/devices/dev-1/status", headers={"X-Pairing-Code": code}
+    ).json()
+    assert ok["status"] == "trusted"
+    assert ok["token"] == issued
+
+
+def test_status_omits_token_without_or_with_wrong_pairing_code(tmp_path):
+    """A trusted device with a missing or wrong pairing code still reports
+    trusted, but the token is withheld and the code is not echoed back."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    register(client, "dev-1")
+    client.post("/api/sync/devices/dev-1/approve")
+
+    missing = client.get("/api/sync/devices/dev-1/status").json()
+    assert missing["status"] == "trusted"
+    assert "token" not in missing
+    assert "pairing_code" not in missing
+
+    wrong = client.get(
+        "/api/sync/devices/dev-1/status", headers={"X-Pairing-Code": "000000"}
+    ).json()
+    assert wrong["status"] == "trusted"
+    assert "token" not in wrong
+    assert "pairing_code" not in wrong
+
+
+def test_status_unknown_device_404_regardless_of_code(tmp_path):
+    """An unknown device_id returns 404 even when a pairing code is supplied."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    assert client.get("/api/sync/devices/nope/status").status_code == 404
+    assert (
+        client.get(
+            "/api/sync/devices/nope/status", headers={"X-Pairing-Code": "123456"}
+        ).status_code
+        == 404
+    )
 
 
 def test_approve_sets_approved_at_and_status_token_matches(tmp_path):
@@ -126,12 +184,14 @@ def test_approve_sets_approved_at_and_status_token_matches(tmp_path):
     returns the same token that approval issued."""
     app = make_app(tmp_path)
     client = TestClient(app)
-    register(client, "dev-1")
+    code = register(client, "dev-1").json()["pairing_code"]
 
     approve = client.post("/api/sync/devices/dev-1/approve").json()
     issued = approve["token"]
 
-    status = client.get("/api/sync/devices/dev-1/status").json()
+    status = client.get(
+        "/api/sync/devices/dev-1/status", headers={"X-Pairing-Code": code}
+    ).json()
     assert status["token"] == issued
 
     import sqlite3
@@ -792,6 +852,92 @@ def test_synced_files_row_records_full_identity_and_stored_path(tmp_path):
     assert row["synced_at"]
     from pathlib import Path as _P
     assert _P(row["stored_path"]).exists()
+
+
+def _jpeg_bytes(color=(10, 20, 30)):
+    """A minimal real JPEG so piexif has valid metadata to work with."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), color).save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
+def _read_profile_tag(path):
+    """Read back the EXIF XPKeywords string, or None if absent/unreadable."""
+    import piexif
+    try:
+        raw = piexif.load(str(path))["0th"].get(piexif.ImageIFD.XPKeywords)
+    except Exception:
+        return None
+    return bytes(raw).decode("utf-16le").rstrip("\x00") if raw is not None else None
+
+
+def test_embed_profile_tag_writes_keyword_into_jpeg_losslessly(tmp_path):
+    """The syncing profile is written into a JPEG's EXIF keywords without
+    touching its pixels."""
+    from launcher.sync import embed_profile_tag
+    from PIL import Image
+    p = tmp_path / "photo.jpg"
+    p.write_bytes(_jpeg_bytes((200, 100, 50)))
+    before = Image.open(p).tobytes()
+
+    embed_profile_tag(p, "alice")
+
+    assert _read_profile_tag(p) == "profile:alice"
+    assert Image.open(p).tobytes() == before  # pixels untouched
+
+
+def test_embed_profile_tag_never_raises_on_non_jpeg_or_garbage(tmp_path):
+    """Tagging is best-effort: a non-JPEG, a corrupt JPEG, and a missing file
+    are all left untouched and never raise (a backup must never fail on this)."""
+    from launcher.sync import embed_profile_tag
+    from PIL import Image
+    png = tmp_path / "pic.png"
+    Image.new("RGB", (8, 8)).save(png)
+    png_bytes = png.read_bytes()
+    junk = tmp_path / "fake.jpg"
+    junk.write_bytes(b"not a real jpeg")
+
+    embed_profile_tag(png, "alice")                 # unsupported format: skipped
+    embed_profile_tag(junk, "alice")                # garbage payload: swallowed
+    embed_profile_tag(tmp_path / "missing.jpg", "alice")  # absent file: swallowed
+
+    assert png.read_bytes() == png_bytes            # non-JPEG untouched
+    assert junk.read_bytes() == b"not a real jpeg"  # not further corrupted
+
+
+def test_synced_jpeg_is_tagged_with_the_syncing_profile(tmp_path):
+    """End to end: a photo backed up under a profile carries that profile's
+    display name in its embedded tags."""
+    app = make_app(tmp_path, detect_tags=lambda p: {"person"})
+    _write_e2e_config(tmp_path)
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    data = _jpeg_bytes()
+    _full_upload(client, token, {"person"}, name="rec.jpg", data=data)
+
+    import sqlite3
+    con = sqlite3.connect(str(tmp_path / "sync.db"))
+    stored = con.execute(
+        "SELECT stored_path FROM synced_files WHERE name='rec.jpg'"
+    ).fetchone()[0]
+    con.close()
+    assert _read_profile_tag(Path(stored)) == "profile:alice"
+
+
+def test_profile_for_path_maps_stored_path_to_display_name(tmp_path):
+    """profile_for_path resolves a stored file to its profile's display name,
+    and returns None for a path no synced file claims."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    stored = str(tmp_path / "dest" / "a.jpg")
+    store.record_synced("a.jpg", "2024-01-01T00:00:00", 10, "image/jpeg",
+                        stored, "dev-1", "alice_groupby")
+
+    assert store.profile_for_path(stored) == "alice"
+    assert store.profile_for_path(str(tmp_path / "dest" / "unknown.jpg")) is None
 
 
 def test_sqlite_data_survives_restart(tmp_path):
@@ -1575,3 +1721,91 @@ def test_concurrent_write_chunk_to_two_sessions_is_correct_and_not_globally_seri
     assert results[s2] == len(payload)
     assert (tmp_path / "inbox" / "dev-1" / s1 / "f1.part").read_bytes() == payload
     assert (tmp_path / "inbox" / "dev-2" / s2 / "f1.part").read_bytes() == payload
+
+
+# ---------------------------------------------------------------------------
+# Re-register safety (trusted devices must not be reset)
+# ---------------------------------------------------------------------------
+
+def test_reregister_trusted_device_preserves_token_and_status(tmp_path):
+    """Re-registering an already-trusted device_id must NOT null its token or
+    downgrade it to pending: the store keeps the token and 'trusted' status."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.register_device("dev-1", "Pixel")
+    token = store.approve_device("dev-1")
+    assert token
+
+    store.register_device("dev-1", "Pixel")
+
+    row = store.get_device("dev-1")
+    assert row["status"] == "trusted"
+    assert row["token"] == token
+
+
+def test_reregister_trusted_device_is_noop_returning_status_without_code(tmp_path):
+    """Re-registering a trusted device is a safe no-op: the store reports the
+    existing trusted status and issues no fresh pairing code, and the token is
+    never minted anew."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.register_device("dev-1", "Pixel")
+    token = store.approve_device("dev-1")
+
+    result = store.register_device("dev-1", "Pixel")
+    assert result["status"] == "trusted"
+    assert result.get("pairing_code") is None
+    # Token untouched.
+    assert store.get_device("dev-1")["token"] == token
+
+
+def test_register_absent_device_creates_pending_with_fresh_code(tmp_path):
+    """Registering an unknown device_id creates it as pending with a fresh
+    6-digit pairing code and a NULL token (unchanged behavior)."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+
+    result = store.register_device("dev-new", "Pixel")
+    assert result["status"] == "pending"
+    assert re.match(r"^\d{6}$", result["pairing_code"])
+
+    row = store.get_device("dev-new")
+    assert row["status"] == "pending"
+    assert row["token"] is None
+
+
+def test_reregister_pending_device_still_refreshes_without_touching_trusted(tmp_path):
+    """Re-registering an existing pending device still works (returns pending with
+    a code) and does not affect a different, already-trusted device."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.register_device("dev-trusted", "Galaxy")
+    trusted_token = store.approve_device("dev-trusted")
+
+    store.register_device("dev-pending", "Pixel")
+    result = store.register_device("dev-pending", "Pixel")
+    assert result["status"] == "pending"
+    assert re.match(r"^\d{6}$", result["pairing_code"])
+
+    # The unrelated trusted device is untouched.
+    other = store.get_device("dev-trusted")
+    assert other["status"] == "trusted"
+    assert other["token"] == trusted_token
+
+
+def test_register_device_does_not_insert_or_replace(tmp_path):
+    """The trusted-preservation guard lives at the store layer: register_device
+    must not blindly INSERT OR REPLACE (which would wipe a trusted token). A
+    re-register of a trusted device keeps its created_at/approved_at row intact."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.register_device("dev-1", "Pixel")
+    store.approve_device("dev-1")
+    before = store.get_device("dev-1")
+
+    store.register_device("dev-1", "Pixel")
+    after = store.get_device("dev-1")
+
+    assert after["created_at"] == before["created_at"]
+    assert after["approved_at"] == before["approved_at"]
+    assert after["token"] == before["token"]

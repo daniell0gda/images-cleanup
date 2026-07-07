@@ -43,7 +43,8 @@ class PairingManager(
     suspend fun register(): String {
         val deviceId = securePrefs.getOrCreateDeviceId()
         val response = api.registerDevice(RegisterDeviceRequest(deviceId = deviceId, name = deviceName))
-        return response.pairingCode
+        response.pairingCode?.let { securePrefs.setPairingCode(it) }
+        return response.pairingCode.orEmpty()
     }
 
     /**
@@ -75,7 +76,7 @@ class PairingManager(
      */
     suspend fun checkStatus(): PairingState {
         val deviceId = securePrefs.getOrCreateDeviceId()
-        val response = api.deviceStatus(deviceId)
+        val response = api.deviceStatus(deviceId, securePrefs.getPairingCode())
         return when (response.status) {
             STATUS_TRUSTED -> {
                 response.token?.let { securePrefs.setToken(it) }

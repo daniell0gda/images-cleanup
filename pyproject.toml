@@ -22,6 +22,7 @@ web = [
     "sse-starlette",
     "pydantic",
     "croniter",
+    "piexif",
 ]
 
 [project.scripts]

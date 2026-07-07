@@ -157,24 +157,45 @@ class SyncStore:
 
     # -- devices ---------------------------------------------------------
 
-    def register_device(self, device_id: str, name: str) -> str:
-        """Create (or reset) a pending device and return its pairing code.
+    def register_device(self, device_id: str, name: str) -> dict:
+        """Register a device and return its resulting pairing state.
+
+        - Absent device_id: inserted as ``pending`` with a fresh 6-digit code;
+          returns ``{"status": "pending", "pairing_code": code}``.
+        - Existing ``pending`` device: refreshes its pairing code; returns the
+          same pending shape.
+        - Existing ``trusted`` device: a SAFE NO-OP. The token and ``trusted``
+          status are left intact (never reset), no new code is minted, and it
+          returns ``{"status": "trusted"}`` so a re-register can never remotely
+          de-authenticate an approved phone.
 
         Rejects a device_id that is not a bare safe token, since it is used as a
         directory component for the device's inbox/session folders.
         """
         if not is_safe_device_id(device_id):
             raise ValueError(f"invalid device_id: {device_id!r}")
-        code = f"{secrets.randbelow(1_000_000):06d}"
         with self._lock:
-            self._conn().execute(
-                "INSERT OR REPLACE INTO devices "
-                "(device_id, name, token, status, pairing_code, created_at, approved_at) "
-                "VALUES (?, ?, NULL, 'pending', ?, ?, NULL)",
-                (device_id, name, code, _now()),
-            )
+            existing = self.get_device(device_id)
+            if existing is not None and existing["status"] == "trusted":
+                # Preserve trust: do not touch token, status, or pairing code.
+                return {"status": "trusted"}
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            if existing is None:
+                self._conn().execute(
+                    "INSERT INTO devices "
+                    "(device_id, name, token, status, pairing_code, created_at, approved_at) "
+                    "VALUES (?, ?, NULL, 'pending', ?, ?, NULL)",
+                    (device_id, name, code, _now()),
+                )
+            else:
+                # Existing non-trusted device (pending/revoked): refresh its code
+                # without wiping the row wholesale.
+                self._conn().execute(
+                    "UPDATE devices SET name=?, pairing_code=? WHERE device_id=?",
+                    (name, code, device_id),
+                )
             self._conn().commit()
-        return code
+        return {"status": "pending", "pairing_code": code}
 
     def get_device(self, device_id: str) -> sqlite3.Row | None:
         with self._lock:
@@ -328,6 +349,21 @@ class SyncStore:
                 (name, created_on, size),
             ).fetchone()
         return row["stored_path"] if row else None
+
+    def profile_for_path(self, stored_path: str) -> str | None:
+        """Return the display name of the profile that synced the file at
+        ``stored_path``, or None if the file was not placed via phone sync.
+
+        Backs the media index's ``profile`` column so the gallery can filter by
+        who backed a photo up. Matches ``stored_path`` verbatim, matching how
+        :meth:`refresh_index` reconciles the index against disk.
+        """
+        with self._lock:
+            row = self._conn().execute(
+                "SELECT profile_id FROM synced_files WHERE stored_path=?",
+                (stored_path,),
+            ).fetchone()
+        return profile_display_name(row["profile_id"]) if row else None
 
     def refresh_index(self) -> dict:
         """Re-validate the synced-file index against the destination on disk.
@@ -634,6 +670,43 @@ def _parse_created_on(value: str) -> datetime:
         return datetime.fromtimestamp(0)
 
 
+def profile_display_name(profile_id: str) -> str:
+    """Human-facing profile name embedded in tags and shown in the gallery.
+
+    Profiles are keyed as ``<user>_groupby`` (see :func:`list_profiles`); the
+    display name is just ``<user>``.
+    """
+    suffix = "_groupby"
+    return profile_id[: -len(suffix)] if profile_id.endswith(suffix) else profile_id
+
+
+_JPEG_SUFFIXES = {".jpg", ".jpeg"}
+
+
+def embed_profile_tag(path: Path, display_name: str) -> None:
+    """Record which sync profile placed this photo in its EXIF ``XPKeywords``
+    (the "Tags" field Windows Explorer shows), as ``profile:<display_name>``.
+
+    Best-effort and lossless: only JPEG files are tagged — ``piexif.insert``
+    rewrites the metadata segment without re-encoding pixels — and any failure
+    (a non-JPEG payload, an unreadable file) is swallowed so tagging can never
+    turn a completed backup into a failure.
+    """
+    if path.suffix.lower() not in _JPEG_SUFFIXES:
+        return
+    try:
+        import piexif
+
+        exif = piexif.load(str(path))
+        # XPKeywords is a UTF-16LE, null-terminated byte string.
+        exif["0th"][piexif.ImageIFD.XPKeywords] = (
+            f"profile:{display_name}".encode("utf-16le") + b"\x00\x00"
+        )
+        piexif.insert(piexif.dump(exif), str(path))
+    except Exception:
+        pass
+
+
 def place_file(
     part_path: Path,
     meta: FileMeta,
@@ -831,6 +904,9 @@ class SyncLane:
                     part.unlink()
                 outcome = {"file_id": file_id, "name": fmeta.name, "status": "unclassified"}
             elif ok and stored is not None:
+                # Stamp the syncing profile into the photo's own metadata so it
+                # travels with the file and can later be used to filter photos.
+                embed_profile_tag(stored, profile_display_name(profile_id))
                 self._store.record_synced(
                     fmeta.name, fmeta.created_on, fmeta.size, fmeta.mime_type,
                     str(stored), device_id, profile_id,

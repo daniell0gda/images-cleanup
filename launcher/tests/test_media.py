@@ -163,6 +163,94 @@ def test_rebuild_prunes_vanished_files_and_their_cache(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Profile: which sync profile placed the file (for filtering)
+# ---------------------------------------------------------------------------
+
+def test_build_records_profile_from_the_injected_lookup(tmp_path):
+    """The build stamps each row with the profile the lookup reports; files the
+    lookup does not know (e.g. not phone-synced) stay NULL."""
+    root = tmp_path / "lib"
+    make_image(root / "a.jpg")
+    make_image(root / "b.jpg")
+
+    def profile_for(path):
+        return "alice" if Path(path).name == "a.jpg" else None
+
+    indexer = MediaIndexer(
+        db_path=tmp_path / "media.db",
+        thumbs_dir=tmp_path / "thumbs",
+        proxies_dir=tmp_path / "proxies",
+        folders=[str(root)],
+        profile_for=profile_for,
+    )
+    indexer.build()
+
+    by_name = {Path(r["path"]).name: r for r in indexer.list_all()}
+    assert by_name["a.jpg"]["profile"] == "alice"
+    assert by_name["b.jpg"]["profile"] is None
+
+
+def test_build_defaults_profile_to_null_without_a_lookup(tmp_path):
+    """Without an injected lookup the column is present and NULL — the CLI/no-sync
+    case is unaffected."""
+    root = tmp_path / "lib"
+    make_image(root / "a.jpg")
+    indexer = make_indexer(tmp_path, [root])
+    indexer.build()
+    assert indexer.list_all()[0]["profile"] is None
+
+
+def test_timeline_filters_by_profile(tmp_path):
+    """timeline(profile=...) returns only rows stamped with that profile."""
+    root = tmp_path / "lib"
+    make_image(root / "a.jpg")
+    make_image(root / "b.jpg")
+    owners = {"a.jpg": "alice", "b.jpg": "bob"}
+
+    indexer = MediaIndexer(
+        db_path=tmp_path / "media.db",
+        thumbs_dir=tmp_path / "thumbs",
+        proxies_dir=tmp_path / "proxies",
+        folders=[str(root)],
+        profile_for=lambda path: owners[Path(path).name],
+    )
+    indexer.build()
+
+    names = [Path(r["path"]).name for r in indexer.timeline(profile="alice")]
+    assert names == ["a.jpg"]
+
+
+def test_existing_db_without_profile_column_is_migrated(tmp_path):
+    """A media.db created before the profile column gains it on open, and the
+    next build populates it."""
+    import sqlite3
+    db = tmp_path / "media.db"
+    con = sqlite3.connect(str(db))
+    con.executescript(
+        "CREATE TABLE media ("
+        " id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, root TEXT NOT NULL,"
+        " kind TEXT NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL,"
+        " date_taken TEXT NOT NULL, width INTEGER, height INTEGER,"
+        " video_websafe INTEGER, thumb_ready INTEGER NOT NULL DEFAULT 0);"
+    )
+    con.commit()
+    con.close()
+
+    root = tmp_path / "lib"
+    make_image(root / "a.jpg")
+    indexer = MediaIndexer(
+        db_path=db,
+        thumbs_dir=tmp_path / "thumbs",
+        proxies_dir=tmp_path / "proxies",
+        folders=[str(root)],
+        profile_for=lambda path: "alice",
+    )
+    indexer.build()
+
+    assert indexer.list_all()[0]["profile"] == "alice"
+
+
+# ---------------------------------------------------------------------------
 # Robustness: missing roots & per-file errors
 # ---------------------------------------------------------------------------
 

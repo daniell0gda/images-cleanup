@@ -43,9 +43,13 @@ def _build_app(tmp_path: Path, folders):
 
 def _trust(client: TestClient, device_id="dev-1") -> str:
     """Register + approve a device and return its bearer token."""
-    client.post("/api/sync/devices", json={"device_id": device_id, "name": "Pixel"})
+    code = client.post(
+        "/api/sync/devices", json={"device_id": device_id, "name": "Pixel"}
+    ).json()["pairing_code"]
     client.post(f"/api/sync/devices/{device_id}/approve")
-    status = client.get(f"/api/sync/devices/{device_id}/status").json()
+    status = client.get(
+        f"/api/sync/devices/{device_id}/status", headers={"X-Pairing-Code": code}
+    ).json()
     return status["token"]
 
 
@@ -83,6 +87,35 @@ def test_timeline_first_page_newest_first_with_cursor(tmp_path):
     # Newest-first ordering (date_taken DESC, id DESC).
     full = app.state.media_indexer.timeline(limit=100)
     assert [i["id"] for i in body["items"]] == [r["id"] for r in full[:2]]
+
+
+def test_timeline_filters_by_profile_query(tmp_path):
+    """?profile= restricts the page to photos attributed to that sync profile,
+    and each item carries its profile."""
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+    _make_image(root / "b.jpg")
+    app = _build_app(tmp_path, [root])
+
+    # Seed the sync index so a.jpg is attributed to the 'alice' profile; the
+    # media build then reads it via the wired profile_for lookup.
+    from launcher.sync import SyncStore
+    store = SyncStore(Path(os.environ["SYNC_DB"]))
+    store.record_synced("a.jpg", "2024-01-01T00:00:00", (root / "a.jpg").stat().st_size,
+                        "image/jpeg", str(root / "a.jpg"), "dev-1", "alice_groupby")
+
+    _index(app)
+    client = TestClient(app)
+    token = _trust(client)
+
+    body = client.get("/api/media?profile=alice", headers=_auth(token)).json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["profile"] == "alice"
+
+    # Unfiltered, both photos are present and b.jpg has no profile.
+    everything = client.get("/api/media", headers=_auth(token)).json()["items"]
+    profiles = {i["profile"] for i in everything}
+    assert profiles == {"alice", None}
 
 
 def test_timeline_pages_have_no_overlap_no_gaps(tmp_path):

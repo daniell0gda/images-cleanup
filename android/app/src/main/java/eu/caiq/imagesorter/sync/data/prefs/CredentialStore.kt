@@ -8,5 +8,10 @@ package eu.caiq.imagesorter.sync.data.prefs
 interface CredentialStore : TokenStore {
     fun getOrCreateDeviceId(): String
     fun setToken(token: String?)
+
+    /** The pairing code learned from register, replayed on status polls, or null. */
+    fun getPairingCode(): String?
+    fun setPairingCode(code: String?)
+
     fun clearTokenForRepair()
 }

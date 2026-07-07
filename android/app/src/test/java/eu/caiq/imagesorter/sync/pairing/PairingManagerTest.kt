@@ -89,6 +89,42 @@ class PairingManagerTest {
     }
 
     @Test
+    fun checkStatusSendsStoredPairingCodeAsHeader() = runTest {
+        server.enqueue(MockResponse().setBody("""{"status":"pending"}"""))
+        val creds = FakeCredentialStore().apply { setPairingCode("424242") }
+
+        manager(creds).checkStatus()
+
+        val request = server.takeRequest()
+        assertTrue(request.path!!.endsWith("/status"))
+        assertEquals("424242", request.getHeader("X-Pairing-Code"))
+    }
+
+    @Test
+    fun registerPersistsPairingCodeForLaterPolling() = runTest {
+        server.enqueue(MockResponse().setBody("""{"status":"pending","pairing_code":"778899"}"""))
+        val creds = FakeCredentialStore(deviceId = "dev-9")
+
+        manager(creds).register()
+
+        assertEquals("778899", creds.currentPairingCode)
+    }
+
+    @Test
+    fun checkStatusWithoutStoredCodeDoesNotCrashAndReportsPending() = runTest {
+        // No pairing code stored (e.g. app data cleared): status omits the token,
+        // so the phone stays pending without crashing.
+        server.enqueue(MockResponse().setBody("""{"status":"pending"}"""))
+        val creds = FakeCredentialStore()
+
+        val state = manager(creds).checkStatus()
+
+        assertTrue(state is PairingState.Pending)
+        assertNull(server.takeRequest().getHeader("X-Pairing-Code"))
+        assertNull(creds.currentToken)
+    }
+
+    @Test
     fun beginPairingRecoversTrustWithoutRegisteringWhenServerAlreadyTrusts() = runTest {
         // The server already trusts this device (the phone just lost its local
         // token). beginPairing must adopt the token and must NOT POST /devices,

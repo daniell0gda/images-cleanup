@@ -1,6 +1,7 @@
 """Launcher FastAPI server — management UI for image-sorter."""
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import re
@@ -99,6 +100,54 @@ def shutdown_handler(state: _JobState) -> None:
             pass
 
 
+# Headers a reverse proxy (e.g. Traefik) sets on every forwarded request. Their
+# presence marks a request as coming from the public internet rather than a
+# direct LAN connection to the published port. A client on the LAN cannot make a
+# proxied request lose these, and a public client cannot strip them, so absence
+# reliably means "local".
+_PROXY_HEADERS = ("x-forwarded-for", "x-forwarded-host", "forwarded")
+
+
+def _is_proxied(headers) -> bool:
+    return any(h in headers for h in _PROXY_HEADERS)
+
+
+def _is_public_path(method: str, path: str) -> bool:
+    """Whether a request may be served to clients arriving through the public
+    reverse proxy. Everything not listed here is management/admin and is reachable
+    only from a direct (non-proxied) LAN connection.
+
+    The public surface is exactly what the Android app and shared-album links
+    need: the reachability probe, the device-token-protected media/albums/upload
+    lanes, the two unauthenticated pairing steps (register + status poll), and the
+    tokenized /share links. Device *listing*, *approve* and *revoke* are excluded
+    on purpose — approving a device is the trust decision itself and must stay on
+    the LAN, alongside the whole management UI (``/``), jobs and settings.
+    """
+    if path == "/api/ping":
+        return True
+    if path.startswith("/share/"):
+        return True
+    if path == "/api/albums" or path.startswith("/api/albums/"):
+        return True
+    # App media content, but never the admin build endpoints under the same tree.
+    if path.startswith("/api/media/build"):
+        return False
+    if path == "/api/media" or path.startswith("/api/media/"):
+        return True
+    if path == "/api/sync/profiles":
+        return True
+    if path in ("/api/sync/reconcile", "/api/sync/verify"):
+        return True
+    if path == "/api/sync/sessions" or path.startswith("/api/sync/sessions/"):
+        return True
+    if method == "POST" and path == "/api/sync/devices":
+        return True
+    if method == "GET" and path.startswith("/api/sync/devices/") and path.endswith("/status"):
+        return True
+    return False
+
+
 def create_app(
     state: _JobState | None = None,
     dist_dir: Path | None = None,
@@ -112,6 +161,25 @@ def create_app(
         state = _JobState()
 
     app = FastAPI()
+
+    @app.middleware("http")
+    async def _guard_admin_surface(request: Request, call_next):
+        # Requests forwarded by the public reverse proxy may only touch the
+        # public surface; the management UI + admin API answer 404 (hidden) so
+        # they are reachable only from a direct LAN connection.
+        if _is_proxied(request.headers) and not _is_public_path(
+            request.method, request.url.path
+        ):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        return await call_next(request)
+
+    @app.get("/api/ping")
+    async def get_ping():
+        # Unauthenticated reachability probe used by the Android app's connect
+        # screen. Public on purpose; reveals nothing about the server.
+        return {"status": "ok"}
 
     @app.get("/api/config")
     async def get_config():
@@ -268,6 +336,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         proxies_dir=media_mod.media_proxies_dir(),
         folders=media_folders,
         thumbnail=media_mod.make_thumbnail_hook(media_mod.media_thumbs_dir()),
+        profile_for=store.profile_for_path,
     )
     app.state.media_indexer = media_indexer
 
@@ -337,24 +406,31 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     @app.post("/api/sync/devices")
     async def sync_register(req: _DeviceRequest):
         try:
-            code = store.register_device(req.device_id, req.name)
+            return store.register_device(req.device_id, req.name)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid device_id")
-        return {"status": "pending", "pairing_code": code}
 
     @app.get("/api/sync/devices/{device_id}/status")
-    async def sync_device_status(device_id: str):
+    async def sync_device_status(
+        device_id: str,
+        x_pairing_code: str | None = Header(default=None),
+    ):
         device = store.get_device(device_id)
         if device is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         result = {"status": device["status"]}
+        # The token is a credential: only hand it back to a caller who proves
+        # possession of the device's pairing code. The code is compared with a
+        # constant-time check to avoid a timing side-channel, and is never
+        # echoed back in the response body (it is a secret).
         if device["status"] == "trusted":
-            result["token"] = device["token"]
-        elif device["status"] == "pending":
-            # Surface the code so a phone that lost local state (e.g. cleared app
-            # data) can re-display it without re-registering — re-registering would
-            # reset an already-known device back to pending.
-            result["pairing_code"] = device["pairing_code"]
+            stored_code = device["pairing_code"]
+            if (
+                x_pairing_code is not None
+                and stored_code is not None
+                and hmac.compare_digest(x_pairing_code, stored_code)
+            ):
+                result["token"] = device["token"]
         return result
 
     @app.post("/api/sync/devices/{device_id}/approve")
@@ -546,6 +622,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             "date_taken": row["date_taken"],
             "width": row["width"],
             "height": row["height"],
+            "profile": row["profile"],
         }
 
     @app.get("/api/media")
@@ -554,6 +631,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         limit: int = _MEDIA_PAGE_DEFAULT,
         from_date: str | None = None,
         before: str | None = None,
+        profile: str | None = None,
         authorization: str | None = Header(default=None),
     ):
         _require_device(authorization)
@@ -563,7 +641,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             # Upward (prepend) page for bidirectional seek: photos strictly newer
             # than the anchor, ascending so the closest-newer photo comes first.
             before_key = _decode_cursor(before)
-            rows = media_indexer.timeline(limit=limit + 1, before=before_key)
+            rows = media_indexer.timeline(limit=limit + 1, before=before_key, profile=profile)
             has_more = len(rows) > limit
             page = rows[:limit]
             prev_cursor = (
@@ -579,7 +657,8 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         on_or_before = _parse_from_date(from_date) if from_date is not None else None
         after = _decode_cursor(cursor) if cursor else None
         # Fetch one extra row to know whether a further (older) page exists.
-        rows = media_indexer.timeline(limit=limit + 1, after=after, on_or_before=on_or_before)
+        rows = media_indexer.timeline(limit=limit + 1, after=after, on_or_before=on_or_before,
+                                      profile=profile)
         has_more = len(rows) > limit
         page = rows[:limit]
         next_cursor = (
@@ -591,7 +670,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         prev_cursor = None
         if after is None and page:
             newer = media_indexer.timeline(
-                limit=1, before=(page[0]["date_taken"], page[0]["id"])
+                limit=1, before=(page[0]["date_taken"], page[0]["id"]), profile=profile
             )
             if newer:
                 prev_cursor = _encode_cursor(page[0]["date_taken"], page[0]["id"])

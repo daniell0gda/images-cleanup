@@ -35,11 +35,12 @@ interface SyncApi {
     // --- Reachability probe (no auth) ---
 
     /**
-     * Unauthenticated reachability probe. The launcher's `GET /api/users`
-     * needs no token; we only inspect the HTTP status to decide whether the
-     * server is reachable and responding, so the body is left unparsed.
+     * Unauthenticated reachability probe. The launcher's `GET /api/ping` needs
+     * no token and is part of the public surface (reachable through the reverse
+     * proxy), so this works over both LAN and the public HTTPS address; we only
+     * inspect the HTTP status to decide whether the server is reachable.
      */
-    @GET("api/users")
+    @GET("api/ping")
     suspend fun ping(): retrofit2.Response<okhttp3.ResponseBody>
 
     // --- Pairing (no auth) ---
@@ -49,9 +50,15 @@ interface SyncApi {
         @Body body: RegisterDeviceRequest,
     ): RegisterDeviceResponse
 
+    /**
+     * Poll a device's trust state. The pairing code travels as the
+     * `X-Pairing-Code` header; the server only returns the bearer token when it
+     * matches the device's stored code. A null code omits the header (no token).
+     */
     @GET("api/sync/devices/{deviceId}/status")
     suspend fun deviceStatus(
         @Path("deviceId") deviceId: String,
+        @Header("X-Pairing-Code") pairingCode: String?,
     ): DeviceStatusResponse
 
     // --- Profiles ---

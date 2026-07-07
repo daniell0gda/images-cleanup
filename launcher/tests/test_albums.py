@@ -200,9 +200,13 @@ def _build_app(tmp_path: Path, folders, public_base_url=""):
 
 
 def _auth(client: TestClient, device_id="dev-1") -> dict:
-    client.post("/api/sync/devices", json={"device_id": device_id, "name": "Pixel"})
+    code = client.post(
+        "/api/sync/devices", json={"device_id": device_id, "name": "Pixel"}
+    ).json()["pairing_code"]
     client.post(f"/api/sync/devices/{device_id}/approve")
-    token = client.get(f"/api/sync/devices/{device_id}/status").json()["token"]
+    token = client.get(
+        f"/api/sync/devices/{device_id}/status", headers={"X-Pairing-Code": code}
+    ).json()["token"]
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -341,7 +345,7 @@ def test_get_album_items_timeline_shape_newest_first(tmp_path):
     assert resp.status_code == 200
     items = resp.json()
     assert len(items) == len(mids)
-    assert set(items[0].keys()) == {"id", "kind", "date_taken", "width", "height"}
+    assert set(items[0].keys()) == {"id", "kind", "date_taken", "width", "height", "profile"}
     dates = [it["date_taken"] for it in items]
     assert dates == sorted(dates, reverse=True)
 

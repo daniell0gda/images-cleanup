@@ -30,9 +30,14 @@ class FakeCredentialStore(
     var repairCleared = false
         private set
 
+    var currentPairingCode: String? = null
+        private set
+
     override fun getOrCreateDeviceId(): String = deviceId
     override fun getToken(): String? = currentToken
     override fun setToken(token: String?) { currentToken = token }
+    override fun getPairingCode(): String? = currentPairingCode
+    override fun setPairingCode(code: String?) { currentPairingCode = code }
     override fun clearTokenForRepair() {
         currentToken = null
         repairCleared = true
