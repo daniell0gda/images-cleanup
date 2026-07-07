@@ -1,3 +1,3 @@
 1. rename config so that it's clear what sections are for images and what for videos
 2. sync should always start when app is opened
-3. split server.py into smaller modules
+3. When not-people are marked a that they should be synced, they should dissapear right away from this list
