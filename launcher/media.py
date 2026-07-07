@@ -686,7 +686,11 @@ class MediaIndexer:
         return status.snapshot()
 
     def _walk(self, root: Path):
-        for dirpath, _dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Destinations are grouped <year>/<month>/..., so descending order
+            # visits the newest year/month subfolders first, indexing (and
+            # thumbnailing) the most relevant photos before the older backlog.
+            dirnames.sort(reverse=True)
             for name in filenames:
                 path = Path(dirpath) / name
                 if _kind_for(path) is not None:
