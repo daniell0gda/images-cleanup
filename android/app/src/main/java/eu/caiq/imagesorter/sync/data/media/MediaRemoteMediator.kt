@@ -113,13 +113,17 @@ class MediaRemoteMediator(
 
                 LoadType.REFRESH -> {
                     val fromDate = seekCursor.getAndSet(null)
-                    val page = api.media(cursor = null, limit = pageSize, fromDate = fromDate)
+                    // A date-seek fetches a much smaller page than normal scrolling: the jump
+                    // only needs to land the user near the target date quickly, not front-load
+                    // a full page's worth of thumbnails before the view can settle.
+                    val refreshLimit = if (fromDate != null) SEEK_PAGE_SIZE else pageSize
+                    val page = api.media(cursor = null, limit = refreshLimit, fromDate = fromDate)
                     // After a seek, eagerly pull ONE page of newer photos above the anchor so
                     // it lands off the prepend edge; without it the anchor sits at index 0 and
                     // Paging cascades PREPEND back to latest. Skip for non-seek refresh (no
                     // newer photos exist) and when the seek already landed on the latest page.
                     val newer = if (fromDate != null && page.prevCursor != null) {
-                        api.media(before = page.prevCursor, limit = pageSize)
+                        api.media(before = page.prevCursor, limit = SEEK_PAGE_SIZE)
                     } else {
                         null
                     }
@@ -191,5 +195,12 @@ class MediaRemoteMediator(
 
     companion object {
         const val DEFAULT_PAGE_SIZE = 100
+
+        /**
+         * Page size used only for a date-seek's REFRESH (the on-or-before page and its eager
+         * newer buddy). Smaller than [DEFAULT_PAGE_SIZE] so a Go-To-Date jump has less to fetch
+         * and render before it can land; normal scroll APPEND/PREPEND keep the full page size.
+         */
+        const val SEEK_PAGE_SIZE = 50
     }
 }
