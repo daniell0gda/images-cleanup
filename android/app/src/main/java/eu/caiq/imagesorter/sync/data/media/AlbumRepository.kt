@@ -16,6 +16,12 @@ import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
  */
 class AlbumRepository(private val api: AlbumApi) {
 
+    /**
+     * The auto-refresh floor for the Albums list. Owned here (singleton) so the 30s throttle
+     * survives tab switches and rotation — the UI reads it from the loop and the manual pull.
+     */
+    val refreshThrottle = RefreshThrottle()
+
     suspend fun albums(): List<AlbumDto> = api.albums()
 
     suspend fun create(name: String, mediaIds: List<Long>, createdBy: String?): AlbumDto =

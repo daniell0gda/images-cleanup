@@ -33,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,6 +41,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
@@ -56,6 +59,7 @@ import eu.caiq.imagesorter.sync.data.media.insertDayHeaders
 import eu.caiq.imagesorter.sync.serverAddressToBaseUrl
 import eu.caiq.imagesorter.sync.ui.components.MediaThumb
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -172,6 +176,7 @@ fun AlbumTile(
  * LOCAL state ([selectedAlbumId]) with its own back affordance (§3.7) — NOT a new
  * global AppScreen.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumsScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -206,12 +211,74 @@ fun AlbumsScreen(modifier: Modifier = Modifier) {
             onBack = { selectedAlbumId = null; reloadKey++ },
         )
     } else {
-        AlbumsList(
-            albums = albums,
-            cover = { album -> coverRequest(context, urls, token, album) },
-            onOpen = { selectedAlbumId = it },
-            modifier = modifier,
-        )
+        // Only the tile list is wired for auto-refresh / pull-to-refresh. Placing the loop and
+        // the PullToRefreshBox in this branch means opening album detail (the `if` branch)
+        // disposes them — the desired scoping. AlbumDetail / AddPhotosPicker keep their own
+        // reload-on-entry behavior.
+        var albumsRefreshing by remember { mutableStateOf(false) }
+        var manualRefreshing by remember { mutableStateOf(false) }
+        val listScope = rememberCoroutineScope()
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+        // Guarded reload shared by the timer and the pull: the transient flag stops a second
+        // repo.albums() running concurrently. It leaves manualRefreshing untouched, so an
+        // auto-refresh is silent (no pull spinner).
+        val reloadAlbums: suspend (AlbumRepository) -> Unit = { r ->
+            albumsRefreshing = true
+            try {
+                albums = runCatching { r.albums() }.getOrDefault(emptyList())
+            } finally {
+                albumsRefreshing = false
+            }
+        }
+
+        if (repo != null) {
+            // Scoped to RESUMED: cancels when backgrounded or on entering album detail (this
+            // branch leaves composition), re-runs on return. The persistent AlbumRepository
+            // throttle means rapid re-entry within 30s does not re-refresh.
+            LaunchedEffect(lifecycleOwner, repo) {
+                lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                    autoRefreshLoop(
+                        now = { System.currentTimeMillis() },
+                        isRefreshing = { albumsRefreshing },
+                        gateOpen = { true },
+                        throttle = repo.refreshThrottle,
+                        refresh = { reloadAlbums(repo) },
+                    )
+                }
+            }
+        }
+
+        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+            isRefreshing = manualRefreshing,
+            onRefresh = {
+                manualRefreshing = true
+                listScope.launch {
+                    try {
+                        when {
+                            repo == null -> {}
+                            // A refresh (auto) is already in flight: don't start a second — just
+                            // keep the spinner until that one settles.
+                            albumsRefreshing -> snapshotFlow { albumsRefreshing }.first { !it }
+                            // Manual pull bypasses the 30s floor, then records the refresh time.
+                            else -> {
+                                reloadAlbums(repo)
+                                repo.refreshThrottle.markRefreshed(System.currentTimeMillis())
+                            }
+                        }
+                    } finally {
+                        manualRefreshing = false
+                    }
+                }
+            },
+            modifier = modifier.fillMaxSize(),
+        ) {
+            AlbumsList(
+                albums = albums,
+                cover = { album -> coverRequest(context, urls, token, album) },
+                onOpen = { selectedAlbumId = it },
+            )
+        }
     }
 }
 

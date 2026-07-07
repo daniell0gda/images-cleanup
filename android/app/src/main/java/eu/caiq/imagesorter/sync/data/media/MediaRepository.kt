@@ -31,6 +31,12 @@ class MediaRepository(
     private val mediator = MediaRemoteMediator(api, db, pageSize)
     private val seekActive = MutableStateFlow(false)
 
+    /**
+     * The auto-refresh floor for the Photos timeline. Owned here (singleton) so the 30s throttle
+     * survives tab switches and rotation — the UI reads it from the loop and the manual pull.
+     */
+    val refreshThrottle = RefreshThrottle()
+
     fun timeline(): Flow<PagingData<MediaEntity>> =
         Pager(
             config = PagingConfig(pageSize = pageSize, enablePlaceholders = false),

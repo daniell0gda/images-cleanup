@@ -55,6 +55,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
@@ -73,6 +76,7 @@ import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.MediaThumb
 import eu.caiq.imagesorter.sync.ui.components.previewIndexAfterDelete
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -239,6 +243,7 @@ private fun VideoBadge(modifier: Modifier = Modifier) {
  * renders [PhotosGrid] with Coil-loaded thumbnails, and opens [MediaPreviewPager]
  * on tap — Coil previews for images, ExoPlayer (non-zoomable page) for videos.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun PhotosScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -274,26 +279,69 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     val deviceName = remember { android.os.Build.MODEL }
     val inSelectionMode = selectedIds.isNotEmpty()
 
+    val repository = remember(locator) { runCatching { locator.mediaRepository }.getOrNull() }
+    val seekActiveFlow = remember(repository) { repository?.isSeekActive() ?: MutableStateFlow(false) }
+    val isSeekActive by seekActiveFlow.collectAsState()
+    // The single in-progress signal shared by the auto-refresh timer and the pull gesture,
+    // derived from Paging load state — no separately hand-maintained refreshing boolean.
+    val isRefreshing = lazyItems?.loadState?.mediator?.refresh is LoadState.Loading
+    // Set only by a user pull; drives the pull spinner so auto-refreshes show no spinner.
+    var manualRefreshing by remember { mutableStateOf(false) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    // Track a manual pull's refresh from start to settle, then hide the pull spinner.
+    LaunchedEffect(manualRefreshing, lazyItems) {
+        if (!manualRefreshing) return@LaunchedEffect
+        val li = lazyItems
+        if (li == null) {
+            manualRefreshing = false
+            return@LaunchedEffect
+        }
+        snapshotFlow { li.loadState.mediator?.refresh is LoadState.Loading }.first { it }
+        snapshotFlow { li.loadState.mediator?.refresh is LoadState.Loading }.first { !it }
+        manualRefreshing = false
+    }
+
     // Back exits multi-select instead of leaving the tab. (The fullscreen preview
     // handles its own back via MediaPreviewPager and takes precedence when open.)
     BackHandler(enabled = inSelectionMode) { selectedIds = emptySet() }
 
     Box(modifier = modifier.fillMaxSize()) {
-        PhotosGrid(
-            items = items,
-            onOpen = { previewIndex = it },
-            state = gridState,
-            selectedIds = selectedIds,
-            inSelectionMode = inSelectionMode,
-            onToggle = { entity ->
-                selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
+        // Pull-to-refresh wraps only the scrollable grid so its indicator sits over the grid
+        // while the overlays (LatestChip, FAB, selection bar, preview, snackbar) stay on top.
+        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+            isRefreshing = manualRefreshing,
+            onRefresh = {
+                manualRefreshing = true
+                val li = lazyItems
+                // Manual pull bypasses the 30s floor; skip while a refresh is already in flight
+                // (the spinner just tracks that one). A date seek jumps back to newest first.
+                if (repository != null && li != null && !isRefreshing) {
+                    scope.launch {
+                        if (isSeekActive) repository.resetToLatest()
+                        li.refresh()
+                        repository.refreshThrottle.markRefreshed(System.currentTimeMillis())
+                    }
+                }
             },
-            onLongPress = { entity -> selectedIds = selectedIds + entity.id },
-        ) { entity, cellModifier ->
-            MediaThumb(
-                model = authedRequest(context, urls.thumb(entity.id), token),
-                modifier = cellModifier,
-            )
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            PhotosGrid(
+                items = items,
+                onOpen = { previewIndex = it },
+                state = gridState,
+                selectedIds = selectedIds,
+                inSelectionMode = inSelectionMode,
+                onToggle = { entity ->
+                    selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
+                },
+                onLongPress = { entity -> selectedIds = selectedIds + entity.id },
+            ) { entity, cellModifier ->
+                MediaThumb(
+                    model = authedRequest(context, urls.thumb(entity.id), token),
+                    modifier = cellModifier,
+                )
+            }
         }
 
         if (inSelectionMode) {
@@ -370,7 +418,6 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
             ) { entity -> MediaPreviewContent(entity, urls, token) }
         }
 
-        val repository = remember(locator) { runCatching { locator.mediaRepository }.getOrNull() }
         if (repository != null) {
             // A Go-To-Date confirm sets [pendingSeekDate]; this effect arms the seek, refreshes,
             // and — crucially — WAITS for the refresh to actually present its data before anchoring.
@@ -421,7 +468,34 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                 }
                 pendingSeekDate = null
             }
-            val isSeekActive by repository.isSeekActive().collectAsState()
+            val li = lazyItems
+            if (li != null) {
+                // Gate re-reads live Compose state each tick (derivedStateOf tracks all inputs),
+                // so the loop's captured lambda never sees a stale value.
+                val autoRefreshGate = remember {
+                    derivedStateOf {
+                        shouldAutoRefresh(
+                            gridState.firstVisibleItemIndex,
+                            isSeekActive,
+                            previewIndex != null,
+                            selectedIds.isNotEmpty(),
+                        )
+                    }
+                }
+                // Scoped to RESUMED: stops when backgrounded/on tab switch, re-runs on return.
+                // The persistent MediaRepository throttle keeps rapid re-entry from re-refreshing.
+                LaunchedEffect(lifecycleOwner, li, repository) {
+                    lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                        autoRefreshLoop(
+                            now = { System.currentTimeMillis() },
+                            isRefreshing = { li.loadState.mediator?.refresh is LoadState.Loading },
+                            gateOpen = { autoRefreshGate.value },
+                            throttle = repository.refreshThrottle,
+                            refresh = { li.refresh() },
+                        )
+                    }
+                }
+            }
             val showLatest by remember(isSeekActive) {
                 derivedStateOf { shouldShowLatestChip(gridState.firstVisibleItemIndex, isSeekActive) }
             }
