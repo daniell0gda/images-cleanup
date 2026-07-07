@@ -39,7 +39,17 @@ class MediaRepository(
 
     fun timeline(): Flow<PagingData<MediaEntity>> =
         Pager(
-            config = PagingConfig(pageSize = pageSize, enablePlaceholders = false),
+            config = PagingConfig(
+                pageSize = pageSize,
+                // Left at the default (== pageSize), landing a seek's anchor within this many
+                // items of the loaded edge auto-fires PREPEND with no user scroll — since the
+                // seek only eager-loads SEEK_PAGE_SIZE (50) newer items above the anchor, that
+                // silently cascaded PREPEND page after page toward latest. Keep this well below
+                // SEEK_PAGE_SIZE so nothing auto-fires at rest; real upward scrolling still
+                // triggers it once the user nears the loaded edge.
+                prefetchDistance = SEEK_PREFETCH_DISTANCE,
+                enablePlaceholders = false,
+            ),
             remoteMediator = mediator,
             pagingSourceFactory = { db.mediaDao().pagingSource() },
         ).flow
@@ -64,4 +74,9 @@ class MediaRepository(
 
     /** The server's year → month → day tree of dates that have indexed photos. */
     suspend fun availableDates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = api.dates()
+
+    companion object {
+        /** Below [MediaRemoteMediator.SEEK_PAGE_SIZE] so a landed seek never auto-fires PREPEND. */
+        private const val SEEK_PREFETCH_DISTANCE = 20
+    }
 }
