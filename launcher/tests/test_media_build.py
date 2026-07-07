@@ -256,3 +256,94 @@ def test_media_cron_runs_real_build(tmp_path):
     assert app.state.media_indexer.list_all()
     snap = app.state.media_indexer.status()
     assert snap["last_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Single-file incremental indexing (index_path)
+# ---------------------------------------------------------------------------
+
+def _make_indexer(tmp_path: Path, roots):
+    from launcher.media import MediaIndexer
+
+    return MediaIndexer(
+        db_path=tmp_path / "media.db",
+        thumbs_dir=tmp_path / "thumbs",
+        proxies_dir=tmp_path / "proxies",
+        folders=[str(r) for r in roots],
+    )
+
+
+def test_index_path_indexes_single_file_without_full_walk(tmp_path):
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+    # A second file exists but is never handed to index_path.
+    _make_image(root / "b.jpg")
+
+    indexer = _make_indexer(tmp_path, [root])
+    indexer.index_path(root / "a.jpg")
+
+    assert {Path(r["path"]).name for r in indexer.list_all()} == {"a.jpg"}
+    assert {Path(r["path"]).name for r in indexer.timeline()} == {"a.jpg"}
+
+
+def test_index_path_sets_root_to_containing_configured_folder(tmp_path):
+    root_a = tmp_path / "one"
+    root_b = tmp_path / "two"
+    _make_image(root_a / "x.jpg")
+    _make_image(root_b / "nested" / "y.jpg")
+
+    indexer = _make_indexer(tmp_path, [root_a, root_b])
+    indexer.index_path(root_b / "nested" / "y.jpg")
+
+    row = indexer.list_all()[0]
+    assert row["root"] == str(root_b)
+
+
+def test_index_path_upserts_on_repeat_without_duplicate_row(tmp_path):
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+
+    indexer = _make_indexer(tmp_path, [root])
+    first_id = indexer.index_path(root / "a.jpg")
+    second_id = indexer.index_path(root / "a.jpg")
+
+    rows = indexer.list_all()
+    assert len(rows) == 1
+    assert first_id == second_id == rows[0]["id"]
+
+
+def test_full_build_after_incremental_leaves_exactly_one_row(tmp_path):
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+
+    indexer = _make_indexer(tmp_path, [root])
+    indexer.index_path(root / "a.jpg")
+    indexer.build(force=True)
+
+    rows = [r for r in indexer.list_all() if Path(r["path"]).name == "a.jpg"]
+    assert len(rows) == 1
+
+
+def test_timeline_without_before_is_newest_first(tmp_path):
+    root = tmp_path / "lib"
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        _make_image(root / name)
+
+    indexer = _make_indexer(tmp_path, [root])
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        indexer.index_path(root / name)
+
+    # Assign known capture dates; c shares b's date to exercise the id tiebreak.
+    ids = {Path(r["path"]).name: r["id"] for r in indexer.list_all()}
+    conn = indexer._conn()
+    conn.execute("UPDATE media SET date_taken=? WHERE id=?",
+                 ("2024-01-01T00:00:00+00:00", ids["a.jpg"]))
+    conn.execute("UPDATE media SET date_taken=? WHERE id=?",
+                 ("2024-03-01T00:00:00+00:00", ids["b.jpg"]))
+    conn.execute("UPDATE media SET date_taken=? WHERE id=?",
+                 ("2024-03-01T00:00:00+00:00", ids["c.jpg"]))
+    conn.commit()
+
+    ordered = [Path(r["path"]).name for r in indexer.timeline()]
+    # Newest date first; equal dates tiebreak by id DESC (c indexed after b).
+    assert ordered == ["c.jpg", "b.jpg", "a.jpg"]

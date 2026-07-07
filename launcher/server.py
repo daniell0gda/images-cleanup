@@ -339,6 +339,9 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         profile_for=store.profile_for_path,
     )
     app.state.media_indexer = media_indexer
+    # Feed synced files into the gallery index the moment they are placed, so a
+    # phone backup shows up without waiting for the next scheduled build.
+    lane.media_indexer = media_indexer
 
     album_store = AlbumStore(media_mod.media_db_path())
     app.state.album_store = album_store

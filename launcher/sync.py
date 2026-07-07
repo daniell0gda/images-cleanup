@@ -670,6 +670,18 @@ def _parse_created_on(value: str) -> datetime:
         return datetime.fromtimestamp(0)
 
 
+def _created_on_date_taken(value: str) -> str | None:
+    """The phone-supplied created_on as an ISO ``date_taken`` fallback, or None.
+
+    Returns None (not the epoch) when created_on is missing or unparseable so the
+    media index degrades to the file mtime rather than to 1970.
+    """
+    try:
+        return datetime.fromisoformat(value).isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
 def profile_display_name(profile_id: str) -> str:
     """Human-facing profile name embedded in tags and shown in the gallery.
 
@@ -834,6 +846,11 @@ class SyncLane:
         # and startup_reconcile) never place the same session's files twice.
         self._session_locks: dict[str, threading.Lock] = {}
         self._session_locks_guard = threading.Lock()
+        # Optional media index, attached post-construction by the server (the
+        # indexer is created after the lane). When present, every synced file is
+        # added to the gallery index immediately; when absent, indexing is
+        # skipped so the lane stays usable in isolation.
+        self.media_indexer = None
 
     def _session_lock(self, session_id: str) -> threading.Lock:
         with self._session_locks_guard:
@@ -911,6 +928,7 @@ class SyncLane:
                     fmeta.name, fmeta.created_on, fmeta.size, fmeta.mime_type,
                     str(stored), device_id, profile_id,
                 )
+                self._index_synced(stored, fmeta)
                 outcome = {"file_id": file_id, "name": fmeta.name, "status": "synced"}
             else:
                 # Failed: delete the temp copy (phone keeps the original). The
@@ -937,6 +955,22 @@ class SyncLane:
 
         self._cleanup_if_empty(sdir)
         return outcomes
+
+    def _index_synced(self, stored: Path, fmeta: FileMeta) -> None:
+        """Add a just-placed synced file to the media index so it shows in the
+        gallery immediately, deriving date_taken from the phone-supplied
+        created_on when the file carries no EXIF capture date. No-op (and never
+        fatal) when no media index is attached."""
+        if self.media_indexer is None:
+            return
+        try:
+            self.media_indexer.index_path(
+                stored, fallback_date_taken=_created_on_date_taken(fmeta.created_on)
+            )
+        except Exception:
+            # Indexing must never turn a completed backup into a failure; the
+            # next full build() will pick the file up regardless.
+            pass
 
     def _attempt_with_retry(self, part: Path, fmeta: FileMeta, config, force_place: bool = False):
         """Place a file, auto-retrying retryable failures up to max_attempts.

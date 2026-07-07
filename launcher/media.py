@@ -623,6 +623,42 @@ class MediaIndexer:
         finally:
             self._build_lock.release()
 
+    def index_path(self, path, fallback_date_taken: str | None = None) -> int | None:
+        """Index a single already-placed file into the index, upserting one row.
+
+        No folder walk is performed: the containing configured root is resolved
+        and the same ``_index_file`` path used by ``build()`` runs for just this
+        file, so its row (kind, root, metadata, thumbnail) is identical to a full
+        build. Returns the row's media id, or ``None`` when the path lies outside
+        every configured root or is not an allowed media type.
+
+        ``fallback_date_taken`` (an ISO string) is used as ``date_taken`` when the
+        file carries no EXIF capture date, in place of the file mtime — the sync
+        lane passes the phone-supplied ``created_on`` so a synced photo lands at
+        its true chronological position rather than at its sync time.
+        """
+        path = Path(path)
+        root = self._root_for(path)
+        if root is None:
+            return None
+        self._index_file(root, path, BuildStatus(), set(), fallback_date_taken)
+        with self._lock:
+            row = self._conn().execute(
+                "SELECT id FROM media WHERE path=?", (str(path),)
+            ).fetchone()
+        return row["id"] if row is not None else None
+
+    def _root_for(self, path: Path) -> Path | None:
+        """Return the configured folders entry that contains ``path``, or None."""
+        for folder in self._folders:
+            root = Path(folder)
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            return root
+        return None
+
     def _run_build(self) -> dict:
         # Carry the last completed build's summary forward so it stays visible
         # while a new build is in flight.
@@ -656,7 +692,7 @@ class MediaIndexer:
                 if _kind_for(path) is not None:
                     yield path
 
-    def _index_file(self, root, path, status, seen_paths) -> None:
+    def _index_file(self, root, path, status, seen_paths, fallback_date_taken=None) -> None:
         kind = _kind_for(path)
         if kind is None:
             return
@@ -682,7 +718,7 @@ class MediaIndexer:
         except Exception:
             logger.warning("media build: cannot read metadata for %s", path, exc_info=True)
         if not date_taken:
-            date_taken = _mtime_iso(st.st_mtime)
+            date_taken = fallback_date_taken or _mtime_iso(st.st_mtime)
 
         profile = self._profile_for(path_str)
         row_id = self._upsert(path_str, str(root), kind, st.st_size, st.st_mtime,
