@@ -63,12 +63,18 @@ ENV SORTER_HOST=0.0.0.0 \
     CONFIGS_DIR=/configs \
     INBOX_BASE=/data/inbox \
     SYNC_DB=/data/sync.db \
+    MEDIA_DB=/data/media.db \
+    MEDIA_THUMBS_DIR=/data/media_thumbs \
+    MEDIA_PROXIES_DIR=/data/media_proxies \
+    MEDIA_PREVIEWS_DIR=/data/media_previews \
     LAUNCHER_PUBLIC_PORT=7000 \
     SORTER_PUBLIC_PORT=8080
 
-# Phone-sync state (trusted devices + synced index + upload sessions) must
-# survive restarts, so keep it on a volume. For fast same-volume placement,
-# mount INBOX_BASE on the same filesystem as your sorted destinations.
+# Phone-sync state (trusted devices + synced index + upload sessions) and the
+# media index (including albums, which share media.db) must survive container
+# recreation, so keep them on a volume rather than the container's writable
+# layer. For fast same-volume placement, mount INBOX_BASE on the same
+# filesystem as your sorted destinations.
 VOLUME /data
 
 EXPOSE 7000 8080
