@@ -5,6 +5,13 @@ import eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto
 /** Which granularity the date picker is currently showing tiles for. */
 enum class DatePickerLevel { YEAR, MONTH, DAY }
 
+/**
+ * A confirmed Go-To-Date selection: the resolved ISO [date] plus the [granularity]
+ * (year / month / day) the user drilled to. Segment navigation uses the granularity
+ * to decide which slice of the timeline to present and how to step to adjacent segments.
+ */
+data class DateSegment(val date: String, val granularity: DatePickerLevel)
+
 /** Full month names indexed by 1-based month number; [MONTH_NAMES][1] == "January". */
 internal val MONTH_NAMES = listOf(
     "", "January", "February", "March", "April", "May", "June",
@@ -89,6 +96,22 @@ data class DatePickerState(
             "$year-$month-$lastDay"
         }
         else -> "$year-$month-${day.toInt().toString().padStart(2, '0')}"
+    }
+
+    /**
+     * The confirmed segment at the deepest current selection: the resolved [confirmedDate]
+     * paired with the granularity the user drilled to (a year-only pick is YEAR, year+month
+     * is MONTH, a full date is DAY). Null when nothing is selected yet. Distinct from [level],
+     * which is the level currently *listing* tiles (one deeper than the last committed pick).
+     */
+    fun confirmedSegment(): DateSegment? {
+        val date = confirmedDate() ?: return null
+        val granularity = when {
+            month == null -> DatePickerLevel.YEAR
+            day == null -> DatePickerLevel.MONTH
+            else -> DatePickerLevel.DAY
+        }
+        return DateSegment(date, granularity)
     }
 
     /**

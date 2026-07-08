@@ -1,6 +1,7 @@
 package eu.caiq.imagesorter.sync.ui
 
 import eu.caiq.imagesorter.sync.ui.screens.BreadcrumbSegment
+import eu.caiq.imagesorter.sync.ui.screens.DateSegment
 import eu.caiq.imagesorter.sync.ui.screens.DatePickerLevel
 import eu.caiq.imagesorter.sync.ui.screens.DatePickerState
 import org.junit.Assert.assertEquals
@@ -118,5 +119,25 @@ class GoToDateStateTest {
     fun confirmAtDayLevelSeeksToThatExactZeroPaddedDay() {
         val state = DatePickerState(dates).selectYear("2024").selectMonth("03").selectDay("5")
         assertEquals("2024-03-05", state.confirmedDate())
+    }
+
+    @Test
+    fun confirmedSegmentReportsDateAndGranularityAtDeepestLevel() {
+        // Year-only selection confirms as a YEAR segment.
+        val year = DatePickerState(dates).selectYear("2024")
+        assertEquals(DateSegment("2024-12-31", DatePickerLevel.YEAR), year.confirmedSegment())
+
+        // Year + month confirms as a MONTH segment.
+        val month = year.selectMonth("03")
+        assertEquals(DateSegment("2024-03-31", DatePickerLevel.MONTH), month.confirmedSegment())
+
+        // Full date confirms as a DAY segment.
+        val day = month.selectDay("5")
+        assertEquals(DateSegment("2024-03-05", DatePickerLevel.DAY), day.confirmedSegment())
+    }
+
+    @Test
+    fun confirmedSegmentIsNullBeforeAnyYearIsSelected() {
+        assertEquals(null, DatePickerState(dates).confirmedSegment())
     }
 }

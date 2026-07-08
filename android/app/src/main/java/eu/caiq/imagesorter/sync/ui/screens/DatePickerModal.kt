@@ -68,14 +68,15 @@ fun DatePickerFab(onClick: () -> Unit, modifier: Modifier = Modifier) {
  * Stateful Go-To-Date picker modal bottom sheet. Loads the available-dates tree via
  * [loadDates] on open (spinner until it arrives), then drives [DatePickerSheet] with a
  * local [DatePickerState]: tiles drill down, the breadcrumb jumps back, the back
- * gesture goes up one level (dismissing at the top). Confirm reports the resolved ISO
- * date to [onSeek] and dismisses; Cancel and outside-dismiss call [onDismiss].
+ * gesture goes up one level (dismissing at the top). Confirm reports the resolved
+ * [DateSegment] (date + drilled-to granularity) to [onConfirm] and dismisses; Cancel and
+ * outside-dismiss call [onDismiss].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DatePickerModal(
     loadDates: suspend () -> MediaDatesDto,
-    onSeek: (String) -> Unit,
+    onConfirm: (DateSegment) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState()
@@ -100,7 +101,7 @@ fun DatePickerModal(
         DatePickerSheet(
             state = current,
             onSelect = { label -> current?.let { state = it.selectDeeper(label) } },
-            onConfirm = { current?.confirmedDate()?.let(onSeek) ?: onDismiss() },
+            onConfirm = { current?.confirmedSegment()?.let(onConfirm) ?: onDismiss() },
             onCancel = onDismiss,
             onJump = { level -> current?.let { state = it.goTo(level) } },
         )

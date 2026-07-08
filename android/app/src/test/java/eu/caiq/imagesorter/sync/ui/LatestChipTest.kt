@@ -53,6 +53,28 @@ class LatestChipTest {
     }
 
     @Test
+    fun chipShownWheneverSegmentModeIsActive() {
+        // Segment mode is a non-timeline view: the flag PhotosScreen passes here is
+        // `segment != null`, so the Latest chip is always visible while a segment is shown.
+        val segmentActive = true
+        assertTrue(shouldShowLatestChip(firstVisibleItemIndex = 0, isSeekActive = segmentActive))
+    }
+
+    @Test
+    fun tapWhileSegmentActiveExitsSegmentThenScrolls() = runTest {
+        var segmentCleared = false
+        val calls = mutableListOf<String>()
+        handleLatestTap(
+            isSeekActive = true, // segment active
+            resetToLatest = { segmentCleared = true; calls.add("exitSegment") },
+            scrollToTop = { calls.add("scroll") },
+        )
+        // Exiting segment mode (back to the newest-first timeline) precedes the scroll to top.
+        assertTrue(segmentCleared)
+        assertEquals(listOf("exitSegment", "scroll"), calls)
+    }
+
+    @Test
     fun tapWithActiveSeekResetsThenScrolls() = runTest {
         val calls = mutableListOf<String>()
         handleLatestTap(

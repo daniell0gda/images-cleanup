@@ -33,6 +33,16 @@ class AutoRefreshTest {
     }
 
     @Test
+    fun gateClosedWhileSegmentModeIsActive() {
+        // PhotosScreen passes `segment != null` as this flag; while a segment is shown the gate
+        // stays closed so auto-refresh never yanks the segment view out from under the user.
+        val segmentActive = true
+        assertFalse(
+            shouldAutoRefresh(0, isSeekActive = segmentActive, previewOpen = false, selectionActive = false),
+        )
+    }
+
+    @Test
     fun gateClosedWhenAnySingleConditionIsViolated() {
         assertFalse(shouldAutoRefresh(1, isSeekActive = false, previewOpen = false, selectionActive = false))
         assertFalse(shouldAutoRefresh(0, isSeekActive = true, previewOpen = false, selectionActive = false))

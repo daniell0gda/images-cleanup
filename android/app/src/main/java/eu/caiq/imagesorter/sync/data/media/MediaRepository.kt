@@ -39,24 +39,22 @@ class MediaRepository(
 
     fun timeline(): Flow<PagingData<MediaEntity>> =
         Pager(
-            config = PagingConfig(
-                pageSize = pageSize,
-                // Left at the default (== pageSize), landing a seek's anchor within this many
-                // items of the loaded edge auto-fires PREPEND with no user scroll — since the
-                // seek only eager-loads SEEK_PAGE_SIZE (50) newer items above the anchor, that
-                // silently cascaded PREPEND page after page toward latest. Keep this well below
-                // SEEK_PAGE_SIZE so nothing auto-fires at rest; real upward scrolling still
-                // triggers it once the user nears the loaded edge.
-                prefetchDistance = SEEK_PREFETCH_DISTANCE,
-                // Left at the default (pageSize * 3), Paging tries to backfill the initial load
-                // up to that size, triggering extra automatic PREPEND calls beyond our own
-                // deliberate one to make up the difference. Match it to what a REFRESH actually
-                // supplies so nothing extra is requested purely to satisfy this target.
-                initialLoadSize = pageSize,
-                enablePlaceholders = false,
-            ),
+            config = PagingConfig(pageSize = pageSize, enablePlaceholders = false),
             remoteMediator = mediator,
             pagingSourceFactory = { db.mediaDao().pagingSource() },
+        ).flow
+
+    /**
+     * A bounded, server-backed timeline for a single date segment. Independent of [timeline]:
+     * it uses [MediaSegmentPagingSource] (no mediator, no Room cache, no seek state), so entering
+     * or leaving segment mode never disturbs the newest-first timeline's REFRESH/APPEND/PREPEND
+     * machinery. [fromDate] is the segment's latest day (page start) and [datePrefix] the ISO
+     * prefix every in-segment capture date shares (`"2024-"`, `"2024-03-"`, `"2024-03-10"`).
+     */
+    fun segmentTimeline(fromDate: String, datePrefix: String): Flow<PagingData<MediaEntity>> =
+        Pager(
+            config = PagingConfig(pageSize = pageSize, enablePlaceholders = false),
+            pagingSourceFactory = { MediaSegmentPagingSource(api, fromDate, datePrefix) },
         ).flow
 
     /** Arms a one-shot `from_date` seek; the caller must then refresh the pager. */
@@ -79,9 +77,4 @@ class MediaRepository(
 
     /** The server's year → month → day tree of dates that have indexed photos. */
     suspend fun availableDates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = api.dates()
-
-    companion object {
-        /** Below [MediaRemoteMediator.SEEK_PAGE_SIZE] so a landed seek never auto-fires PREPEND. */
-        private const val SEEK_PREFETCH_DISTANCE = 20
-    }
 }

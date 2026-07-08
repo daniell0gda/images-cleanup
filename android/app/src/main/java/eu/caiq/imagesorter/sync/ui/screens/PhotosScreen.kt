@@ -1,10 +1,12 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
+import android.util.Log
 import androidx.annotation.OptIn as AndroidOptIn
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
@@ -21,6 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -65,6 +70,7 @@ import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import eu.caiq.imagesorter.sync.SyncApp
+import eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto
 import eu.caiq.imagesorter.sync.data.db.entity.MediaEntity
 import eu.caiq.imagesorter.sync.data.media.MediaListItem
 import eu.caiq.imagesorter.sync.data.media.MediaUrls
@@ -76,7 +82,6 @@ import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.MediaThumb
 import eu.caiq.imagesorter.sync.ui.components.previewIndexAfterDelete
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -96,8 +101,16 @@ const val PHOTOS_SELECTED_DESC = "Selected"
 /** Marks a [MediaEntity] as video (server `kind`). */
 private const val KIND_VIDEO = "video"
 
+/** The grid item key for a timeline row (same scheme PhotosGrid uses): `h:day` / `m:id`. */
+private fun mediaListItemKey(item: MediaListItem): String = when (item) {
+    is MediaListItem.Header -> "h:${item.day}"
+    is MediaListItem.Media -> "m:${item.entity.id}"
+}
+
 /** Fixed column count for the gallery grid (square thumbnails). */
 private const val GRID_COLUMNS = 3
+
+private const val TAG = "GOTODATE"
 
 /**
  * The server media gallery: a `LazyVerticalGrid` of square thumbnails with sticky
@@ -246,8 +259,22 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     val urls = remember(baseUrl) { MediaUrls(baseUrl) }
     val token = remember(locator) { runCatching { locator.securePrefs.getToken() }.getOrNull() }
 
-    val flow = remember(locator) {
-        runCatching { locator.mediaRepository.timeline().map { it.insertDayHeaders() } }.getOrNull()
+    // Segment mode: a confirmed Go-To-Date picks a year/month/day segment, which swaps the grid
+    // onto the bounded, server-backed segmentTimeline. Null = the normal newest-first timeline.
+    var segment by remember { mutableStateOf<DateSegment?>(null) }
+    var availableDates by remember { mutableStateOf<MediaDatesDto>(emptyMap()) }
+    val segmentActive = segment != null
+
+    val flow = remember(locator, segment) {
+        runCatching {
+            val repo = locator.mediaRepository
+            val active = segment
+            if (active == null) {
+                repo.timeline().map { it.insertDayHeaders() }
+            } else {
+                repo.segmentTimeline(active.date, segmentDatePrefix(active)).map { it.insertDayHeaders() }
+            }
+        }.getOrNull()
     }
     val lazyItems = flow?.collectAsLazyPagingItems()
     val items = lazyItems?.itemSnapshotList?.items ?: emptyList()
@@ -257,7 +284,6 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
 
     var previewIndex by remember { mutableStateOf<Int?>(null) }
     var datePickerOpen by remember { mutableStateOf(false) }
-    var pendingSeekDate by remember { mutableStateOf<String?>(null) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var nameDialogAction by remember { mutableStateOf<AlbumSelectionAction?>(null) }
     var addPickerOpen by remember { mutableStateOf(false) }
@@ -270,8 +296,10 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     val inSelectionMode = selectedIds.isNotEmpty()
 
     val repository = remember(locator) { runCatching { locator.mediaRepository }.getOrNull() }
-    val seekActiveFlow = remember(repository) { repository?.isSeekActive() ?: MutableStateFlow(false) }
-    val isSeekActive by seekActiveFlow.collectAsState()
+    // Load the available-dates tree once so adjacent-segment navigation can resolve against it.
+    LaunchedEffect(repository) {
+        if (repository != null) availableDates = runCatching { repository.availableDates() }.getOrDefault(emptyMap())
+    }
     // The single in-progress signal shared by the auto-refresh timer and the pull gesture,
     // derived from Paging load state — no separately hand-maintained refreshing boolean.
     val isRefreshing = lazyItems?.loadState?.mediator?.refresh is LoadState.Loading
@@ -296,6 +324,15 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     // handles its own back via MediaPreviewPager and takes precedence when open.)
     BackHandler(enabled = inSelectionMode) { selectedIds = emptySet() }
 
+    // Diagnostic: log every change to the grid's scroll position so a post-seek
+    // drift (something else moving the viewport after the reset-to-0) is visible.
+    LaunchedEffect(gridState) {
+        snapshotFlow { gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                Log.d(TAG, "gridState changed: firstVisibleItemIndex=$index offset=$offset segmentActive=$segmentActive")
+            }
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         // Pull-to-refresh wraps only the scrollable grid so its indicator sits over the grid
         // while the overlays (LatestChip, FAB, selection bar, preview, snackbar) stay on top.
@@ -305,10 +342,11 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                 manualRefreshing = true
                 val li = lazyItems
                 // Manual pull bypasses the 30s floor; skip while a refresh is already in flight
-                // (the spinner just tracks that one). A date seek jumps back to newest first.
+                // (the spinner just tracks that one). A pull while a segment is active exits
+                // segment mode and refreshes the newest-first timeline.
                 if (repository != null && li != null && !isRefreshing) {
                     scope.launch {
-                        if (isSeekActive) repository.resetToLatest()
+                        if (segmentActive) segment = null
                         li.refresh()
                         repository.refreshThrottle.markRefreshed(System.currentTimeMillis())
                     }
@@ -316,35 +354,38 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
             },
             modifier = Modifier.fillMaxSize(),
         ) {
-            // While a Go-To-Date jump is settling, don't compose the grid at all: the very
-            // first composition after `refresh()` would render the new data at whatever index
-            // the grid was already at (often near the top), and that read is enough for Paging
-            // to treat the viewport as sitting at the loaded edge and start auto-fetching newer
-            // pages — before `gridState.scrollToItem` below ever gets a chance to move it. A
-            // blank/loading state means nothing reads the list during that window, so the grid
-            // only ever appears already anchored on the target date, with the eager newer buffer
-            // pre-loaded (but out of view) above it, ready for a real scroll up to reveal.
-            if (pendingSeekDate != null) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+            Log.d(TAG, "render: showing grid, items.size=${items.size} firstVisibleItemIndex=${gridState.firstVisibleItemIndex} segmentActive=$segmentActive")
+            // While a segment is active a horizontal swipe steps to the adjacent segment at the
+            // same granularity (a swipe toward an absent segment is a no-op). Off segment mode
+            // the grid keeps its plain vertical-only paging behaviour.
+            val gridModifier = if (segmentActive) {
+                Modifier.pointerInput(segment, availableDates) {
+                    detectHorizontalDragGestures { _, dragAmount ->
+                        val active = segment ?: return@detectHorizontalDragGestures
+                        segmentForSwipe(availableDates, active, swipeRightward = dragAmount > 0)?.let {
+                            segment = it
+                        }
+                    }
                 }
             } else {
-                PhotosGrid(
-                    items = items,
-                    onOpen = { previewIndex = it },
-                    state = gridState,
-                    selectedIds = selectedIds,
-                    inSelectionMode = inSelectionMode,
-                    onToggle = { entity ->
-                        selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
-                    },
-                    onLongPress = { entity -> selectedIds = selectedIds + entity.id },
-                ) { entity, cellModifier ->
-                    MediaThumb(
-                        model = authedRequest(context, urls.thumb(entity.id), token),
-                        modifier = cellModifier,
-                    )
-                }
+                Modifier
+            }
+            PhotosGrid(
+                items = items,
+                onOpen = { previewIndex = it },
+                state = gridState,
+                selectedIds = selectedIds,
+                inSelectionMode = inSelectionMode,
+                onToggle = { entity ->
+                    selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
+                },
+                onLongPress = { entity -> selectedIds = selectedIds + entity.id },
+                modifier = gridModifier,
+            ) { entity, cellModifier ->
+                MediaThumb(
+                    model = authedRequest(context, urls.thumb(entity.id), token),
+                    modifier = cellModifier,
+                )
             }
         }
 
@@ -423,50 +464,22 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
         }
 
         if (repository != null) {
-            // A Go-To-Date confirm sets [pendingSeekDate]; this effect arms the seek, refreshes,
-            // and — crucially — WAITS for the refresh to actually present its data before anchoring.
-            // `LazyPagingItems.refresh()` does not suspend, so reading the snapshot inline would race
-            // the load and anchor on stale data (snapping back to the prepend edge / latest).
-            LaunchedEffect(pendingSeekDate) {
-                val date = pendingSeekDate ?: return@LaunchedEffect
-                val li = lazyItems
-                if (li == null) {
-                    pendingSeekDate = null
-                    return@LaunchedEffect
-                }
-                val seekGen = repository.seekRefresh().value.generation
-                repository.seekToDate(date)
-                li.refresh()
-                // `loadState.refresh` settling does NOT mean the Room PagingSource has re-presented
-                // the rows the mediator just wrote — the stale cache settles first. So wait for the
-                // mediator's per-seek signal (its REFRESH finished writing), then for the snapshot to
-                // actually reflect it before anchoring.
-                val signal = repository.seekRefresh().first { it.generation > seekGen }
-                // Wait until the snapshot reflects exactly the rows THIS seek wrote. A previous
-                // seek's leftover data also has negative orderKeys, so "first media is negative"
-                // would short-circuit on stale data; the exact written-count is unique per seek.
-                snapshotFlow { li.itemSnapshotList.items }.first { rows ->
-                    rows.count { it is MediaListItem.Media } == signal.mediaWritten
-                }
-                // Anchor onto the seeked date exactly once. The rows are settled (the wait above
-                // matched this seek's written count), so the anchor is computed from a good snapshot.
-                // The grid's stable item keys (see PhotosGrid) hold this position as eager PREPEND
-                // pages settle above it, so scrolling stays put without re-asserting. Re-scrolling
-                // per emission — the old approach — dragged the view around (the flicker) AND kept
-                // poking the prepend edge, which cascaded PREPEND all the way back to latest; the
-                // further the target date, the longer that ran.
-                gridState.scrollToItem(seekAnchorFlatIndex(li.itemSnapshotList.items))
-                pendingSeekDate = null
+            // A confirmed segment shows its photos starting at the top: switching [segment]
+            // swaps [flow] onto segmentTimeline (a fresh pager, getRefreshKey=null), so the new
+            // list is presented from index 0 with no carried-over mid-list scroll position.
+            LaunchedEffect(segment) {
+                if (segment != null) gridState.scrollToItem(0)
             }
             val li = lazyItems
             if (li != null) {
                 // Gate re-reads live Compose state each tick (derivedStateOf tracks all inputs),
-                // so the loop's captured lambda never sees a stale value.
+                // so the loop's captured lambda never sees a stale value. While a segment is active
+                // the gate is closed so auto-refresh never yanks the segment view out from under the user.
                 val autoRefreshGate = remember {
                     derivedStateOf {
                         shouldAutoRefresh(
                             gridState.firstVisibleItemIndex,
-                            isSeekActive,
+                            segmentActive,
                             previewIndex != null,
                             selectedIds.isNotEmpty(),
                         )
@@ -486,19 +499,18 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                     }
                 }
             }
-            val showLatest by remember(isSeekActive) {
-                derivedStateOf { shouldShowLatestChip(gridState.firstVisibleItemIndex, isSeekActive) }
+            val showLatest by remember(segmentActive) {
+                derivedStateOf { shouldShowLatestChip(gridState.firstVisibleItemIndex, segmentActive) }
             }
             LatestChip(
                 visible = showLatest,
                 onClick = {
                     scope.launch {
                         handleLatestTap(
-                            isSeekActive = isSeekActive,
-                            resetToLatest = {
-                                repository.resetToLatest()
-                                lazyItems?.refresh()
-                            },
+                            // A segment is a non-timeline view: tapping Latest exits it back to the
+                            // newest-first timeline (which resumes its normal prepend/append paging).
+                            isSeekActive = segmentActive,
+                            resetToLatest = { segment = null },
                             scrollToTop = { gridState.animateScrollToItem(0) },
                         )
                     }
@@ -516,14 +528,56 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
             if (datePickerOpen) {
                 DatePickerModal(
                     loadDates = { repository.availableDates() },
-                    onSeek = { date ->
+                    onConfirm = { confirmed ->
+                        Log.d(TAG, "DatePickerModal.onConfirm: segment=$confirmed, entering segment mode")
                         datePickerOpen = false
-                        pendingSeekDate = date
+                        segment = confirmed
                     },
                     onDismiss = { datePickerOpen = false },
                 )
             }
+            // Subtle edge indicators: an adjacent segment exists in that direction. Hidden when
+            // there is nothing to step to (or when no segment is active).
+            segment?.let { active ->
+                if (hasAdjacentSegment(availableDates, active, SegmentSide.LEFT)) {
+                    SegmentEdgeIndicator(Alignment.CenterStart, SegmentSide.LEFT)
+                }
+                if (hasAdjacentSegment(availableDates, active, SegmentSide.RIGHT)) {
+                    SegmentEdgeIndicator(Alignment.CenterEnd, SegmentSide.RIGHT)
+                }
+            }
         }
+    }
+}
+
+/** Test tag on a segment edge indicator; suffixed with the side (`left` / `right`). */
+const val SEGMENT_EDGE_INDICATOR_TAG = "segmentEdgeIndicator"
+
+/**
+ * A subtle chevron hugging one screen edge, hinting that a swipe that way steps to an adjacent
+ * segment. Shown only while a segment is active and an adjacent segment exists on [side].
+ */
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.SegmentEdgeIndicator(
+    alignment: Alignment,
+    side: SegmentSide,
+) {
+    val icon = if (side == SegmentSide.LEFT) {
+        Icons.AutoMirrored.Rounded.KeyboardArrowLeft
+    } else {
+        Icons.AutoMirrored.Rounded.KeyboardArrowRight
+    }
+    Box(
+        modifier = Modifier
+            .align(alignment)
+            .padding(4.dp)
+            .size(28.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.25f))
+            .testTag("$SEGMENT_EDGE_INDICATOR_TAG:${side.name.lowercase()}"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(20.dp))
     }
 }
 

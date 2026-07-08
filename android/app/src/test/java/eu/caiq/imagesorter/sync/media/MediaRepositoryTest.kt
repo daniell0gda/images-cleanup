@@ -42,6 +42,27 @@ private class RecordingMediaApi : MediaApi {
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
 }
 
+/**
+ * Serves a fixed newest-first dataset. `from_date` starts the page at the newest item on or
+ * before that date; `cursor` (an index string) continues older. Mirrors the server keyset
+ * semantics the segment paging source relies on.
+ */
+private class DatasetMediaApi(private val all: List<MediaItemDto>) : MediaApi {
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto {
+        val start = when {
+            cursor != null -> cursor.toInt()
+            fromDate != null -> all.indexOfFirst { it.dateTaken.substring(0, 10) <= fromDate }.let { if (it < 0) all.size else it }
+            else -> 0
+        }
+        val slice = all.drop(start).take(limit ?: all.size)
+        val nextIndex = start + slice.size
+        val next = if (nextIndex < all.size) nextIndex.toString() else null
+        return MediaPageDto(items = slice, nextCursor = next)
+    }
+
+    override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+}
+
 /** Records whether the network was hit; returns a terminal empty page. */
 private class TerminalMediaApi : MediaApi {
     var hit = false
@@ -136,6 +157,62 @@ class MediaRepositoryTest {
         repo.timeline().asSnapshot()
 
         assertNull(api.fromDates.first())
+    }
+
+    /** Newest-first fixture spanning 2025, two 2024 months, and 2023. */
+    private fun segmentDataset() = DatasetMediaApi(
+        listOf(
+            item(50, "2025-01-05"),
+            item(40, "2024-06-15"),
+            item(30, "2024-03-10"),
+            item(25, "2024-03-05"),
+            item(20, "2023-12-31"),
+        ),
+    )
+
+    @Test
+    fun segmentTimelineYearContainsOnlyThatYearNewestFirst() = runTest {
+        val repo = MediaRepository(segmentDataset(), db, pageSize = 50)
+
+        val ids = repo.segmentTimeline(fromDate = "2024-12-31", datePrefix = "2024-")
+            .asSnapshot().map { it.id }
+
+        assertEquals(listOf(40L, 30L, 25L), ids)
+    }
+
+    @Test
+    fun segmentTimelineMonthExcludesAdjacentMonths() = runTest {
+        val repo = MediaRepository(segmentDataset(), db, pageSize = 50)
+
+        val ids = repo.segmentTimeline(fromDate = "2024-03-31", datePrefix = "2024-03-")
+            .asSnapshot().map { it.id }
+
+        // No 2024-06 (adjacent month), no 2025, no 2023 — only the exact year+month.
+        assertEquals(listOf(30L, 25L), ids)
+    }
+
+    @Test
+    fun segmentTimelineDayContainsOnlyThatDay() = runTest {
+        val repo = MediaRepository(segmentDataset(), db, pageSize = 50)
+
+        val ids = repo.segmentTimeline(fromDate = "2024-03-10", datePrefix = "2024-03-10")
+            .asSnapshot().map { it.id }
+
+        assertEquals(listOf(30L), ids)
+    }
+
+    @Test
+    fun segmentTimelineDoesNotArmSeekOrDisturbTimeline() = runTest {
+        val repo = MediaRepository(segmentDataset(), db, pageSize = 2)
+
+        repo.segmentTimeline(fromDate = "2024-03-31", datePrefix = "2024-03-").asSnapshot()
+
+        assertFalse("segment mode is a distinct path and must not arm the seek", repo.isSeekActive().value)
+
+        // After leaving segment mode the unfiltered newest-first timeline is intact and still
+        // serves every item, in order — the segment path never touched the timeline's data source.
+        val ids = repo.timeline().asSnapshot { appendScrollWhile { it.id > 0 } }.map { it.id }
+        assertEquals(listOf(50L, 40L, 30L, 25L, 20L), ids)
     }
 
     @Test

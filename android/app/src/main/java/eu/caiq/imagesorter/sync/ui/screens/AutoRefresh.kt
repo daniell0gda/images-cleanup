@@ -1,7 +1,10 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
+import android.util.Log
 import eu.caiq.imagesorter.sync.data.media.RefreshThrottle
 import kotlinx.coroutines.delay
+
+private const val TAG = "GOTODATE"
 
 /**
  * Whether a periodic auto-refresh may run right now. Only refresh when the user is parked at
@@ -33,7 +36,12 @@ suspend fun autoRefreshLoop(
     pollInterval: Long = 30_000L,
 ) {
     while (true) {
-        if (throttle.canAutoRefresh(now()) && gateOpen() && !isRefreshing()) {
+        val canAuto = throttle.canAutoRefresh(now())
+        val open = gateOpen()
+        val refreshing = isRefreshing()
+        Log.d(TAG, "autoRefreshLoop tick: canAutoRefresh=$canAuto gateOpen=$open isRefreshing=$refreshing")
+        if (canAuto && open && !refreshing) {
+            Log.d(TAG, "autoRefreshLoop: firing auto-refresh")
             throttle.markRefreshed(now())
             refresh()
         }
