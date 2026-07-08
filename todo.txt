@@ -5,3 +5,4 @@
 5. when video/photo is visible then "latest" button should not be visible
 6. when album is created user should see a confirmation buble with button "go to album"
 7. remove album feature
+8. filtering at main timeline (by a profile)
