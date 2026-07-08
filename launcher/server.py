@@ -18,6 +18,7 @@ from .api_models import DeviceRequest as _DeviceRequest
 from .api_models import Identity as _Identity
 from .api_models import JobRequest as _JobRequest
 from .api_models import MediaLibrarySettings as _MediaLibrarySettings
+from .api_models import ProfileRequest as _ProfileRequest
 from .api_models import SessionRequest as _SessionRequest
 from .api_models import SettingsRequest as _SettingsRequest
 from .media_http import assert_within_root as _assert_within_root
@@ -239,12 +240,41 @@ def create_app(
     return app
 
 
+def _read_sync_raw() -> dict:
+    """Return the ``sync:`` sub-dict from ``server.yaml`` (empty when absent)."""
+    import yaml
+
+    from . import settings as settings_mod
+
+    path = settings_mod.settings_path(_configs_dir())
+    if not path.is_file():
+        return {}
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    if isinstance(loaded, dict) and isinstance(loaded.get("sync"), dict):
+        return loaded["sync"]
+    return {}
+
+
+def _sync_configured() -> bool:
+    """Whether the server has a usable sync template: a ``sync:`` section with a
+    non-empty ``tag_groups`` list."""
+    return bool(_read_sync_raw().get("tag_groups"))
+
+
 def _load_sync_config(profile_id: str):
-    """Load the GroupByTags Config backing a sync profile_id."""
+    """Build the shared placement Config from the ``sync:`` section of
+    ``server.yaml``.
+
+    ``profile_id`` is accepted for call-site compatibility but ignored: every
+    profile places files into the same destinations defined by the server's
+    hand-authored ``sync:`` block, so two sessions opened with different profiles
+    share one placement config."""
     from imagesorter import config as config_mod
-    user = profile_id[: -len("_groupby")] if profile_id.endswith("_groupby") else profile_id
-    config_file = _configs_dir() / f"config_{user}_groupby.yaml"
-    return config_mod.load(str(config_file))
+
+    return config_mod.from_raw(_read_sync_raw())
 
 
 def _default_detect_tags():
@@ -377,7 +407,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         }
 
     def _profile_ids() -> set[str]:
-        return {p["profile_id"] for p in sync_mod.list_profiles(_configs_dir())}
+        return {p["profile_id"] for p in store.list_profiles()}
 
     def _require_device(authorization: str | None):
         token = ""
@@ -449,9 +479,22 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         return {"status": "revoked"}
 
     @app.get("/api/sync/profiles")
-    async def sync_profiles(authorization: str | None = Header(default=None)):
-        _require_device(authorization)
-        return sync_mod.list_profiles(_configs_dir())
+    async def sync_profiles():
+        return store.list_profiles()
+
+    @app.post("/api/sync/profiles", status_code=201)
+    async def sync_create_profile(req: _ProfileRequest):
+        try:
+            return store.create_profile(req.name)
+        except sync_mod.DuplicateProfileError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.delete("/api/sync/profiles/{profile_id}")
+    async def sync_delete_profile(profile_id: str):
+        store.delete_profile(profile_id)
+        return {"status": "deleted"}
 
     @app.post("/api/sync/reconcile")
     async def sync_reconcile(
@@ -488,6 +531,11 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         authorization: str | None = Header(default=None),
     ):
         device = _require_device(authorization)
+        # Sync unconfigured (no template) is a 503 and must be reported BEFORE
+        # the unknown-profile 404, so a phone gets "not configured" rather than
+        # a misleading "unknown profile" when the server has no sync: block.
+        if not _sync_configured():
+            raise HTTPException(status_code=503, detail="Sync is not configured")
         if req.profile_id not in _profile_ids():
             raise HTTPException(status_code=404, detail="Unknown profile")
         # The sync lane never places unclassified images (they are discarded to

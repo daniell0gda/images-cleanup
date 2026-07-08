@@ -10,7 +10,6 @@ from __future__ import annotations
 import enum
 import json
 import os
-import re
 import secrets
 import shutil
 import sqlite3
@@ -50,6 +49,34 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class DuplicateProfileError(ValueError):
+    """Raised when creating a profile whose name matches an existing one
+    case-insensitively. A subclass of ValueError so the server can map it to a
+    409 while other validation failures map to a 400."""
+
+
+_PROFILE_NAME_MAX = 64
+
+
+def normalize_profile_name(raw: str) -> str:
+    """Validate a submitted profile name and return its stored form.
+
+    Trims surrounding whitespace and rejects (with a ValueError carrying a
+    human-readable message) a name that is blank, longer than 64 characters, or
+    contains any character other than letters, digits, or spaces. The accepted
+    name is collapsed to single spaces and Title-cased (e.g. ``daniel local`` ->
+    ``Daniel Local``); the result is used as both profile_id and display name.
+    """
+    trimmed = raw.strip()
+    if not trimmed:
+        raise ValueError("Profile name must not be blank")
+    if len(trimmed) > _PROFILE_NAME_MAX:
+        raise ValueError(f"Profile name must be at most {_PROFILE_NAME_MAX} characters")
+    if not all(ch.isalnum() or ch == " " for ch in trimmed):
+        raise ValueError("Profile name may contain only letters, digits, and spaces")
+    return " ".join(trimmed.split()).title()
+
+
 def is_safe_device_id(device_id: str) -> bool:
     """True iff ``device_id`` is a bare safe token usable as a directory name.
 
@@ -58,25 +85,6 @@ def is_safe_device_id(device_id: str) -> bool:
     escape the inbox and must be rejected.
     """
     return bool(device_id) and Path(device_id).name == device_id and device_id not in (".", "..")
-
-
-# ---------------------------------------------------------------------------
-# Profiles
-# ---------------------------------------------------------------------------
-
-_GROUPBY_RE = re.compile(r"^config_(.+?)_groupby\.yaml$")
-
-
-def list_profiles(configs_dir: Path) -> list[dict]:
-    """List sync-capable (GroupByTags) profiles; SimilaritySearch is excluded."""
-    profiles: list[dict] = []
-    if configs_dir.is_dir():
-        for f in sorted(configs_dir.iterdir()):
-            m = _GROUPBY_RE.match(f.name)
-            if m:
-                user = m.group(1)
-                profiles.append({"profile_id": f"{user}_groupby", "display_name": user})
-    return profiles
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +159,53 @@ class SyncStore:
                     profile_id    TEXT NOT NULL,
                     created_at    TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS profiles (
+                    profile_id    TEXT PRIMARY KEY,
+                    created_at    TEXT NOT NULL
+                );
                 """
             )
             con.commit()
+
+    # -- profiles --------------------------------------------------------
+
+    def list_profiles(self) -> list[dict]:
+        """List sync profiles from the DB as ``{profile_id, display_name}``,
+        sorted by name. The stored name serves as both id and display name."""
+        with self._lock:
+            rows = self._conn().execute(
+                "SELECT profile_id FROM profiles ORDER BY profile_id"
+            ).fetchall()
+        return [{"profile_id": r["profile_id"], "display_name": r["profile_id"]} for r in rows]
+
+    def create_profile(self, name: str) -> dict:
+        """Normalize and persist a new profile, returning ``{profile_id,
+        display_name}``.
+
+        Raises :class:`ValueError` on an invalid name (see
+        :func:`normalize_profile_name`) and :class:`DuplicateProfileError` when a
+        profile with the same case-insensitive name already exists.
+        """
+        profile_id = normalize_profile_name(name)
+        with self._lock:
+            existing = self._conn().execute(
+                "SELECT 1 FROM profiles WHERE profile_id = ? COLLATE NOCASE", (profile_id,)
+            ).fetchone()
+            if existing is not None:
+                raise DuplicateProfileError(f"profile already exists: {profile_id!r}")
+            self._conn().execute(
+                "INSERT INTO profiles (profile_id, created_at) VALUES (?, ?)",
+                (profile_id, _now()),
+            )
+            self._conn().commit()
+        return {"profile_id": profile_id, "display_name": profile_id}
+
+    def delete_profile(self, profile_id: str) -> None:
+        """Remove only the profiles row; synced_files and the media index are
+        left untouched so already-synced photos keep their gallery filter."""
+        with self._lock:
+            self._conn().execute("DELETE FROM profiles WHERE profile_id=?", (profile_id,))
+            self._conn().commit()
 
     # -- devices ---------------------------------------------------------
 
@@ -685,8 +737,9 @@ def _created_on_date_taken(value: str) -> str | None:
 def profile_display_name(profile_id: str) -> str:
     """Human-facing profile name embedded in tags and shown in the gallery.
 
-    Profiles are keyed as ``<user>_groupby`` (see :func:`list_profiles`); the
-    display name is just ``<user>``.
+    DB profiles store the display name directly, so it passes through unchanged.
+    Legacy file-based ids were keyed as ``<user>_groupby``; that suffix is still
+    stripped so old ``synced_files`` rows render as just ``<user>``.
     """
     suffix = "_groupby"
     return profile_id[: -len(suffix)] if profile_id.endswith(suffix) else profile_id

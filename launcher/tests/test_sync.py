@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -211,9 +212,9 @@ def test_protected_endpoint_rejects_missing_and_wrong_token(tmp_path):
     client = TestClient(app)
     token = trust(client)
 
-    assert client.get("/api/sync/profiles").status_code == 401
-    assert client.get("/api/sync/profiles", headers=auth("garbage")).status_code == 401
-    assert client.get("/api/sync/profiles", headers=auth(token)).status_code == 200
+    assert client.post("/api/sync/reconcile", json=[]).status_code == 401
+    assert client.post("/api/sync/reconcile", json=[], headers=auth("garbage")).status_code == 401
+    assert client.post("/api/sync/reconcile", json=[], headers=auth(token)).status_code == 200
 
 
 def test_revoked_device_token_is_rejected(tmp_path):
@@ -221,31 +222,77 @@ def test_revoked_device_token_is_rejected(tmp_path):
     app = make_app(tmp_path)
     client = TestClient(app)
     token = trust(client)
-    assert client.get("/api/sync/profiles", headers=auth(token)).status_code == 200
+    assert client.post("/api/sync/reconcile", json=[], headers=auth(token)).status_code == 200
 
     client.post("/api/sync/devices/dev-1/revoke")
-    assert client.get("/api/sync/profiles", headers=auth(token)).status_code == 401
+    assert client.post("/api/sync/reconcile", json=[], headers=auth(token)).status_code == 401
 
 
 # ---------------------------------------------------------------------------
 # Profiles
 # ---------------------------------------------------------------------------
 
-def test_profiles_lists_groupby_only(tmp_path):
-    """GET /api/sync/profiles lists GroupByTags profiles and omits Similarity."""
+def test_profiles_lists_db_rows_without_token(tmp_path):
+    """GET /api/sync/profiles returns DB profile rows as {profile_id,
+    display_name}, needs no device bearer token, and never auto-migrates legacy
+    config_<user>_groupby.yaml files."""
     app = make_app(tmp_path)
-    configs = tmp_path / "configs"
-    (configs / "config_alice_groupby.yaml").write_text("mode: GroupByTags\n")
-    (configs / "config_alice_similarity.yaml").write_text("mode: SimilaritySearch\n")
-    (configs / "config_bob_groupby.yaml").write_text("mode: GroupByTags\n")
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.create_profile("alice")
+    store.create_profile("bob")
+    # A legacy file-based config must NOT surface as a profile.
+    (tmp_path / "configs" / "config_carol_groupby.yaml").write_text("mode: GroupByTags\n")
 
     client = TestClient(app)
-    token = trust(client)
-    profiles = client.get("/api/sync/profiles", headers=auth(token)).json()
-
+    r = client.get("/api/sync/profiles")  # no Authorization header
+    assert r.status_code == 200, r.text
+    profiles = r.json()
     ids = {p["profile_id"] for p in profiles}
-    assert ids == {"alice_groupby", "bob_groupby"}
+    assert ids == {"Alice", "Bob"}
     assert all("display_name" in p for p in profiles)
+
+
+def test_create_profile_endpoint_returns_201_and_maps_errors(tmp_path):
+    """POST /api/sync/profiles is unauthenticated: 201 on create, 409 on a
+    case-insensitive duplicate, 400 on a blank/invalid/over-long name."""
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    ok = client.post("/api/sync/profiles", json={"name": "daniel local"})
+    assert ok.status_code == 201, ok.text
+    assert ok.json() == {"profile_id": "Daniel Local", "display_name": "Daniel Local"}
+
+    dup = client.post("/api/sync/profiles", json={"name": "DANIEL LOCAL"})
+    assert dup.status_code == 409, dup.text
+
+    assert client.post("/api/sync/profiles", json={"name": "   "}).status_code == 400
+    assert client.post("/api/sync/profiles", json={"name": "bad/name"}).status_code == 400
+    assert client.post("/api/sync/profiles", json={"name": "x" * 65}).status_code == 400
+
+
+def test_delete_profile_endpoint_removes_only_the_profiles_row(tmp_path):
+    """DELETE /api/sync/profiles/{id} is unauthenticated and leaves synced_files
+    rows (and thus media-index/EXIF of already-synced photos) untouched."""
+    import sqlite3
+    app = make_app(tmp_path)
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.create_profile("alice")
+    store.record_synced(
+        "a.jpg", "2024-01-01T00:00:00", 10, "image/jpeg",
+        str(tmp_path / "stored" / "a.jpg"), "dev-1", "Alice",
+    )
+
+    client = TestClient(app)
+    r = client.delete("/api/sync/profiles/Alice")  # no Authorization header
+    assert r.status_code == 200, r.text
+    assert client.get("/api/sync/profiles").json() == []
+
+    con = sqlite3.connect(str(tmp_path / "sync.db"))
+    remaining = con.execute("SELECT COUNT(*) FROM synced_files WHERE name='a.jpg'").fetchone()[0]
+    con.close()
+    assert remaining == 1
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +398,30 @@ def test_uploaded_offsets_skips_completed_sessions(tmp_path):
 # Upload sessions
 # ---------------------------------------------------------------------------
 
+def _configure_sync(tmp_path):
+    """Write a server.yaml sync: template and register the default DB profile.
+
+    Makes session-open succeed (sync configured + profile present) and gives
+    _load_sync_config a shared placement config keyed off the sync: section."""
+    dest = tmp_path / "dest"
+    (tmp_path / "configs").mkdir(exist_ok=True)
+    (tmp_path / "configs" / "server.yaml").write_text(
+        "sync:\n"
+        "  tag_groups:\n"
+        "    - name: people\n"
+        "      tags: [person]\n"
+        f"      destination: {dest / 'people'}\n"
+        "  video:\n"
+        f"    destination: {dest / 'videos'}\n"
+        "  on_collision: rename\n"
+    )
+    from launcher.sync import SyncStore
+    SyncStore(tmp_path / "sync.db").create_profile("alice")
+    return dest
+
+
 def _write_groupby_config(tmp_path, user="alice"):
-    (tmp_path / "configs" / f"config_{user}_groupby.yaml").write_text("mode: GroupByTags\n")
+    return _configure_sync(tmp_path)
 
 
 def test_open_session_creates_inbox_directory(tmp_path):
@@ -363,13 +432,13 @@ def test_open_session_creates_inbox_directory(tmp_path):
     client = TestClient(app)
     token = trust(client, "dev-1")
 
-    r = client.post("/api/sync/sessions", json={"profile_id": "alice_groupby"}, headers=auth(token))
+    r = client.post("/api/sync/sessions", json={"profile_id": "Alice"}, headers=auth(token))
     assert r.status_code == 200, r.text
     sid = r.json()["session_id"]
     assert (tmp_path / "inbox" / "dev-1" / sid).is_dir()
 
 
-def _open_session(client, token, profile_id="alice_groupby"):
+def _open_session(client, token, profile_id="Alice"):
     return client.post(
         "/api/sync/sessions", json={"profile_id": profile_id}, headers=auth(token)
     ).json()["session_id"]
@@ -690,25 +759,86 @@ def test_malicious_session_id_cannot_escape_inbox(tmp_path):
 
 def test_open_session_no_longer_gated_by_unclassified_enabled(tmp_path):
     """The unclassified.enabled session-open gate is removed: the sync lane no
-    longer places unclassified images, so a profile with unclassified.enabled
-    false opens a session successfully instead of being rejected."""
+    longer places unclassified images, so a session opens successfully for a
+    configured sync template and a known DB profile."""
     app = make_app(tmp_path)
-    (tmp_path / "configs" / "config_alice_groupby.yaml").write_text(
-        "mode: GroupByTags\n"
-        "tag_groups:\n"
-        "  - name: people\n"
-        "    tags: [person]\n"
-        f"    destination: {tmp_path / 'dest' / 'people'}\n"
-        "unclassified:\n"
-        "  enabled: false\n"
-        f"  destination: {tmp_path / 'dest'}\n"
-    )
+    _configure_sync(tmp_path)
     client = TestClient(app)
     token = trust(client, "dev-1")
 
-    r = client.post("/api/sync/sessions", json={"profile_id": "alice_groupby"}, headers=auth(token))
+    r = client.post("/api/sync/sessions", json={"profile_id": "Alice"}, headers=auth(token))
     assert r.status_code == 200, r.text
     assert r.json()["session_id"]
+
+
+def test_open_session_unknown_profile_is_404(tmp_path):
+    """A configured server rejects a session for a profile_id absent from the
+    profiles table with 404, and a legacy config_<user>_groupby.yaml file does
+    not satisfy session-open (no auto-migration)."""
+    app = make_app(tmp_path)
+    _configure_sync(tmp_path)  # registers DB profile "Alice"
+    (tmp_path / "configs" / "config_carol_groupby.yaml").write_text("mode: GroupByTags\n")
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    assert client.post(
+        "/api/sync/sessions", json={"profile_id": "Alice"}, headers=auth(token)
+    ).status_code == 200
+    assert client.post(
+        "/api/sync/sessions", json={"profile_id": "Nobody"}, headers=auth(token)
+    ).status_code == 404
+    # Legacy file-based profile_id is not honoured.
+    assert client.post(
+        "/api/sync/sessions", json={"profile_id": "carol_groupby"}, headers=auth(token)
+    ).status_code == 404
+
+
+def test_open_session_returns_503_when_sync_unconfigured_before_404(tmp_path):
+    """When server.yaml has no sync: section (or empty tag_groups), session-open
+    is 503, and that 503 is returned BEFORE the unknown-profile 404 check."""
+    app = make_app(tmp_path)  # no server.yaml written
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    # Missing template + unknown profile -> 503, not 404.
+    assert client.post(
+        "/api/sync/sessions", json={"profile_id": "Nobody"}, headers=auth(token)
+    ).status_code == 503
+
+    # An empty tag_groups is likewise "unconfigured".
+    (tmp_path / "configs" / "server.yaml").write_text("sync:\n  tag_groups: []\n")
+    assert client.post(
+        "/api/sync/sessions", json={"profile_id": "Nobody"}, headers=auth(token)
+    ).status_code == 503
+
+
+def test_server_boots_and_serves_when_sync_unconfigured(tmp_path):
+    """With no sync: template, the server still boots and serves gallery and
+    manual-sort routes."""
+    app = make_app(tmp_path)
+    (tmp_path / "configs" / "config_alice_groupby.yaml").write_text("mode: GroupByTags\n")
+    client = TestClient(app)
+
+    assert client.get("/api/ping").json() == {"status": "ok"}
+    users = client.get("/api/users").json()
+    assert any(u["user"] == "alice" for u in users)
+
+
+def test_load_sync_config_ignores_profile_id_and_shares_destinations(tmp_path):
+    """_load_sync_config builds the placement Config from server.yaml's sync:
+    section, ignoring profile_id, so different profiles resolve to identical
+    shared destinations."""
+    import launcher.server as srv
+    make_app(tmp_path)  # sets CONFIGS_DIR for srv._load_sync_config
+    dest = _configure_sync(tmp_path)
+
+    cfg_a = srv._load_sync_config("Alice")
+    cfg_b = srv._load_sync_config("SomeoneElse")
+
+    assert [tg.destination for tg in cfg_a.tag_groups] == [str(dest / "people")]
+    assert cfg_a.tag_groups[0].destination == cfg_b.tag_groups[0].destination
+    assert cfg_a.video.destination == str(dest / "videos")
+    assert cfg_a.on_collision == "rename"
 
 
 # ---------------------------------------------------------------------------
@@ -716,22 +846,7 @@ def test_open_session_no_longer_gated_by_unclassified_enabled(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _write_e2e_config(tmp_path, user="alice"):
-    dest = tmp_path / "dest"
-    (tmp_path / "configs" / f"config_{user}_groupby.yaml").write_text(
-        "mode: GroupByTags\n"
-        "tag_groups:\n"
-        "  - name: people\n"
-        "    tags: [person]\n"
-        f"    destination: {dest / 'people'}\n"
-        "    group_by_year: false\n"
-        "unclassified:\n"
-        "  enabled: true\n"
-        "  folder_name: others\n"
-        f"  destination: {dest}\n"
-        "video:\n"
-        f"  destination: {dest / 'videos'}\n"
-    )
-    return dest
+    return _configure_sync(tmp_path)
 
 
 def _full_upload(client, token, tags, name="x.jpg", data=b"data", mime="image/jpeg"):
@@ -776,7 +891,7 @@ def test_force_place_flag_defaults_false_and_persists_in_session_meta(tmp_path):
 
     # Default: omitted -> false.
     sid_default = client.post(
-        "/api/sync/sessions", json={"profile_id": "alice_groupby"}, headers=auth(token)
+        "/api/sync/sessions", json={"profile_id": "Alice"}, headers=auth(token)
     ).json()["session_id"]
     meta_default = json.loads(
         (tmp_path / "inbox" / "dev-1" / sid_default / "session.json").read_text(encoding="utf-8")
@@ -786,7 +901,7 @@ def test_force_place_flag_defaults_false_and_persists_in_session_meta(tmp_path):
     # Explicit force_place=true is persisted.
     sid_force = client.post(
         "/api/sync/sessions",
-        json={"profile_id": "alice_groupby", "force_place": True},
+        json={"profile_id": "Alice", "force_place": True},
         headers=auth(token),
     ).json()["session_id"]
     meta_force = json.loads(
@@ -806,7 +921,7 @@ def test_force_place_skips_classification_and_places_in_primary_group(tmp_path):
 
     sid = client.post(
         "/api/sync/sessions",
-        json={"profile_id": "alice_groupby", "force_place": True},
+        json={"profile_id": "Alice", "force_place": True},
         headers=auth(token),
     ).json()["session_id"]
     meta = {"name": "forced.jpg", "created_on": "2021-01-01T00:00:00", "size": 4, "mime_type": "image/jpeg"}
@@ -848,7 +963,7 @@ def test_synced_files_row_records_full_identity_and_stored_path(tmp_path):
     assert (row["name"], row["created_on"], row["size"], row["mime_type"]) == (
         "rec.jpg", "2021-01-01T00:00:00", 4, "image/jpeg")
     assert row["device_id"] == "dev-1"
-    assert row["profile_id"] == "alice_groupby"
+    assert row["profile_id"] == "Alice"
     assert row["synced_at"]
     from pathlib import Path as _P
     assert _P(row["stored_path"]).exists()
@@ -924,7 +1039,7 @@ def test_synced_jpeg_is_tagged_with_the_syncing_profile(tmp_path):
         "SELECT stored_path FROM synced_files WHERE name='rec.jpg'"
     ).fetchone()[0]
     con.close()
-    assert _read_profile_tag(Path(stored)) == "profile:alice"
+    assert _read_profile_tag(Path(stored)) == "profile:Alice"
 
 
 def test_profile_for_path_maps_stored_path_to_display_name(tmp_path):
@@ -961,6 +1076,8 @@ def test_manual_job_and_sync_lanes_are_independent(tmp_path, monkeypatch):
     active sync does not 409 POST /api/jobs."""
     app = make_app(tmp_path, detect_tags=lambda p: {"person"})
     _write_e2e_config(tmp_path)
+    # The manual /api/jobs lane still consumes the file-based config unchanged.
+    (tmp_path / "configs" / "config_alice_groupby.yaml").write_text("mode: GroupByTags\n")
     client = TestClient(app)
     token = trust(client, "dev-1")
 
@@ -971,13 +1088,13 @@ def test_manual_job_and_sync_lanes_are_independent(tmp_path, monkeypatch):
 
     # A manual job running does not 409 a sync session.
     assert client.post("/api/jobs", json={"user": "alice", "mode": "groupby"}).status_code == 200
-    assert client.post("/api/sync/sessions", json={"profile_id": "alice_groupby"},
+    assert client.post("/api/sync/sessions", json={"profile_id": "Alice"},
                        headers=auth(token)).status_code == 200
 
     # An active sync does not 409 POST /api/jobs: stop the manual job, then a
     # sync session being open must not block a fresh manual job.
     client.delete("/api/jobs")
-    assert client.post("/api/sync/sessions", json={"profile_id": "alice_groupby"},
+    assert client.post("/api/sync/sessions", json={"profile_id": "Alice"},
                        headers=auth(token)).status_code == 200
     assert client.post("/api/jobs", json={"user": "alice", "mode": "groupby"}).status_code == 200
 
@@ -1948,3 +2065,119 @@ def test_synced_photo_lands_at_chronological_position_in_timeline(tmp_path):
     names = [Path(r["path"]).name for r in indexer.timeline()]
     # Newest-first: 2030, then the 2020 synced photo, then 2010.
     assert names.index("new.jpg") < names.index("shot.jpg") < names.index("old.jpg")
+
+
+# ---------------------------------------------------------------------------
+# DB-backed profile store
+# ---------------------------------------------------------------------------
+
+def test_syncstore_creates_profiles_table_with_expected_schema(tmp_path):
+    """SyncStore initializes a profiles table keyed by profile_id with a
+    NOT NULL created_at column."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.list_profiles()  # forces the connection + schema init
+
+    import sqlite3
+    con = sqlite3.connect(str(tmp_path / "sync.db"))
+    cols = {row[1]: (row[2], row[3], row[5]) for row in con.execute("PRAGMA table_info(profiles)")}
+    con.close()
+    assert cols["profile_id"] == ("TEXT", 0, 1)  # type, notnull, pk
+    assert cols["created_at"][0] == "TEXT" and cols["created_at"][1] == 1  # NOT NULL
+
+
+def test_syncstore_create_list_delete_profile_rows(tmp_path):
+    """create_profile inserts a row, list_profiles reads them back sorted as
+    {profile_id, display_name}, and delete_profile removes a single row."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+    store.create_profile("bravo")
+    store.create_profile("alpha")
+
+    assert store.list_profiles() == [
+        {"profile_id": "Alpha", "display_name": "Alpha"},
+        {"profile_id": "Bravo", "display_name": "Bravo"},
+    ]
+
+    store.delete_profile("Alpha")
+    assert [p["profile_id"] for p in store.list_profiles()] == ["Bravo"]
+
+
+def test_module_level_list_profiles_is_deleted(tmp_path):
+    """The old file-scanning module-level list_profiles(configs_dir) is gone;
+    profile listing is now a SyncStore method reading the DB table."""
+    import launcher.sync as sync_mod
+    assert not hasattr(sync_mod, "list_profiles")
+
+
+def test_create_profile_normalizes_to_title_case_no_suffix(tmp_path):
+    """A submitted name is stored Title-cased with spaces preserved, and the
+    stored name is both profile_id and display_name with no _groupby suffix."""
+    from launcher.sync import SyncStore
+    store = SyncStore(tmp_path / "sync.db")
+
+    result = store.create_profile("daniel local")
+    assert result == {"profile_id": "Daniel Local", "display_name": "Daniel Local"}
+    assert not result["profile_id"].endswith("_groupby")
+
+
+def test_profile_name_validation_trims_and_rejects_invalid(tmp_path):
+    """Validation trims surrounding whitespace, accepts a 64-char name, and
+    rejects blank, invalid-charset, and over-64-character names."""
+    from launcher.sync import normalize_profile_name
+
+    assert normalize_profile_name("  daniel  local  ") == "Daniel Local"
+    assert normalize_profile_name("a" * 64) == "A" + "a" * 63  # 64 chars allowed
+
+    for bad in ("", "   ", "bad-name", "no_underscore", "a" * 65, "emoji\U0001F600"):
+        with pytest.raises(ValueError):
+            normalize_profile_name(bad)
+
+
+def test_create_profile_rejects_case_insensitive_duplicate(tmp_path):
+    """Creating 'daniel' fails when 'Daniel' already exists (case-insensitive),
+    raising DuplicateProfileError distinctly from a plain validation error."""
+    from launcher.sync import SyncStore, DuplicateProfileError
+    store = SyncStore(tmp_path / "sync.db")
+    store.create_profile("Daniel")
+
+    with pytest.raises(DuplicateProfileError):
+        store.create_profile("daniel")
+    # A duplicate is a ValueError subclass so the server can still catch broadly.
+    assert issubclass(DuplicateProfileError, ValueError)
+
+
+def test_profile_display_name_strips_legacy_suffix_but_passes_db_names_through(tmp_path):
+    """Legacy file-based ids keep their stripped display name while a DB profile
+    name (no _groupby suffix) renders verbatim; no migration is implied."""
+    from launcher.sync import profile_display_name
+    assert profile_display_name("daniel_groupby") == "daniel"  # legacy row unchanged
+    assert profile_display_name("Daniel Local") == "Daniel Local"  # DB name verbatim
+
+
+def test_profile_carries_no_placement_data_only_tag_and_index_effects(tmp_path):
+    """A profile contributes no placement config: placement is fully determined
+    by the shared Config, and a profile's only per-file effects are the verbatim
+    EXIF profile:<name> stamp and the synced_files.profile_id that backs the
+    media-index profile column for gallery filtering."""
+    from launcher.sync import SyncStore, place_file, embed_profile_tag
+    store = SyncStore(tmp_path / "sync.db")
+    name = store.create_profile("daniel local")["profile_id"]
+    assert name == "Daniel Local"
+
+    # Placement is config-driven only: place_file never receives the profile.
+    cfg = _make_config(tmp_path)
+    part = _part(tmp_path, "img.part", _jpeg_bytes())
+    meta = _meta("img.jpg", part.stat().st_size)
+    ok, stored, reason = place_file(part, meta, cfg, lambda p: {"person"})
+    assert ok and reason is None
+    assert stored.parent == tmp_path / "dest" / "people" / "2021"
+
+    # Effect 1: the EXIF stamp uses the DB profile name verbatim.
+    embed_profile_tag(stored, name)
+    assert _read_profile_tag(stored) == "profile:Daniel Local"
+
+    # Effect 2: synced_files records the profile, backing the gallery filter.
+    store.record_synced(meta.name, meta.created_on, meta.size, meta.mime_type,
+                        str(stored), "dev-1", name)
+    assert store.profile_for_path(str(stored)) == "Daniel Local"

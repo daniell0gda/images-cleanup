@@ -28,6 +28,10 @@ class SessionRequest(BaseModel):
     force_place: bool = False
 
 
+class ProfileRequest(BaseModel):
+    name: str
+
+
 class DbRefreshSettings(BaseModel):
     enabled: bool
     schedule: str

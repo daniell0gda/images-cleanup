@@ -206,10 +206,13 @@ def test_every_client_route_resolves_to_a_server_route(tmp_path):
 
 # Launcher-only routes the phone never calls — excluded from client coverage.
 # The management UI lists/approves/revokes devices; the phone never does.
+# Profile deletion is admin/web-only too: the LAN web admin deletes profiles,
+# the phone has no delete surface, so the phone client does not declare it.
 _LAUNCHER_ONLY = {
     ("GET", "/api/sync/devices"),
     ("POST", "/api/sync/devices/{}/approve"),
     ("POST", "/api/sync/devices/{}/revoke"),
+    ("DELETE", "/api/sync/profiles/{}"),
 }
 
 
@@ -264,21 +267,19 @@ def test_open_session_request_field_matches():
 # Criterion 8 — response keys contain every non-nullable client DTO field
 # ===========================================================================
 
-def _write_groupby_config(configs: Path, user: str = "alice") -> None:
+def _write_sync_template(configs: Path) -> None:
+    """Write server.yaml's ``sync:`` block so session-open reaches 200 (a config
+    file no longer creates a DB profile; the shared placement template does)."""
     dest = configs.parent / "dest"
-    (configs / f"config_{user}_groupby.yaml").write_text(
-        "mode: GroupByTags\n"
-        "tag_groups:\n"
-        "  - name: people\n"
-        "    tags: [person]\n"
-        f"    destination: {dest / 'people'}\n"
-        "    group_by_year: false\n"
-        "unclassified:\n"
-        "  enabled: true\n"
-        "  folder_name: others\n"
-        f"  destination: {dest}\n"
-        "video:\n"
-        f"  destination: {dest / 'videos'}\n"
+    (configs / "server.yaml").write_text(
+        "sync:\n"
+        "  tag_groups:\n"
+        "    - name: people\n"
+        "      tags: [person]\n"
+        f"      destination: {dest / 'people'}\n"
+        "  video:\n"
+        f"    destination: {dest / 'videos'}\n"
+        "  on_collision: rename\n"
     )
 
 
@@ -286,7 +287,7 @@ def test_response_keys_cover_nonnullable_client_dto_fields(tmp_path):
     """For each non-mutating sync endpoint, the real JSON keys contain every
     non-nullable @Json field the client response DTO declares."""
     app, configs = _build_app(tmp_path)
-    _write_groupby_config(configs)
+    _write_sync_template(configs)
     client = TestClient(app)
     token = _trust(client, "dev-1")
     h = _auth(token)
@@ -295,6 +296,10 @@ def test_response_keys_cover_nonnullable_client_dto_fields(tmp_path):
     identity_src = _read_kotlin("IdentityDtos")
     profile_src = _read_kotlin("ProfileDtos")
     device_src = _read_kotlin("DeviceDtos")
+
+    # A profile exists only when created in the DB (unauthenticated POST); a
+    # config file no longer seeds one. The returned id opens the session below.
+    profile_id = client.post("/api/sync/profiles", json={"name": "alice"}).json()["profile_id"]
 
     # profiles (list of ProfileDto)
     profiles = client.get("/api/sync/profiles", headers=h).json()
@@ -316,7 +321,7 @@ def test_response_keys_cover_nonnullable_client_dto_fields(tmp_path):
     assert set(verify["results"][0].keys()) >= _nonnullable_json_fields(identity_src, "VerifyResultDto")
 
     # session open (OpenSessionResponse)
-    open_resp = client.post("/api/sync/sessions", json={"profile_id": "alice_groupby"}, headers=h).json()
+    open_resp = client.post("/api/sync/sessions", json={"profile_id": profile_id}, headers=h).json()
     sid = open_resp["session_id"]
     assert set(open_resp.keys()) >= _nonnullable_json_fields(sessions_src, "OpenSessionResponse")
 
@@ -335,10 +340,11 @@ def test_response_keys_cover_nonnullable_client_dto_fields(tmp_path):
 
 def test_profile_list_keys_equal_profile_dto_fields(tmp_path):
     """Keys from GET /api/sync/profiles == client ProfileDto @Json fields."""
-    app, configs = _build_app(tmp_path)
-    _write_groupby_config(configs)
+    app, _ = _build_app(tmp_path)
     client = TestClient(app)
     token = _trust(client, "dev-1")
+    # Seed a profile via the DB endpoint; a config file no longer lists one.
+    client.post("/api/sync/profiles", json={"name": "alice"})
 
     profiles = client.get("/api/sync/profiles", headers=_auth(token)).json()
     server_keys = set(profiles[0].keys())
@@ -450,7 +456,14 @@ def test_bearer_token_attach_omit_rule_matches():
     client_omit = _client_omit_routes(_read_kotlin("AuthInterceptor"), _read_kotlin("SyncApi"))
     server_open = _server_unauthenticated_sync_routes()
     expected = {("POST", "/api/sync/devices"), ("GET", "/api/sync/devices/{}/status")}
-    assert client_omit == server_open == expected
+    # The token-omission contract covers only the pre-pairing routes: the client
+    # must call these before it has a token, and they are genuinely
+    # unauthenticated server-side. GET/POST /api/sync/profiles are also
+    # unauthenticated but token-tolerant — the phone calls them post-pairing (so
+    # it harmlessly sends its token) and the LAN web admin calls them with none.
+    # They are therefore a superset of `server_open`, not part of the omit rule.
+    assert client_omit == expected
+    assert expected <= server_open
 
 
 # ===========================================================================
