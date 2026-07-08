@@ -66,6 +66,16 @@ interface SyncApi {
     @GET("api/sync/profiles")
     suspend fun profiles(): List<ProfileDto>
 
+    /**
+     * Create a profile from a user-entered name. Unauthenticated, like [profiles].
+     * The server returns the created row; a 409 signals a duplicate name and a 400
+     * an invalid one, which callers map to distinct messages.
+     */
+    @POST("api/sync/profiles")
+    suspend fun createProfile(
+        @Body body: eu.caiq.imagesorter.sync.data.api.dto.ProfileRequest,
+    ): ProfileDto
+
     // --- Reconcile / verify ---
 
     @POST("api/sync/reconcile")

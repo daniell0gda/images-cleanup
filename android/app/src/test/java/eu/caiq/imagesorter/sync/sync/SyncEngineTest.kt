@@ -287,6 +287,57 @@ class SyncEngineTest {
     }
 
     @Test
+    fun sessionOpen503SurfacesDistinctNotConfiguredStateAndKeepsProfile() = runTest {
+        // The server has no `sync:` template, so session-open returns 503. This must
+        // become a distinct "sync isn't set up" state — not a generic "Server error
+        // 503" — and must NOT clear the chosen profile (the picker step is untouched).
+        val a = item("a.jpg", 5)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> MockResponse().setResponseCode(503).setBody("{}")
+                else -> resp("{}")
+            }
+        }
+        val prefs = FakeSyncPrefs()
+        val engine = engine(FakeMediaSource(listOf(a)), prefs)
+
+        engine.run()
+
+        assertEquals(SyncPhase.ERROR, engine.progress.value.phase)
+        assertEquals(SyncEngine.SYNC_NOT_CONFIGURED_MESSAGE, engine.progress.value.message)
+        assertTrue("503 must not be the generic server-error message", engine.progress.value.message != "Server error 503")
+        assertTrue("503 must not clear the chosen profile", !prefs.profileCleared)
+    }
+
+    @Test
+    fun sessionOpen404ClearsProfileAndSignalsProfileRemoved() = runTest {
+        // The chosen profile was deleted server-side: session-open returns 404. The
+        // engine self-heals by clearing the stored profileId and surfacing the
+        // distinct "profile removed" signal the UI routes back to the picker on.
+        val a = item("a.jpg", 5)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> MockResponse().setResponseCode(404).setBody("{}")
+                else -> resp("{}")
+            }
+        }
+        val prefs = FakeSyncPrefs()
+        val engine = engine(FakeMediaSource(listOf(a)), prefs)
+
+        engine.run()
+
+        assertEquals(SyncPhase.ERROR, engine.progress.value.phase)
+        assertEquals(SyncEngine.PROFILE_REMOVED_MESSAGE, engine.progress.value.message)
+        assertTrue("404 must clear the removed profile", prefs.profileCleared)
+    }
+
+    @Test
     fun transportErrorLeavesFilePendingAndContinuesBatch() = runTest {
         val a = item("a.jpg", 5)
         val b = item("b.jpg", 5)
@@ -1037,6 +1088,7 @@ class SyncEngineTest {
             gate.await()
             return "groupby"
         }
+        override fun clearProfileId() {}
         override fun getUploadConcurrency(): Int = 1
         override fun setMediaGeneration(value: Long) {}
         override fun clearTokenForRepair() {}

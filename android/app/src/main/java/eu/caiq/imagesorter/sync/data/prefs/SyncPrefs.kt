@@ -8,6 +8,9 @@ package eu.caiq.imagesorter.sync.data.prefs
  */
 interface SyncPrefs {
     fun getProfileId(): String?
+
+    /** Forget the chosen profile (e.g. session-open reported it removed server-side). */
+    fun clearProfileId()
     fun getUploadConcurrency(): Int
     fun setMediaGeneration(value: Long)
     fun clearTokenForRepair()

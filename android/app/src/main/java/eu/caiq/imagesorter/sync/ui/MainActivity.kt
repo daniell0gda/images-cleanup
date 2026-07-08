@@ -210,8 +210,16 @@ private fun SyncTabContent(
 
         AppScreen.PROFILE_PICKER -> {
             val profiles by viewModel.profiles.collectAsStateWithLifecycle()
+            val createError by viewModel.createProfileError.collectAsStateWithLifecycle()
+            val notice by viewModel.profileNotice.collectAsStateWithLifecycle()
             LaunchedEffect(Unit) { if (profiles.isEmpty()) viewModel.loadProfiles() }
-            ProfilePickerScreen(profiles = profiles, onProfileChosen = viewModel::chooseProfile)
+            ProfilePickerScreen(
+                profiles = profiles,
+                onProfileChosen = viewModel::chooseProfile,
+                onCreateProfile = viewModel::createProfile,
+                createError = createError,
+                noticeMessage = notice,
+            )
         }
 
         AppScreen.MAIN -> {

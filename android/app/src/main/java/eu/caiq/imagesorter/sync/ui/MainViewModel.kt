@@ -52,6 +52,7 @@ interface RoutingPrefs {
     fun setServerAddress(value: String?)
     fun isTrusted(): Boolean
     fun getProfileId(): String?
+    fun setProfileId(value: String)
 }
 
 /**
@@ -66,7 +67,24 @@ class MainViewModel(
     private val locator: ServiceLocator,
     private val routingPrefs: RoutingPrefs = locator.securePrefs,
     private val apiFactory: (String) -> eu.caiq.imagesorter.sync.data.api.SyncApi = locator::buildApi,
+    // Supplier (not a captured instance) so a re-pointed server address is honored:
+    // locator.api rebuilds when the address changes.
+    private val apiProvider: () -> eu.caiq.imagesorter.sync.data.api.SyncApi = { locator.api },
 ) : ViewModel() {
+
+    init {
+        // Self-healing route-back: when a sync run reports the chosen profile was
+        // removed server-side (session-open 404), return to the picker with a notice.
+        viewModelScope.launch {
+            locator.syncEngine.progress.collect { progress ->
+                if (progress.phase == eu.caiq.imagesorter.sync.sync.SyncPhase.ERROR &&
+                    progress.message == eu.caiq.imagesorter.sync.sync.SyncEngine.PROFILE_REMOVED_MESSAGE
+                ) {
+                    onSyncProfileRemoved()
+                }
+            }
+        }
+    }
 
     private val _screen = MutableStateFlow(initialScreen())
     val screen: StateFlow<AppScreen> = _screen.asStateFlow()
@@ -96,6 +114,16 @@ class MainViewModel(
 
     private val _profiles = MutableStateFlow<List<ProfileDto>>(emptyList())
     val profiles: StateFlow<List<ProfileDto>> = _profiles.asStateFlow()
+
+    private val _createProfileError = MutableStateFlow<String?>(null)
+
+    /** Validation message for a failed profile creation, or null when there is none. */
+    val createProfileError: StateFlow<String?> = _createProfileError.asStateFlow()
+
+    private val _profileNotice = MutableStateFlow<String?>(null)
+
+    /** One-off banner on the picker (e.g. the chosen profile was removed), or null. */
+    val profileNotice: StateFlow<String?> = _profileNotice.asStateFlow()
 
     private val _filter = MutableStateFlow(StatusFilter.WORKING_SET)
     val filter: StateFlow<StatusFilter> = _filter.asStateFlow()
@@ -241,12 +269,51 @@ class MainViewModel(
     // --- Profiles ---
 
     fun loadProfiles() {
-        viewModelScope.launch { _profiles.value = locator.api.profiles() }
+        viewModelScope.launch {
+            // A failed read (server briefly unreachable) leaves the current list as-is
+            // rather than crashing the picker.
+            runCatching { apiProvider().profiles() }.getOrNull()?.let { _profiles.value = it }
+        }
     }
 
     fun chooseProfile(profile: ProfileDto) {
-        locator.securePrefs.setProfileId(profile.profileId)
+        routingPrefs.setProfileId(profile.profileId)
+        _profileNotice.value = null
         _screen.value = AppScreen.MAIN
+    }
+
+    /**
+     * Create a profile from the picker's inline field. On success the new profile is
+     * auto-selected and the app advances to the main screen (no second tap). On a
+     * 409/400 the picker stays put and surfaces a distinct, correctable message.
+     */
+    fun createProfile(rawName: String) {
+        viewModelScope.launch {
+            _createProfileError.value = null
+            try {
+                val created = apiProvider().createProfile(
+                    eu.caiq.imagesorter.sync.data.api.dto.ProfileRequest(rawName.trim()),
+                )
+                chooseProfile(created)
+            } catch (e: retrofit2.HttpException) {
+                _createProfileError.value = profileErrorMessage(e.code())
+            }
+        }
+    }
+
+    /** Distinct human-readable message per server rejection code. `internal` so the
+     * mapping is unit-testable without standing up the network seam. */
+    internal fun profileErrorMessage(code: Int): String = when (code) {
+        HTTP_CONFLICT -> "A profile with that name already exists — pick a different one."
+        HTTP_BAD_REQUEST -> "That name isn't valid. Use letters, digits and spaces (max 64)."
+        else -> "Couldn't create the profile (error $code). Please try again."
+    }
+
+    /** Route back to the picker with a notice after a run found the profile removed. */
+    internal fun onSyncProfileRemoved() {
+        _profileNotice.value = eu.caiq.imagesorter.sync.sync.SyncEngine.PROFILE_REMOVED_MESSAGE
+        _screen.value = AppScreen.PROFILE_PICKER
+        loadProfiles()
     }
 
     // --- Sync ---
@@ -441,4 +508,9 @@ class MainViewModel(
                         (it.status != SyncStatus.SYNCED || it.failureReason != null)
                 }
         }
+
+    companion object {
+        private const val HTTP_BAD_REQUEST = 400
+        private const val HTTP_CONFLICT = 409
+    }
 }

@@ -53,9 +53,12 @@ class FakeSyncPrefs(
         private set
     var repairCleared = false
         private set
+    var profileCleared = false
+        private set
     private var storedServerAddress: String? = null
 
     override fun getProfileId(): String? = profileId
+    override fun clearProfileId() { profileCleared = true }
     override fun getUploadConcurrency(): Int = concurrency
     override fun setMediaGeneration(value: Long) { mediaGeneration = value }
     override fun clearTokenForRepair() { repairCleared = true }

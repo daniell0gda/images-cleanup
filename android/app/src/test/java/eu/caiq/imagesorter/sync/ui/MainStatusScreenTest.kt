@@ -291,6 +291,27 @@ class MainStatusScreenTest {
     }
 
     @Test
+    fun syncNotConfiguredErrorRendersDistinctMessageNotGenericServerError() {
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MainStatusScreen(
+                    rows = rows,
+                    selectedFilter = StatusFilter.ALL,
+                    onFilterChange = {},
+                    onSyncNow = {},
+                    onCleanup = {},
+                    syncProgress = SyncProgress(
+                        phase = SyncPhase.ERROR,
+                        message = "Sync isn't set up on the server yet.",
+                    ),
+                )
+            }
+        }
+        composeRule.onNodeWithText("Sync isn't set up on the server yet.").assertExists()
+        composeRule.onNodeWithText("Server error 503").assertDoesNotExist()
+    }
+
+    @Test
     fun reportingPhaseExplainsServerSideSorting() {
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {

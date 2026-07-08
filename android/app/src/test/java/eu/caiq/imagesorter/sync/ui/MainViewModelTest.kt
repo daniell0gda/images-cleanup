@@ -18,6 +18,7 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -32,12 +33,33 @@ import retrofit2.Response
 private class FakeRoutingPrefs(
     private var address: String? = null,
     private val trusted: Boolean = false,
-    private val profileId: String? = null,
+    private var profileId: String? = null,
 ) : RoutingPrefs {
     override fun getServerAddress(): String? = address
     override fun setServerAddress(value: String?) { address = value }
     override fun isTrusted(): Boolean = trusted
     override fun getProfileId(): String? = profileId
+    override fun setProfileId(value: String) { profileId = value }
+}
+
+/**
+ * [SyncApi] stub for profile create/list flows: [list] backs `profiles()`, while
+ * `createProfile` either returns [created] or throws an [errorCode] HttpException.
+ */
+private class FakeProfileApi(
+    private val list: List<eu.caiq.imagesorter.sync.data.api.dto.ProfileDto> = emptyList(),
+    private val created: eu.caiq.imagesorter.sync.data.api.dto.ProfileDto? = null,
+    private val errorCode: Int? = null,
+) : SyncApi by NotImplementedSyncApi() {
+    override suspend fun profiles() = list
+    override suspend fun createProfile(
+        body: eu.caiq.imagesorter.sync.data.api.dto.ProfileRequest,
+    ): eu.caiq.imagesorter.sync.data.api.dto.ProfileDto {
+        errorCode?.let {
+            throw retrofit2.HttpException(Response.error<Any>(it, "".toResponseBody()))
+        }
+        return created ?: eu.caiq.imagesorter.sync.data.api.dto.ProfileDto(body.name, body.name)
+    }
 }
 
 /**
@@ -80,6 +102,7 @@ private class NotImplementedSyncApi : SyncApi {
     override suspend fun registerDevice(body: eu.caiq.imagesorter.sync.data.api.dto.RegisterDeviceRequest) = fail()
     override suspend fun deviceStatus(deviceId: String, pairingCode: String?) = fail()
     override suspend fun profiles() = fail()
+    override suspend fun createProfile(body: eu.caiq.imagesorter.sync.data.api.dto.ProfileRequest) = fail()
     override suspend fun reconcile(identities: List<eu.caiq.imagesorter.sync.data.api.dto.IdentityDto>) = fail()
     override suspend fun verify(identities: List<eu.caiq.imagesorter.sync.data.api.dto.IdentityDto>) = fail()
     override suspend fun openSession(body: eu.caiq.imagesorter.sync.data.api.dto.OpenSessionRequest) = fail()
@@ -271,6 +294,88 @@ class MainViewModelTest {
         assertEquals(HomeTab.SYNC, vm.homeTab.value)
         vm.selectHomeTab(HomeTab.PHOTOS)
         assertEquals(HomeTab.PHOTOS, vm.homeTab.value)
+    }
+
+    private fun profile(id: String) =
+        eu.caiq.imagesorter.sync.data.api.dto.ProfileDto(profileId = id, displayName = id)
+
+    private fun vmWithApi(prefs: RoutingPrefs, api: SyncApi): MainViewModel =
+        MainViewModel(ServiceLocator(context), prefs, apiProvider = { api })
+
+    @Test
+    fun choosingProfileStoresIdAndAdvancesToMain() {
+        val prefs = FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = null)
+        val vm = vmWith(prefs)
+
+        vm.chooseProfile(profile("Beach"))
+
+        assertEquals("Beach", prefs.getProfileId())
+        assertEquals(AppScreen.MAIN, vm.screen.value)
+    }
+
+    @Test
+    fun createProfileSuccessAutoSelectsAndAdvancesWithoutASecondTap() = runTest(dispatcher) {
+        val prefs = FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = null)
+        val vm = vmWithApi(prefs, FakeProfileApi(created = profile("Beach")))
+
+        vm.createProfile("beach")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("Beach", prefs.getProfileId())
+        assertEquals(AppScreen.MAIN, vm.screen.value)
+        assertNull(vm.createProfileError.value)
+    }
+
+    @Test
+    fun createProfileDuplicateSurfaces409MessageAndStaysOnPicker() = runTest(dispatcher) {
+        val prefs = FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = null)
+        val vm = vmWithApi(prefs, FakeProfileApi(errorCode = 409))
+
+        vm.createProfile("Existing")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertNotNull(vm.createProfileError.value)
+        assertNull(prefs.getProfileId())
+        // No advance: the name can be corrected on the picker.
+        assertNotEquals(AppScreen.MAIN, vm.screen.value)
+    }
+
+    @Test
+    fun profileErrorMessageIsDistinctAndHumanReadableForDuplicateVsInvalid() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = null))
+
+        val duplicate = vm.profileErrorMessage(409)
+        val invalid = vm.profileErrorMessage(400)
+
+        assertNotEquals(duplicate, invalid)
+        assertFalse("409 message must not be the generic server-error text", duplicate.startsWith("Server error"))
+        assertFalse("400 message must not be the generic server-error text", invalid.startsWith("Server error"))
+    }
+
+    @Test
+    fun syncProfileRemovedRoutesBackToPickerWithNotice() = runTest(dispatcher) {
+        val prefs = FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "Beach")
+        val vm = vmWithApi(prefs, FakeProfileApi(list = emptyList()))
+
+        vm.onSyncProfileRemoved()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(AppScreen.PROFILE_PICKER, vm.screen.value)
+        assertNotNull(vm.profileNotice.value)
+    }
+
+    @Test
+    fun exposesNoProfileDeleteOrRenameSurface() {
+        val forbidden = listOf("delete", "rename")
+        val names = (SyncApi::class.java.methods.map { it.name } +
+            MainViewModel::class.java.methods.map { it.name })
+        names.forEach { name ->
+            val lower = name.lowercase()
+            assertFalse(
+                "unexpected profile delete/rename surface: $name",
+                lower.contains("profile") && forbidden.any { lower.contains(it) },
+            )
+        }
     }
 
     @Test

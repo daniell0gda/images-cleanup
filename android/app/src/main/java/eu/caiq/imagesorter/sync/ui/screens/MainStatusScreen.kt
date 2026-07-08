@@ -236,6 +236,17 @@ fun MainStatusScreen(
             }
         }
 
+        // A run that ended in ERROR surfaces its message here (e.g. the distinct
+        // "sync isn't set up" state for a session-open 503) instead of failing silently.
+        AnimatedVisibility(syncProgress.phase == SyncPhase.ERROR && syncProgress.message != null) {
+            Text(
+                syncProgress.message ?: "",
+                style = MonoLabel.copy(fontSize = 12.5.sp),
+                color = c.coral,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+
         Spacer(Modifier.height(18.dp))
         FilterRow(selectedFilter, onFilterChange)
         Spacer(Modifier.height(14.dp))

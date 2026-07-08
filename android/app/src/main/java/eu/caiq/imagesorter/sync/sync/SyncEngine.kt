@@ -99,12 +99,23 @@ class SyncEngine(
 
                 _progress.value = _progress.value.copy(phase = SyncPhase.DONE)
             } catch (e: HttpException) {
-                if (e.code() == HTTP_UNAUTHORIZED) {
-                    // Revoked or invalid token → force re-pair on next launch.
-                    securePrefs.clearTokenForRepair()
-                    _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Re-pairing required")
-                } else {
-                    _progress.value = SyncProgress(phase = SyncPhase.ERROR, message = "Server error ${e.code()}")
+                _progress.value = when (e.code()) {
+                    HTTP_UNAUTHORIZED -> {
+                        // Revoked or invalid token → force re-pair on next launch.
+                        securePrefs.clearTokenForRepair()
+                        SyncProgress(phase = SyncPhase.ERROR, message = "Re-pairing required")
+                    }
+                    // Session-open 503: the server has no sync template configured.
+                    // A distinct, non-generic state so the UI can explain it.
+                    HTTP_UNAVAILABLE ->
+                        SyncProgress(phase = SyncPhase.ERROR, message = SYNC_NOT_CONFIGURED_MESSAGE)
+                    // Session-open 404: the chosen profile was removed server-side.
+                    // Self-heal by forgetting it so the app re-routes to the picker.
+                    HTTP_NOT_FOUND -> {
+                        securePrefs.clearProfileId()
+                        SyncProgress(phase = SyncPhase.ERROR, message = PROFILE_REMOVED_MESSAGE)
+                    }
+                    else -> SyncProgress(phase = SyncPhase.ERROR, message = "Server error ${e.code()}")
                 }
             }
         } finally {
@@ -520,8 +531,16 @@ class SyncEngine(
         // classification work stays bounded (keeping it under the HTTP read timeout).
         private const val UPLOAD_BATCH = 100
         private const val HTTP_UNAUTHORIZED = 401
+        private const val HTTP_NOT_FOUND = 404
+        private const val HTTP_UNAVAILABLE = 503
         private const val OUTCOME_SYNCED = "synced"
         private const val OUTCOME_UNCLASSIFIED = "unclassified"
+
+        /** Session-open 503 UI state: the server's `sync:` template is not set up. */
+        const val SYNC_NOT_CONFIGURED_MESSAGE = "Sync isn't set up on the server yet."
+
+        /** Session-open 404 UI state: the chosen profile no longer exists server-side. */
+        const val PROFILE_REMOVED_MESSAGE = "Your sync profile was removed. Choose another."
 
         // Window during which a repeat discover() reuses the last full reconcile
         // instead of re-enumerating the whole library. run() is never debounced.

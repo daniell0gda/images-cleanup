@@ -86,8 +86,12 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.images
 
     override fun getProfileId(): String? = plain.getString(KEY_PROFILE_ID, null)
 
-    fun setProfileId(profileId: String) {
-        plain.edit().putString(KEY_PROFILE_ID, profileId).apply()
+    override fun setProfileId(value: String) {
+        plain.edit().putString(KEY_PROFILE_ID, value).apply()
+    }
+
+    override fun clearProfileId() {
+        plain.edit().remove(KEY_PROFILE_ID).apply()
     }
 
     /**
