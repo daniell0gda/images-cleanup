@@ -372,6 +372,32 @@ def test_template_unclassified_enabled_is_true():
     )
 
 
+# ── from_raw: defaults/validation extracted from load ─────────────────────────
+
+def test_from_raw_builds_config_with_defaults():
+    """from_raw() applies the same defaults as load() without touching the filesystem."""
+    from imagesorter.config import from_raw
+    config = from_raw({"mode": "GroupByTags", "threads": 1})
+    assert config.batch_size == 16
+    assert config.confidence_threshold == 0.5
+    assert config.on_collision == "rename"
+    assert config.unclassified.enabled is True
+
+
+def test_from_raw_applies_overrides():
+    """from_raw() merges non-None overrides over the raw dict, like load()."""
+    from imagesorter.config import from_raw
+    config = from_raw({"mode": "GroupByTags", "threads": 1}, overrides={"threads": 4})
+    assert config.threads == 4
+
+
+def test_from_raw_validates_batch_size():
+    """from_raw() runs the same validation as load()."""
+    from imagesorter.config import from_raw
+    with pytest.raises(ValueError, match="batch_size"):
+        from_raw({"mode": "GroupByTags", "threads": 1, "batch_size": 0})
+
+
 # ── web_ui and similarity_time_window_minutes config keys ─────────────────────
 
 def test_load_web_ui_default_is_false(tmp_path):

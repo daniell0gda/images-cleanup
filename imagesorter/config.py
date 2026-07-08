@@ -123,6 +123,11 @@ def load(path: str, overrides: dict[str, Any] | None = None) -> Config:
     with open(path, encoding="utf-8") as fh:
         raw: dict[str, Any] = yaml.safe_load(fh) or {}
 
+    return from_raw(raw, overrides)
+
+
+def from_raw(raw: dict[str, Any], overrides: dict[str, Any] | None = None) -> Config:
+    """Build a Config from an already-read raw dict, applying overrides, defaults, and validation."""
     if overrides:
         raw.update({k: v for k, v in overrides.items() if v is not None})
 
