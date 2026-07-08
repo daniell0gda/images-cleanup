@@ -250,6 +250,11 @@ interface SettingsPayload {
   public_base_url: string;
 }
 
+interface SyncProfile {
+  profile_id: string;
+  display_name: string;
+}
+
 function SettingsView() {
   const [enabled, setEnabled] = useState(true);
   const [schedule, setSchedule] = useState("0 1 * * *");
@@ -272,6 +277,18 @@ function SettingsView() {
   const [publicSaving, setPublicSaving] = useState(false);
   const [publicError, setPublicError] = useState<string | null>(null);
 
+  const [profiles, setProfiles] = useState<SyncProfile[]>([]);
+  const [profileName, setProfileName] = useState("");
+  const [profileCreating, setProfileCreating] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  const fetchProfiles = useCallback(() => {
+    fetch("/api/sync/profiles")
+      .then((r) => r.json())
+      .then((p: SyncProfile[]) => setProfiles(Array.isArray(p) ? p : []))
+      .catch(() => {});
+  }, []);
+
   const applyPayload = useCallback((p: SettingsPayload) => {
     setEnabled(p.db_refresh.enabled);
     setSchedule(p.db_refresh.schedule);
@@ -290,7 +307,49 @@ function SettingsView() {
       .then((r) => r.json())
       .then(applyPayload)
       .catch(() => {});
-  }, [applyPayload]);
+    fetchProfiles();
+  }, [applyPayload, fetchProfiles]);
+
+  const createProfile = useCallback(async () => {
+    setProfileCreating(true);
+    setProfileError(null);
+    try {
+      const r = await fetch("/api/sync/profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: profileName.trim() }),
+      });
+      if (r.ok) {
+        setProfileName("");
+        fetchProfiles();
+      } else {
+        const body = await r.json().catch(() => null);
+        const fallback =
+          r.status === 409
+            ? "Profil o tej nazwie już istnieje."
+            : "Nieprawidłowa nazwa profilu.";
+        setProfileError(body?.detail ?? fallback);
+      }
+    } catch {
+      setProfileError("Serwer jest nieosiągalny.");
+    } finally {
+      setProfileCreating(false);
+    }
+  }, [profileName, fetchProfiles]);
+
+  const deleteProfile = useCallback(
+    async (profileId: string) => {
+      try {
+        await fetch(`/api/sync/profiles/${encodeURIComponent(profileId)}`, {
+          method: "DELETE",
+        });
+        fetchProfiles();
+      } catch {
+        /* leave the list as-is; the admin can retry */
+      }
+    },
+    [fetchProfiles],
+  );
 
   const save = useCallback(async () => {
     setSaving(true);
@@ -433,6 +492,51 @@ function SettingsView() {
       </Box>
 
       <Stack gap="md">
+        <Box className={classes.deviceCard}>
+          <Text className={classes.deviceName}>Profile synchronizacji</Text>
+          <Text className={classes.deviceMeta} mb="md">
+            Profile, na które telefony synchronizują zdjęcia. Nazwa profilu trafia
+            do metadanych zdjęć i pozwala filtrować je w galerii.
+          </Text>
+
+          <Stack gap="md">
+            {profiles.length > 0 ? (
+              <Stack gap="xs">
+                {profiles.map((p) => (
+                  <Group key={p.profile_id} justify="space-between" wrap="nowrap">
+                    <Text className={classes.deviceName}>{p.display_name}</Text>
+                    <ActionIcon
+                      variant="subtle"
+                      color="red"
+                      aria-label="Usuń profil"
+                      onClick={() => deleteProfile(p.profile_id)}
+                    >
+                      ✕
+                    </ActionIcon>
+                  </Group>
+                ))}
+              </Stack>
+            ) : (
+              <Text className={classes.deviceMeta}>
+                Nie utworzono jeszcze żadnego profilu.
+              </Text>
+            )}
+
+            <Group gap="xs" wrap="nowrap" align="flex-start">
+              <TextInput
+                style={{ flex: 1 }}
+                placeholder="Nazwa profilu"
+                value={profileName}
+                onChange={(e) => setProfileName(e.currentTarget.value)}
+                error={profileError}
+              />
+              <Button onClick={createProfile} loading={profileCreating}>
+                Utwórz
+              </Button>
+            </Group>
+          </Stack>
+        </Box>
+
         <Box className={classes.deviceCard}>
           <Text className={classes.deviceName}>Automatyczne odświeżanie</Text>
           <Text className={classes.deviceMeta} mb="md">
