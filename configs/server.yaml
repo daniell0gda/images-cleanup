@@ -1,4 +1,80 @@
+# =============================================================================
+# server.yaml — server-wide settings shared by ALL users (not per-profile).
+#
+# Lives next to the per-user CLI configs (config_<user>_*.yaml) but is a
+# different thing: the CLI configs drive direct `imagesorter` runs, while this
+# file configures the launcher server (scheduled jobs, media gallery, public
+# links) and the shared Android phone-sync sorting rules.
+#
+# Every section below is optional; a missing section falls back to the defaults
+# noted in its comment. Loaders: launcher/settings.py (db_refresh, media_library,
+# public_base_url) and launcher/server.py (the `sync:` block).
+# =============================================================================
+
+
+# --- Scheduled synced-file index refresh -------------------------------------
+# Prunes synced_files index rows whose destination file was deleted outside the
+# app, so the next phone reconcile re-uploads them. Default: enabled, 01:00 daily.
 db_refresh:
-  enabled: true
-  schedule: 0 1 * * *
+  enabled: true                # true | false
+  schedule: 0 1 * * *          # standard 5-field cron
+
+
+# --- Media gallery index ------------------------------------------------------
+# Scans the configured folders into the pre-built gallery collection on a
+# schedule. Default: enabled, 02:00 daily, no folders (nothing to scan).
+media_library:
+  enabled: true                # true | false
+  schedule: 0 2 * * *          # standard 5-field cron
+  folders: []                  # container paths to index (see path note below), e.g.:
+    # - /data/sorted
+
+
+# --- Public base URL for shared-album links ----------------------------------
+# Outer hostname used when building shareable album links (e.g. behind a reverse
+# proxy). Empty = fall back to the incoming request's base URL. Must be a full
+# scheme://host (a trailing slash is stripped).
 public_base_url: http://192.168.5.11:7000
+
+
+# --- Android phone-sync sorting rules (SHARED by every profile) --------------
+# The launcher routes every phone-synced photo through THIS block, regardless of
+# which profile the phone selected. A profile is only a name: it stamps a
+# `profile:<name>` tag into each photo (for gallery filtering) and does NOT
+# affect where the photo lands. All phones therefore share the destinations below.
+#
+# This block is REQUIRED for phone sync: with no `sync:` section, or an empty
+# `tag_groups`, the server refuses uploads (session-open returns 503
+# "sync not configured") rather than silently discarding photos.
+#
+# Only these fields are used for phone placement — tag_groups, video,
+# on_collision. (The full imagesorter Config schema is accepted for parsing, but
+# other fields like source_folder/threads/log_* are irrelevant to sync.)
+#
+# PATHS ARE CONTAINER PATHS, not Windows/UNC paths. docker-compose.yml mounts the
+# NAS share (\\JUSZKOWO_NAS\MediaPool\zdjecia) at /data, so every destination must
+# live under /data/... — a `\\NAS\...` path cannot be resolved inside the Linux
+# container. See DEPLOY-TRUENAS.md.
+sync:
+  # What to do when a file with the same name already exists at the destination.
+  on_collision: skip           # rename (keep both) | skip (treat as already backed up)
+
+  # Photos are classified by the detected objects (YOLO). A photo is placed into
+  # the FIRST tag_group whose tags are ALL detected (AND logic). A photo matching
+  # no group is discarded from sync (never placed in an "unclassified" folder).
+  # In force-place mode the phone bypasses classification and everything goes to
+  # the FIRST tag_group below — so keep the primary group first.
+  tag_groups:
+    - name: people             # human-readable label (used in logs)
+      tags:                    # ALL of these must be detected to match
+        - person
+      destination: /data/sorted
+      group_by_year: true      # append /<year> to the destination
+      group_by_month: false    # append /<month> under the year
+
+  # Videos skip classification and go straight here. Omit this section to reject
+  # video uploads (they fail with no_video_destination).
+  video:
+    destination: /data/sorted
+    group_by_year: true
+    group_by_month: false
