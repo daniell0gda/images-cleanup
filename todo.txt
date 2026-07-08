@@ -1,3 +1,7 @@
 1. rename config so that it's clear what sections are for images and what for videos
 2. sync should always start when app is opened
 3. When not-people are marked a that they should be synced, they should dissapear right away from this list
+4. if images are horisontal try to rotate them to take most space (android)
+5. when video/photo is visible then "latest" button should not be visible
+6. when album is created user should see a confirmation buble with button "go to album"
+7. remove album feature
