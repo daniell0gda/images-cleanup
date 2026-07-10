@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -909,6 +910,18 @@ private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
     val exoPlayer = remember(id) {
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(bearerDataSourceFactory(token)))
+            // Start playback after buffering ~0.5s instead of the 2.5s default, so
+            // the first frame appears far sooner on a fast local network.
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                        DefaultLoadControl.DEFAULT_MAX_BUFFER_MS,
+                        /* bufferForPlaybackMs = */ 500,
+                        /* bufferForPlaybackAfterRebufferMs = */ 1000,
+                    )
+                    .build()
+            )
             .build()
             .apply {
                 setMediaItem(buildVideoMediaItem(urls, id))
