@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -72,6 +73,15 @@ fun previewPagingEnabled(scale: Float): Boolean = scale == 1f
  * the two-finger pinch that initiates a zoom is unaffected.
  */
 fun previewCanPan(scale: Float): Boolean = scale > 1f
+
+/**
+ * Degrees to rotate a preview page. A landscape image ([isRotatableLandscape], i.e.
+ * an image whose width exceeds its height) shown in a portrait viewport is turned 90°
+ * so it fills the maximum screen area; portrait/square images and non-image pages
+ * (e.g. video) are never rotated.
+ */
+fun previewRotationDegrees(isRotatableLandscape: Boolean, viewportPortrait: Boolean): Float =
+    if (isRotatableLandscape && viewportPortrait) 90f else 0f
 
 /**
  * The preview index to show after deleting the item that was at [deletedIndex], given
@@ -208,6 +218,7 @@ fun <T> MediaPreviewPager(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     zoomable: (T) -> Boolean = { true },
+    landscape: (T) -> Boolean = { false },
     actions: @Composable (index: Int) -> Unit = {},
     image: @Composable (T) -> Unit,
 ) {
@@ -249,7 +260,8 @@ fun <T> MediaPreviewPager(
         ) { page ->
             val pageZoomable = zoomable(items[page])
             val transformed = pageZoomable && page == pagerState.currentPage
-            Box(
+            val pageLandscape = landscape(items[page])
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
                     // canPan only at scale > 1f so a 1:1 single-finger drag falls
@@ -275,7 +287,24 @@ fun <T> MediaPreviewPager(
                     ),
                 contentAlignment = Alignment.Center,
             ) {
-                image(items[page])
+                // Rotation is a nested layer under the zoom/pan graphicsLayer, so pinch,
+                // pan and page-swipe still operate in unrotated screen space exactly as
+                // on a normal page; only the drawn image turns.
+                val rotation = previewRotationDegrees(pageLandscape, maxHeight >= maxWidth)
+                if (rotation != 0f) {
+                    // Swap width/height so the rotated landscape image fills the portrait
+                    // viewport rather than being letterboxed at its upright size.
+                    Box(
+                        modifier = Modifier
+                            .size(maxHeight, maxWidth)
+                            .graphicsLayer { rotationZ = rotation },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        image(items[page])
+                    }
+                } else {
+                    image(items[page])
+                }
             }
         }
 

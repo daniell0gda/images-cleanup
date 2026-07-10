@@ -99,6 +99,22 @@ class MainViewModel(
         _homeTab.value = tab
     }
 
+    private val _pendingAlbumId = MutableStateFlow<Long?>(null)
+
+    /** Album the Albums tab should open on entry (e.g. one just created on Photos), or null. */
+    val pendingAlbumId: StateFlow<Long?> = _pendingAlbumId.asStateFlow()
+
+    /** Navigate to a freshly created album: switch to the Albums tab and open its detail. */
+    fun goToAlbum(albumId: Long) {
+        _pendingAlbumId.value = albumId
+        _homeTab.value = HomeTab.ALBUMS
+    }
+
+    /** Clear the pending album once the Albums tab has opened it, so it opens only once. */
+    fun consumePendingAlbum() {
+        _pendingAlbumId.value = null
+    }
+
     private val _serverSetupError = MutableStateFlow<String?>(null)
 
     /** Error message for the server-setup screen, or null when there is none. */

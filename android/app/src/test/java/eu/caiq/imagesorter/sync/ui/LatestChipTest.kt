@@ -53,6 +53,21 @@ class LatestChipTest {
     }
 
     @Test
+    fun chipHiddenWhilePreviewOpenRegardlessOfScrollOrSeek() {
+        // The fullscreen viewer covers the grid, so the Latest chip must not show
+        // through it — even when scrolled past the top or with a seek/segment active.
+        assertFalse(shouldShowLatestChip(firstVisibleItemIndex = 42, isSeekActive = false, previewOpen = true))
+        assertFalse(shouldShowLatestChip(firstVisibleItemIndex = 0, isSeekActive = true, previewOpen = true))
+    }
+
+    @Test
+    fun closingPreviewRestoresPreviousVisibilityRules() {
+        // With the preview closed the ordinary rules apply again.
+        assertTrue(shouldShowLatestChip(firstVisibleItemIndex = 1, isSeekActive = false, previewOpen = false))
+        assertFalse(shouldShowLatestChip(firstVisibleItemIndex = 0, isSeekActive = false, previewOpen = false))
+    }
+
+    @Test
     fun chipShownWheneverSegmentModeIsActive() {
         // Segment mode is a non-timeline view: the flag PhotosScreen passes here is
         // `segment != null`, so the Latest chip is always visible while a segment is shown.

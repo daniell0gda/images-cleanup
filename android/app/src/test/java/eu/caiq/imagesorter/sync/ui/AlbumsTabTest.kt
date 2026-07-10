@@ -15,6 +15,7 @@ import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
 import eu.caiq.imagesorter.sync.data.media.AlbumRepository
 import eu.caiq.imagesorter.sync.ui.screens.AlbumTile
 import eu.caiq.imagesorter.sync.ui.screens.albumItemsToEntities
+import eu.caiq.imagesorter.sync.ui.screens.openAlbumFor
 import eu.caiq.imagesorter.sync.ui.screens.removeFromAlbum
 import eu.caiq.imagesorter.sync.ui.screens.shareAlbumLink
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
@@ -102,6 +103,19 @@ class AlbumsTabTest {
         val entities = albumItemsToEntities(items)
         assertEquals(listOf(30L, 20L), entities.map { it.id })
         assertEquals("video", entities[1].kind)
+    }
+
+    @Test
+    fun openAlbumForResolvesSelectedIdToItsAlbumAndNullKeepsTheList() {
+        val albums = listOf(
+            AlbumDto(1, "Trip", null, "2024-01-01T00:00:00", 3, null, false, null),
+            AlbumDto(2, "Beach", null, "2024-01-02T00:00:00", 5, null, false, null),
+        )
+        // A "go to album" selection opens that album's detail...
+        assertEquals(2L, openAlbumFor(2, albums)?.id)
+        // ...an unknown id (album not yet loaded) and no selection both keep the list.
+        assertEquals(null, openAlbumFor(99, albums))
+        assertEquals(null, openAlbumFor(null, albums))
     }
 
     @Test

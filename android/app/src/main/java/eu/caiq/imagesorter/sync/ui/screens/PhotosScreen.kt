@@ -248,7 +248,10 @@ private fun VideoBadge(modifier: Modifier = Modifier) {
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun PhotosScreen(modifier: Modifier = Modifier) {
+fun PhotosScreen(
+    modifier: Modifier = Modifier,
+    onGoToAlbum: (Long) -> Unit = {},
+) {
     val context = LocalContext.current
     val locator = (context.applicationContext as SyncApp).serviceLocator
     // Prefs (Keystore-backed) can be unavailable in a bare test harness; degrade to
@@ -265,12 +268,20 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     var availableDates by remember { mutableStateOf<MediaDatesDto>(emptyMap()) }
     val segmentActive = segment != null
 
-    val flow = remember(locator, segment) {
+    // Profile filter: null = the all-profiles default; a profile id scopes the timeline to
+    // media placed by that sync profile. The choices come from GET /api/sync/profiles.
+    var profileFilter by remember { mutableStateOf<String?>(null) }
+    var profiles by remember { mutableStateOf<List<eu.caiq.imagesorter.sync.data.api.dto.ProfileDto>>(emptyList()) }
+    LaunchedEffect(locator) {
+        profiles = runCatching { locator.api.profiles() }.getOrDefault(emptyList())
+    }
+
+    val flow = remember(locator, segment, profileFilter) {
         runCatching {
             val repo = locator.mediaRepository
             val active = segment
             if (active == null) {
-                repo.timeline().map { it.insertDayHeaders() }
+                repo.timeline(profileFilter).map { it.insertDayHeaders() }
             } else {
                 repo.segmentTimeline(active.date, segmentDatePrefix(active)).map { it.insertDayHeaders() }
             }
@@ -296,6 +307,7 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
     val inSelectionMode = selectedIds.isNotEmpty()
 
     val repository = remember(locator) { runCatching { locator.mediaRepository }.getOrNull() }
+    val syncEngine = remember(locator) { runCatching { locator.syncEngine }.getOrNull() }
     // Load the available-dates tree once so adjacent-segment navigation can resolve against it.
     LaunchedEffect(repository) {
         if (repository != null) availableDates = runCatching { repository.availableDates() }.getOrDefault(emptyMap())
@@ -389,6 +401,18 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        // The profile filter sits at the top-end of the gallery. Hidden while selecting or
+        // previewing so it does not fight the selection bar or show through the viewer. A pick
+        // rebuilds the timeline flow scoped to that profile (or clears back to all-profiles).
+        if (!inSelectionMode && previewIndex == null) {
+            ProfileFilter(
+                options = profileFilterOptions(profiles),
+                selected = profileFilter,
+                onSelect = { profileFilter = it },
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+            )
+        }
+
         if (inSelectionMode) {
             SelectionActionsBar(
                 count = selectedIds.size,
@@ -422,6 +446,9 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                                     repo = albumRepo,
                                     copyToClipboard = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) },
                                     confirm = { scope.launch { snackbarHostState.showSnackbar("Link copied") } },
+                                    onCreated = { album ->
+                                        scope.launch { confirmAlbumCreated(snackbarHostState, album.id, onGoToAlbum) }
+                                    },
                                 )
                             }
                         }
@@ -498,9 +525,39 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                         )
                     }
                 }
+                // Opening the Photos tab (this composition re-enters on first arrival and on
+                // return from another tab) refreshes immediately, bypassing the 30s floor but
+                // skipping while a refresh is already in flight.
+                LaunchedEffect(Unit) {
+                    refreshNow(
+                        now = { System.currentTimeMillis() },
+                        isRefreshing = { li.loadState.mediator?.refresh is LoadState.Loading },
+                        throttle = repository.refreshThrottle,
+                        refresh = { li.refresh() },
+                    )
+                }
+                // Refresh when a sync batch finishes server-side grouping (session completed +
+                // outcomes reported) so the newly synced items appear without user interaction.
+                if (syncEngine != null) {
+                    LaunchedEffect(li, repository, syncEngine) {
+                        syncCompletionRefreshLoop(
+                            completions = syncEngine.syncCompletions,
+                            now = { System.currentTimeMillis() },
+                            isRefreshing = { li.loadState.mediator?.refresh is LoadState.Loading },
+                            throttle = repository.refreshThrottle,
+                            refresh = { li.refresh() },
+                        )
+                    }
+                }
             }
             val showLatest by remember(segmentActive) {
-                derivedStateOf { shouldShowLatestChip(gridState.firstVisibleItemIndex, segmentActive) }
+                derivedStateOf {
+                    shouldShowLatestChip(
+                        gridState.firstVisibleItemIndex,
+                        segmentActive,
+                        previewOpen = previewIndex != null,
+                    )
+                }
             }
             LatestChip(
                 visible = showLatest,
@@ -518,11 +575,15 @@ fun PhotosScreen(modifier: Modifier = Modifier) {
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
             )
             // The Go-To-Date FAB shares the bottom edge with the selection action bar;
-            // hide it while selecting so it doesn't sit under (and fight) that bar.
+            // hide it while selecting so it doesn't sit under (and fight) that bar. When the
+            // album-created bar is up it lifts a little so the bar isn't hidden behind it.
             if (!inSelectionMode) {
+                val fabPadding = fabBottomPadding(snackbarHostState.currentSnackbarData != null)
                 DatePickerFab(
                     onClick = { datePickerOpen = true },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = fabPadding),
                 )
             }
             if (datePickerOpen) {
@@ -602,6 +663,7 @@ fun PhotosPreview(
         onClose = onClose,
         modifier = modifier,
         zoomable = { it.kind != KIND_VIDEO },
+        landscape = { it.kind != KIND_VIDEO && (it.width ?: 0) > (it.height ?: 0) },
         actions = { index ->
             IconButton(onClick = { onDelete(index) }) {
                 Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
@@ -610,6 +672,37 @@ fun PhotosPreview(
         image = image,
     )
 }
+
+/**
+ * Confirms a just-created album with a snackbar whose action navigates to it.
+ * Because it carries an action the snackbar would otherwise stay indefinitely, so it
+ * is shown under a [timeoutMillis] (5s) cap: the "Go to album" tap invokes [onGoToAlbum]
+ * with [albumId]; otherwise the bar dismisses itself once the timeout elapses. Split out
+ * so the confirm→navigate wiring (and the auto-dismiss) is testable.
+ */
+suspend fun confirmAlbumCreated(
+    host: androidx.compose.material3.SnackbarHostState,
+    albumId: Long,
+    onGoToAlbum: (Long) -> Unit,
+    timeoutMillis: Long = 5_000L,
+) {
+    val result = kotlinx.coroutines.withTimeoutOrNull(timeoutMillis) {
+        host.showSnackbar(
+            message = "Album created",
+            actionLabel = "Go to album",
+            duration = androidx.compose.material3.SnackbarDuration.Indefinite,
+        )
+    }
+    if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) onGoToAlbum(albumId)
+}
+
+/**
+ * Bottom padding for the Go-To-Date FAB. Lifts it clear of the album-created snackbar
+ * (which shares the bottom edge and is drawn beneath the FAB) while a bar is visible, so
+ * the bar — including its "Go to album" action — is not partially hidden behind the FAB.
+ */
+fun fabBottomPadding(snackbarVisible: Boolean): androidx.compose.ui.unit.Dp =
+    if (snackbarVisible) 84.dp else 16.dp
 
 /** The three album actions offered over a Photos-grid selection (§7.1). */
 enum class AlbumSelectionAction { CreateAlbum, AddToAlbum, CreateLink }
@@ -634,12 +727,15 @@ suspend fun runAlbumNameAction(
     repo: eu.caiq.imagesorter.sync.data.media.AlbumRepository,
     copyToClipboard: (String) -> Unit,
     confirm: (String) -> Unit,
+    onCreated: (eu.caiq.imagesorter.sync.data.api.dto.AlbumDto) -> Unit = {},
 ) {
     val album = repo.create(name, mediaIds, createdBy)
     if (action == AlbumSelectionAction.CreateLink) {
         val share = repo.share(album.id)
         copyToClipboard(share.shareUrl)
         confirm(share.shareUrl)
+    } else {
+        onCreated(album)
     }
 }
 

@@ -296,6 +296,26 @@ class MainViewModelTest {
         assertEquals(HomeTab.PHOTOS, vm.homeTab.value)
     }
 
+    @Test
+    fun goToAlbumSwitchesToAlbumsTabAndMarksTheAlbumPending() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+
+        vm.goToAlbum(42)
+
+        assertEquals(HomeTab.ALBUMS, vm.homeTab.value)
+        assertEquals(42L, vm.pendingAlbumId.value)
+    }
+
+    @Test
+    fun consumePendingAlbumClearsTheRequestSoItOpensOnlyOnce() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+        vm.goToAlbum(42)
+
+        vm.consumePendingAlbum()
+
+        assertNull(vm.pendingAlbumId.value)
+    }
+
     private fun profile(id: String) =
         eu.caiq.imagesorter.sync.data.api.dto.ProfileDto(profileId = id, displayName = id)
 

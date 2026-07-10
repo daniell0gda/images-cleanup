@@ -107,6 +107,50 @@ class PhotosSelectionTest {
     }
 
     @Test
+    fun createAlbumInvokesOnCreatedWithTheNewAlbumAndDoesNotFireLinkConfirm() = runTest {
+        val api = FakeAlbumApi().apply {
+            entryResponse = AlbumDto(99, "Trip", null, "2024-01-01T00:00:00", 3, null, false, null)
+        }
+        val repo = AlbumRepository(api)
+        var created: AlbumDto? = null
+        var confirmed: String? = null
+
+        runAlbumNameAction(
+            action = AlbumSelectionAction.CreateAlbum,
+            name = "Trip",
+            mediaIds = listOf(1, 2, 3),
+            createdBy = "Pixel",
+            repo = repo,
+            copyToClipboard = {},
+            confirm = { confirmed = it },
+            onCreated = { created = it },
+        )
+
+        assertEquals(99L, created?.id)
+        assertNull("Create album must not fire the link-copied confirm", confirmed)
+    }
+
+    @Test
+    fun createLinkDoesNotInvokeOnCreated() = runTest {
+        val api = FakeAlbumApi()
+        val repo = AlbumRepository(api)
+        var created: AlbumDto? = null
+
+        runAlbumNameAction(
+            action = AlbumSelectionAction.CreateLink,
+            name = "Trip",
+            mediaIds = listOf(9),
+            createdBy = "Pixel",
+            repo = repo,
+            copyToClipboard = {},
+            confirm = {},
+            onCreated = { created = it },
+        )
+
+        assertNull("Create link must not fire the album-created signal", created)
+    }
+
+    @Test
     fun createLinkCreatesThenSharesAndCopiesVerbatimShareUrl() = runTest {
         val serverUrl = "https://photos.example.com/share/Xq7zZ-token"
         val api = FakeAlbumApi().apply { shareResponse = ShareDto("Xq7zZ-token", serverUrl) }
@@ -128,6 +172,58 @@ class PhotosSelectionTest {
         assertEquals(42L, api.lastSharedId)
         assertEquals(listOf(serverUrl), copied)
         assertEquals(serverUrl, confirmed)
+    }
+
+    @Test
+    fun albumCreatedSnackbarOffersGoToAlbumWhichNavigatesToTheNewAlbum() {
+        var goneTo: Long? = null
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                val host = androidx.compose.runtime.remember { androidx.compose.material3.SnackbarHostState() }
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    eu.caiq.imagesorter.sync.ui.screens.confirmAlbumCreated(
+                        host = host,
+                        albumId = 77,
+                        onGoToAlbum = { goneTo = it },
+                        // Isolate the action path from the auto-dismiss timeout: the bar must
+                        // stay up long enough for the tap. The timeout is covered separately.
+                        timeoutMillis = Long.MAX_VALUE,
+                    )
+                }
+                androidx.compose.material3.SnackbarHost(hostState = host)
+            }
+        }
+
+        composeRule.onNodeWithText("Go to album").assertIsDisplayed()
+        composeRule.onNodeWithText("Go to album").performClick()
+        composeRule.runOnIdle { assertEquals(77L, goneTo) }
+    }
+
+    @Test
+    fun albumCreatedBarAutoDismissesAfterTimeoutWithoutNavigating() = runTest {
+        // With no host consuming it, an Indefinite snackbar would suspend forever; the 5s cap
+        // must end the wait and return without invoking the "Go to album" navigation. Removing
+        // the timeout would leave this coroutine (and the bar) hanging indefinitely.
+        val host = androidx.compose.material3.SnackbarHostState()
+        var goneTo: Long? = null
+
+        eu.caiq.imagesorter.sync.ui.screens.confirmAlbumCreated(
+            host = host,
+            albumId = 77,
+            onGoToAlbum = { goneTo = it },
+            timeoutMillis = 5_000L,
+        )
+
+        assertNull(goneTo)
+    }
+
+    @Test
+    fun goToDateFabLiftsAboveTheAlbumCreatedBarWhenItIsVisible() {
+        assertTrue(
+            "FAB must sit higher when the album-created bar is visible",
+            eu.caiq.imagesorter.sync.ui.screens.fabBottomPadding(true) >
+                eu.caiq.imagesorter.sync.ui.screens.fabBottomPadding(false),
+        )
     }
 
     @Test

@@ -11,6 +11,7 @@ import eu.caiq.imagesorter.sync.ui.components.PREVIEW_TAG
 import eu.caiq.imagesorter.sync.ui.components.previewCanPan
 import eu.caiq.imagesorter.sync.ui.components.previewIndexAfterDelete
 import eu.caiq.imagesorter.sync.ui.components.previewPagingEnabled
+import eu.caiq.imagesorter.sync.ui.components.previewRotationDegrees
 import org.junit.Assert.assertNull
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
 import org.junit.Assert.assertEquals
@@ -52,6 +53,17 @@ class MediaPreviewPagerTest {
         assertFalse(previewCanPan(1f))
         // Once zoomed in, the drag pans the zoomed page.
         assertTrue(previewCanPan(1.5f))
+    }
+
+    @Test
+    fun onlyLandscapeImageInPortraitViewportRotates() {
+        // Landscape content in a portrait viewport turns 90° to fill the screen.
+        assertEquals(90f, previewRotationDegrees(isRotatableLandscape = true, viewportPortrait = true))
+        // A landscape viewport already fits landscape content — no rotation.
+        assertEquals(0f, previewRotationDegrees(isRotatableLandscape = true, viewportPortrait = false))
+        // Portrait/square images and non-image (video) pages never rotate.
+        assertEquals(0f, previewRotationDegrees(isRotatableLandscape = false, viewportPortrait = true))
+        assertEquals(0f, previewRotationDegrees(isRotatableLandscape = false, viewportPortrait = false))
     }
 
     @Test
@@ -120,6 +132,29 @@ class MediaPreviewPagerTest {
         composeRule.onNodeWithText("Sync anyway").assertIsDisplayed()
         composeRule.onNodeWithText("Sync anyway").performClick()
         assertEquals(listOf(0), clicks)
+    }
+
+    @Test
+    fun rotatedLandscapePageStillRendersAndKeepsGestureGates() {
+        // A page flagged landscape takes the rotation path; it must still render its
+        // content, and the paging/pan gates stay identical to an unrotated page so
+        // pinch-zoom, pan and page-swipe keep working.
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MediaPreviewPager(
+                    items = listOf("a", "b"),
+                    startIndex = 0,
+                    onClose = {},
+                    landscape = { true },
+                ) { Text("img-$it") }
+            }
+        }
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("img-a").assertIsDisplayed()
+        // Rotation does not change the gesture gates: page at rest, pan only when zoomed.
+        assertTrue(previewPagingEnabled(1f))
+        assertFalse(previewPagingEnabled(1.5f))
+        assertTrue(previewCanPan(1.5f))
     }
 
     @Test

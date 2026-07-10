@@ -174,11 +174,17 @@ private fun AppRoot(viewModel: MainViewModel) {
         // Sync tab owns the profile/main/cleanup sub-flow; Photos is independent.
         AppScreen.PROFILE_PICKER, AppScreen.MAIN, AppScreen.CLEANUP -> {
             val homeTab by viewModel.homeTab.collectAsStateWithLifecycle()
+            val pendingAlbumId by viewModel.pendingAlbumId.collectAsStateWithLifecycle()
             HomeShell(
                 selectedTab = homeTab,
                 onTabSelected = viewModel::selectHomeTab,
-                photos = { PhotosScreen() },
-                albums = { AlbumsScreen() },
+                photos = { PhotosScreen(onGoToAlbum = viewModel::goToAlbum) },
+                albums = {
+                    AlbumsScreen(
+                        openAlbumId = pendingAlbumId,
+                        onAlbumConsumed = viewModel::consumePendingAlbum,
+                    )
+                },
                 sync = {
                     SyncTabContent(
                         viewModel = viewModel,

@@ -22,9 +22,14 @@ const val LATEST_CHIP_TAG = "latestChip"
  * Whether the "↑ Latest" chip should be shown. It appears once scrolled past the
  * first item, and also whenever a date seek is active — after a seek the user sits
  * at the anchor (index 0) and still needs a one-tap way back to the newest timeline.
+ * While the fullscreen viewer is open ([previewOpen]) the chip is always hidden so it
+ * does not show through the overlay; closing it restores the scroll/seek rules.
  */
-fun shouldShowLatestChip(firstVisibleItemIndex: Int, isSeekActive: Boolean): Boolean =
-    isSeekActive || firstVisibleItemIndex > 0
+fun shouldShowLatestChip(
+    firstVisibleItemIndex: Int,
+    isSeekActive: Boolean,
+    previewOpen: Boolean = false,
+): Boolean = !previewOpen && (isSeekActive || firstVisibleItemIndex > 0)
 
 /**
  * Resolves a "↑ Latest" tap: when a date seek is active, clears it (which invalidates

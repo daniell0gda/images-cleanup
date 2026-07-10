@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.PhotoLibrary
@@ -172,13 +173,25 @@ fun AlbumTile(
 }
 
 /**
+ * The album whose detail should show: [selectedAlbumId] matched against the loaded
+ * [albums]. Null (no selection, or an id not yet loaded) keeps the tile list.
+ */
+fun openAlbumFor(selectedAlbumId: Long?, albums: List<AlbumDto>): AlbumDto? =
+    selectedAlbumId?.let { id -> albums.find { it.id == id } }
+
+/**
  * The live Albums tab. Lists album tiles; opening one swaps to a detail screen via
  * LOCAL state ([selectedAlbumId]) with its own back affordance (§3.7) — NOT a new
- * global AppScreen.
+ * global AppScreen. [openAlbumId] opens a specific album on entry (e.g. one just
+ * created on the Photos tab); [onAlbumConsumed] clears that request so it fires once.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun AlbumsScreen(modifier: Modifier = Modifier) {
+fun AlbumsScreen(
+    modifier: Modifier = Modifier,
+    openAlbumId: Long? = null,
+    onAlbumConsumed: () -> Unit = {},
+) {
     val context = LocalContext.current
     val locator = (context.applicationContext as SyncApp).serviceLocator
     val baseUrl = remember(locator) {
@@ -188,6 +201,35 @@ fun AlbumsScreen(modifier: Modifier = Modifier) {
     val token = remember(locator) { runCatching { locator.securePrefs.getToken() }.getOrNull() }
     val repo = remember(locator) { runCatching { locator.albumRepository }.getOrNull() }
 
+    AlbumsScreenContent(
+        repo = repo,
+        urls = urls,
+        token = token,
+        openAlbumId = openAlbumId,
+        onAlbumConsumed = onAlbumConsumed,
+        modifier = modifier,
+    )
+}
+
+/**
+ * The Albums tab body with its data dependencies hoisted out of the ServiceLocator so it is
+ * testable: [repo]/[urls]/[token] are injected. Lists album tiles; opening one swaps to a
+ * detail screen via LOCAL state ([selectedAlbumId]) with its own back affordance (§3.7).
+ * [openAlbumId] opens a specific album on entry (e.g. one just created on the Photos tab);
+ * [onAlbumConsumed] clears that request so it fires once.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+internal fun AlbumsScreenContent(
+    repo: AlbumRepository?,
+    urls: MediaUrls,
+    token: String?,
+    openAlbumId: Long?,
+    onAlbumConsumed: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+
     var albums by remember { mutableStateOf<List<AlbumDto>>(emptyList()) }
     var selectedAlbumId by remember { mutableStateOf<Long?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
@@ -196,12 +238,23 @@ fun AlbumsScreen(modifier: Modifier = Modifier) {
         if (repo != null) albums = runCatching { repo.albums() }.getOrDefault(emptyList())
     }
 
+    // A "go to album" request (e.g. an album just created on the Photos tab) opens
+    // that album on entry; reloadKey++ refetches the list so the new album resolves,
+    // and consuming the request keeps it from re-opening after the user backs out.
+    LaunchedEffect(openAlbumId) {
+        if (openAlbumId != null) {
+            selectedAlbumId = openAlbumId
+            reloadKey++
+            onAlbumConsumed()
+        }
+    }
+
     // Back from album detail returns to the list (detail is local state, not a
     // nav destination); a deeper preview/selection handler takes precedence while
     // one is active, since it is composed after this.
     BackHandler(enabled = selectedAlbumId != null) { selectedAlbumId = null; reloadKey++ }
 
-    val openAlbum = selectedAlbumId?.let { id -> albums.find { it.id == id } }
+    val openAlbum = openAlbumFor(selectedAlbumId, albums)
     if (openAlbum != null && repo != null) {
         AlbumDetail(
             album = openAlbum,
@@ -336,6 +389,7 @@ private fun AlbumDetail(
     var reloadKey by remember(albumId) { mutableStateOf(0) }
     var selectedIds by remember(albumId) { mutableStateOf<Set<Long>>(emptySet()) }
     var addPickerOpen by remember(albumId) { mutableStateOf(false) }
+    var deleteConfirmOpen by remember(albumId) { mutableStateOf(false) }
     var previewIndex by remember(albumId) { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(albumId, reloadKey) {
@@ -408,6 +462,12 @@ private fun AlbumDetail(
                 IconButton(onClick = { addPickerOpen = true }) {
                     Icon(Icons.Rounded.Add, contentDescription = "Add photos", tint = c.text)
                 }
+                IconButton(
+                    onClick = { deleteConfirmOpen = true },
+                    modifier = Modifier.testTag(ALBUM_DELETE_TAG),
+                ) {
+                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete album", tint = c.text)
+                }
             }
             PhotosGrid(
                 items = listItems,
@@ -474,6 +534,26 @@ private fun AlbumDetail(
             )
         }
 
+        if (deleteConfirmOpen) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { deleteConfirmOpen = false },
+                title = { Text("Delete album?") },
+                text = { Text("This removes the \"${shareState.name}\" album. The photos in it are not deleted.") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        deleteConfirmOpen = false
+                        scope.launch {
+                            runCatching { repo.delete(albumId) }
+                            onBack()
+                        }
+                    }) { Text("Delete") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { deleteConfirmOpen = false }) { Text("Cancel") }
+                },
+            )
+        }
+
         val idx = previewIndex
         if (idx != null && idx in entities.indices) {
             PhotosPreview(
@@ -493,6 +573,9 @@ private fun AlbumDetail(
 
 /** Test tag on the album-detail share/link control. */
 const val ALBUM_SHARE_MENU_TAG = "albumShareMenu"
+
+/** Test tag on the album-detail delete control. */
+const val ALBUM_DELETE_TAG = "albumDelete"
 
 /**
  * The album-detail share control (§7.2): a link icon (accent-tinted when the album
