@@ -18,6 +18,7 @@ import os
 import shutil
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -415,6 +416,11 @@ class MediaIndexer:
         self._transcoder = transcode_to_mp4
         self._proxy_locks: dict[int, threading.Lock] = {}
         self._proxy_locks_guard = threading.Lock()
+        # Background pre-transcode worker (§4.8): a non-web-safe video found during
+        # indexing is proxied ahead of time so its first play is instant instead of
+        # blocking on a full encode. Serialized to one worker so the encode backlog
+        # never saturates the CPU. Created lazily (only when ffmpeg is present).
+        self._pretranscode_pool: ThreadPoolExecutor | None = None
 
     # -- connection / schema --------------------------------------------
 
@@ -526,6 +532,32 @@ class MediaIndexer:
                 lock = threading.Lock()
                 self._proxy_locks[media_id] = lock
             return lock
+
+    def _submit_pretranscode(self, media_id: int, src: Path) -> None:
+        """Queue a background proxy build for a non-web-safe ``media_id``.
+
+        No-op when ffmpeg is unavailable or the proxy already exists, so a repeat
+        build never re-queues cached work. The encode shares ``ensure_proxy``'s
+        per-id lock, so a concurrent on-demand stream reuses this result rather
+        than encoding twice.
+        """
+        if not ffmpeg_available():
+            return
+        if (self._proxies_dir / f"{media_id}.mp4").exists():
+            return
+        if self._pretranscode_pool is None:
+            self._pretranscode_pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="pretranscode"
+            )
+        self._pretranscode_pool.submit(self._pretranscode_one, media_id, src)
+
+    def _pretranscode_one(self, media_id: int, src: Path) -> None:
+        try:
+            self.ensure_proxy(media_id, src)
+        except Exception:
+            logger.warning(
+                "pre-transcode failed for media %s (%s)", media_id, src, exc_info=True
+            )
 
     def timeline(self, limit: int = 100, after=None, on_or_before: str | None = None,
                  before=None, profile: str | None = None) -> list[dict]:
@@ -730,7 +762,12 @@ class MediaIndexer:
         status.added += 1
         if kind == "video" and ffprobe_available():
             try:
-                self._set_video_websafe(row_id, probe_video_websafe(path))
+                websafe = probe_video_websafe(path)
+                self._set_video_websafe(row_id, websafe)
+                if not websafe:
+                    # Build the H.264 proxy in the background so the first play is
+                    # instant rather than blocking on a full encode.
+                    self._submit_pretranscode(row_id, path)
             except Exception:
                 logger.warning("media build: ffprobe failed for %s", path, exc_info=True)
         try:

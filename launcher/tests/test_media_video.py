@@ -320,6 +320,54 @@ def test_stream_nonwebsafe_serves_proxy(tmp_path):
     assert (tmp_path / "proxies" / f"{mid}.mp4").exists()
 
 
+def test_build_pretranscodes_nonwebsafe_video(tmp_path, monkeypatch):
+    # A non-web-safe video discovered during indexing is proxied in the
+    # background, so its first play is instant instead of blocking on a full
+    # encode. ffprobe/ffmpeg are faked so the test needs neither binary.
+    monkeypatch.setattr(media_mod, "ffprobe_available", lambda: True)
+    monkeypatch.setattr(media_mod, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(media_mod, "probe_video_websafe", lambda p: False)
+    root = tmp_path / "lib"
+    _make_video(root / "v.mp4", VIDEO_BYTES)
+    app = _build_app(tmp_path, [root])
+    indexer = app.state.media_indexer
+    indexer._thumbnail = lambda row_id, path, kind: False
+
+    proxied = threading.Event()
+
+    def fake_transcode(src, dest):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"PROXY")
+        proxied.set()
+
+    indexer.set_transcoder(fake_transcode)
+    indexer.build()
+
+    mid = _video_id(app)
+    assert proxied.wait(timeout=5)  # background worker ran the encode
+    assert (tmp_path / "proxies" / f"{mid}.mp4").exists()
+
+
+def test_build_skips_pretranscode_when_ffmpeg_absent(tmp_path, monkeypatch):
+    # ffprobe present but ffmpeg absent: probe still runs, but no background
+    # encode is queued (and no worker pool is created) since it would fail.
+    monkeypatch.setattr(media_mod, "ffprobe_available", lambda: True)
+    monkeypatch.setattr(media_mod, "ffmpeg_available", lambda: False)
+    monkeypatch.setattr(media_mod, "probe_video_websafe", lambda p: False)
+    root = tmp_path / "lib"
+    _make_video(root / "v.mp4", VIDEO_BYTES)
+    app = _build_app(tmp_path, [root])
+    indexer = app.state.media_indexer
+    indexer._thumbnail = lambda row_id, path, kind: False
+
+    indexer.build()
+
+    mid = _video_id(app)
+    assert indexer.get(mid)["video_websafe"] == 0
+    assert not (tmp_path / "proxies" / f"{mid}.mp4").exists()
+    assert indexer._pretranscode_pool is None
+
+
 @pytest.mark.skipif(media_mod.ffmpeg_available(),
                     reason="ffmpeg present; default transcoder would run for real")
 def test_default_transcoder_requires_ffmpeg_when_absent(tmp_path):
