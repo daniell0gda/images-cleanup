@@ -29,6 +29,10 @@ interface MediaDao {
     @Query("DELETE FROM media")
     suspend fun clear()
 
+    /** Drops a single cached row so its deletion leaves the timeline immediately. */
+    @Query("DELETE FROM media WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
     @Query("SELECT * FROM media_remote_key WHERE id = 0")
     suspend fun remoteKey(): MediaRemoteKey?
 

@@ -38,6 +38,10 @@ interface MediaApi {
     /** Full year → month → day tree of dates that have at least one indexed photo. */
     @GET("api/media/dates")
     suspend fun dates(): MediaDatesDto
+
+    /** Permanently deletes a media item server-side (original file + index row). */
+    @DELETE("api/media/{id}")
+    suspend fun deleteMedia(@Path("id") id: Long): DeletedDto
 }
 
 /**

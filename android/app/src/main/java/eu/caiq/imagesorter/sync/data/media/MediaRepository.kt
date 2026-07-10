@@ -86,4 +86,14 @@ class MediaRepository(
 
     /** The server's year → month → day tree of dates that have indexed photos. */
     suspend fun availableDates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = api.dates()
+
+    /**
+     * Permanently deletes a media item on the server (its original file + index row and
+     * caches), then drops the local Room row. The Room write invalidates the timeline
+     * paging source, so the item leaves the grid/preview at once without a full refresh.
+     */
+    suspend fun delete(id: Long) {
+        api.deleteMedia(id)
+        db.mediaDao().deleteById(id)
+    }
 }

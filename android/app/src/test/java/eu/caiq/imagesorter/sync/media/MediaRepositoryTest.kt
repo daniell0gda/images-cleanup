@@ -4,6 +4,7 @@ import androidx.paging.testing.asSnapshot
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import eu.caiq.imagesorter.sync.data.api.MediaApi
+import eu.caiq.imagesorter.sync.data.api.dto.DeletedDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaPageDto
 import eu.caiq.imagesorter.sync.data.db.AppDatabase
@@ -29,17 +30,23 @@ private class QueueMediaApi(private val pages: List<MediaPageDto>) : MediaApi {
         pages[calls++]
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
 }
 
-/** Records the `from_date` of every refresh and always returns one terminal page. */
+/** Records the `from_date` of every refresh and the id of every delete; returns terminal pages. */
 private class RecordingMediaApi : MediaApi {
     val fromDates = mutableListOf<String?>()
+    val deleted = mutableListOf<Long>()
     override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?, profile: String?): MediaPageDto {
         if (cursor == null && before == null) fromDates.add(fromDate)
         return MediaPageDto(items = emptyList(), nextCursor = null)
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+    override suspend fun deleteMedia(id: Long): DeletedDto {
+        deleted.add(id)
+        return DeletedDto(deleted = true)
+    }
 }
 
 /**
@@ -61,6 +68,7 @@ private class DatasetMediaApi(private val all: List<MediaItemDto>) : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
 }
 
 /** Records whether the network was hit; returns a terminal empty page. */
@@ -73,6 +81,7 @@ private class TerminalMediaApi : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
 }
 
 /** Returns profile-specific items and records the profile of every refresh request. */
@@ -92,6 +101,7 @@ private class ProfileRecordingApi : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -165,6 +175,25 @@ class MediaRepositoryTest {
 
         assertEquals(listOf(30L), filtered)
         assertEquals("p1", api.profiles.last())
+    }
+
+    @Test
+    fun deleteCallsServerAndDropsTheCachedRow() = runTest {
+        val api = RecordingMediaApi()
+        val repo = MediaRepository(api, db, pageSize = 2)
+        db.mediaDao().insertAll(
+            listOf(
+                MediaEntity(30, "image", "2024-03-03T00:00:00", orderKey = 0),
+                MediaEntity(20, "image", "2024-03-02T00:00:00", orderKey = 1),
+            ),
+        )
+
+        repo.delete(30)
+
+        // The server was told to delete the item, and its cached row is gone so the
+        // timeline paging source no longer serves it.
+        assertEquals(listOf(30L), api.deleted)
+        assertEquals(1, db.mediaDao().count(null))
     }
 
     @Test

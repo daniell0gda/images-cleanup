@@ -483,9 +483,14 @@ fun PhotosScreen(
                 startIndex = idx,
                 onClose = { previewIndex = null },
                 onDelete = { deletedIndex ->
-                    // MediaEntity.id is a server-side ID, not a local MediaStore ID;
-                    // local delete via MediaStore requires a separate lookup or a server
-                    // delete API. For now, close/advance the pager without touching storage.
+                    // Delete the item server-side (original file + index) and drop its cached
+                    // Room row; that invalidates the timeline paging source so the item leaves
+                    // the grid and the pager slides to the next one. The index update closes
+                    // the preview once the last remaining item is deleted.
+                    val entity = mediaItems.getOrNull(deletedIndex)
+                    if (entity != null && repository != null) {
+                        scope.launch { runCatching { repository.delete(entity.id) } }
+                    }
                     previewIndex = previewIndexAfterDelete(mediaItems.size - 1, deletedIndex)
                 },
             ) { entity -> MediaPreviewContent(entity, urls, token) }
