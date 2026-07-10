@@ -669,7 +669,6 @@ fun PhotosPreview(
         onClose = onClose,
         modifier = modifier,
         zoomable = { it.kind != KIND_VIDEO },
-        landscape = { it.kind != KIND_VIDEO && (it.width ?: 0) > (it.height ?: 0) },
         actions = { index ->
             IconButton(onClick = { onDelete(index) }) {
                 Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
