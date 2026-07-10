@@ -24,6 +24,50 @@ def not_found_html() -> str:
     )
 
 
+def _single_item_html(token: str, safe_name: str, item: dict) -> str:
+    """Full-size view for a one-item album: the photo/video shown directly.
+
+    A single-item album has nothing to page through, so it skips the thumbnail
+    grid + lightbox entirely and renders the media full-size (image ``preview``
+    or a playable ``video``). The item's ``thumb`` is kept as an instant
+    blurred backdrop while the full-size bytes load. All asset URLs stay
+    relative for reverse-proxy safety (§3.12).
+    """
+    base = f"/share/{token}/media/{item['id']}"
+    if item["kind"] == "video":
+        media = (
+            f'<video class="single-media" controls playsinline '
+            f'poster="{base}/thumb" src="{base}/stream"></video>'
+        )
+    else:
+        media = f'<img class="single-media" src="{base}/preview" alt="">'
+    return (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<meta name=\"robots\" content=\"noindex,nofollow\">"
+        "<meta name=\"referrer\" content=\"no-referrer\">"
+        f"<title>{safe_name}</title>"
+        "<style>"
+        "*{box-sizing:border-box}"
+        "body{margin:0;font-family:system-ui,sans-serif;background:#111;color:#eee}"
+        "header{padding:1.25rem 1rem;font-size:1.4rem;font-weight:600}"
+        ".single{position:relative;height:calc(100vh - 4.75rem);display:flex;"
+        "align-items:center;justify-content:center;overflow:hidden}"
+        ".single-blur{position:absolute;inset:0;width:100%;height:100%;"
+        "object-fit:cover;filter:blur(30px) brightness(.5);transform:scale(1.1)}"
+        ".single-media{position:relative;max-width:96vw;max-height:100%;"
+        "object-fit:contain;display:block;border-radius:4px;"
+        "box-shadow:0 8px 40px rgba(0,0,0,.5)}"
+        "</style></head><body>"
+        f"<header>{safe_name}</header>"
+        '<div class="single">'
+        f'<img class="single-blur" src="{base}/thumb" alt="" aria-hidden="true">'
+        f"{media}"
+        "</div>"
+        "</body></html>"
+    )
+
+
 def page_html(token: str, name: str, items: list[dict]) -> str:
     """Self-contained HTML for a shared album: name header + thumbnail grid.
 
@@ -32,6 +76,8 @@ def page_html(token: str, name: str, items: list[dict]) -> str:
     header shows the album name only — never creator/device info (§6).
     """
     safe_name = html.escape(name)
+    if len(items) == 1:
+        return _single_item_html(token, safe_name, items[0])
     cells = []
     for item in items:
         mid = item["id"]

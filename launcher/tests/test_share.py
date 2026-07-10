@@ -398,6 +398,66 @@ def test_share_page_has_pager_chrome_and_keyboard_handlers(tmp_path):
     assert "Escape" in body
 
 
+def test_share_single_image_shows_full_size_not_grid(tmp_path):
+    # A one-item album opens straight into the full-size photo, never a lone
+    # thumbnail cell in a grid/lightbox pager.
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg", size=(800, 400))
+    app = _build_app(tmp_path, [root])
+    _index(app)
+    ids = _image_ids(app)
+    assert len(ids) == 1
+    _, token = _shared_album(app, ids)
+    client = TestClient(app)
+
+    body = client.get(f"/share/{token}").text
+    mid = ids[0]
+    # Full-size preview rendered directly as an <img> in the page body.
+    assert f'src="/share/{token}/media/{mid}/preview"' in body
+    # Not the grid + lightbox pager surface.
+    assert '<div class="grid">' not in body
+    assert 'id="lightbox"' not in body
+
+
+def test_share_single_video_shows_playable_video_not_grid(tmp_path):
+    root = tmp_path / "lib"
+    _make_video(root / "v.mp4", VIDEO_BYTES)
+    app = _build_app(tmp_path, [root])
+    _index(app)
+    mid = _video_id(app)
+    app.state.media_indexer._conn().execute(
+        "UPDATE media SET video_websafe=1 WHERE id=?", (mid,)
+    )
+    app.state.media_indexer._conn().commit()
+    _, token = _shared_album(app, [mid])
+    client = TestClient(app)
+
+    body = client.get(f"/share/{token}").text
+    # A playable <video> with controls, streaming the item directly.
+    assert "<video" in body
+    assert "controls" in body
+    assert f'src="/share/{token}/media/{mid}/stream"' in body
+    assert '<div class="grid">' not in body
+
+
+def test_share_two_items_keep_grid_and_lightbox(tmp_path):
+    # Two-or-more-item albums keep the grid + lightbox pager unchanged.
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+    _make_image(root / "b.jpg", color=(5, 5, 5))
+    app = _build_app(tmp_path, [root])
+    _index(app)
+    ids = _image_ids(app)
+    assert len(ids) == 2
+    _, token = _shared_album(app, ids)
+    client = TestClient(app)
+
+    body = client.get(f"/share/{token}").text
+    assert '<div class="grid">' in body
+    assert 'id="lightbox"' in body
+    assert 'class="single-media"' not in body
+
+
 def test_robots_txt_disallows_share(tmp_path):
     root = tmp_path / "lib"
     _make_image(root / "a.jpg")
