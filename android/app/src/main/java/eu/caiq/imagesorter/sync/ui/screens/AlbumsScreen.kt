@@ -454,7 +454,7 @@ private fun AlbumDetail(
                         scope.launch {
                             runCatching { repo.revoke(albumId) }.onSuccess {
                                 shareState = shareState.copy(shared = false, shareUrl = null)
-                                snackbarHostState.showSnackbar("Link revoked")
+                                snackbarHostState.showSnackbar("Album is no longer shared")
                             }
                         }
                     },
