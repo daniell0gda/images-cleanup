@@ -2,8 +2,11 @@ package eu.caiq.imagesorter.sync.ui
 
 import eu.caiq.imagesorter.sync.data.media.RefreshThrottle
 import eu.caiq.imagesorter.sync.ui.screens.autoRefreshLoop
+import eu.caiq.imagesorter.sync.ui.screens.refreshNow
 import eu.caiq.imagesorter.sync.ui.screens.shouldAutoRefresh
+import eu.caiq.imagesorter.sync.ui.screens.syncCompletionRefreshLoop
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -165,6 +168,65 @@ class AutoRefreshTest {
         scheduler.advanceTimeBy(10_000); scheduler.runCurrent()   // t=20s, floor not elapsed → skip
         assertEquals(1, refreshes)
         scheduler.advanceTimeBy(10_000); scheduler.runCurrent()   // t=30s, floor elapsed → fires
+        assertEquals(2, refreshes)
+    }
+
+    @Test
+    fun tabOpenRefreshBypassesFloorButSkipsWhileRefreshInFlight() = runTest {
+        val scheduler = testScheduler
+        val throttle = RefreshThrottle()
+        throttle.markRefreshed(now = scheduler.currentTime) // a refresh just happened: the floor is fresh
+        var refreshes = 0
+
+        // Opening the tab while a refresh is already in flight is skipped.
+        refreshNow(
+            now = { scheduler.currentTime },
+            isRefreshing = { true },
+            throttle = throttle,
+            refresh = { refreshes++ },
+        )
+        assertEquals(0, refreshes)
+
+        // Opening the tab with no refresh in flight fires immediately, even though the 30s
+        // floor has NOT elapsed — the tab-open refresh bypasses the floor.
+        refreshNow(
+            now = { scheduler.currentTime },
+            isRefreshing = { false },
+            throttle = throttle,
+            refresh = { refreshes++ },
+        )
+        assertEquals(1, refreshes)
+    }
+
+    @Test
+    fun refreshesTimelineOnEachReportedSyncCompletion() = runTest {
+        val scheduler = testScheduler
+        val throttle = RefreshThrottle()
+        val completions = MutableStateFlow(0)
+        var refreshing = false
+        var refreshes = 0
+        backgroundScope.launch {
+            syncCompletionRefreshLoop(
+                completions = completions,
+                now = { scheduler.currentTime },
+                isRefreshing = { refreshing },
+                throttle = throttle,
+                refresh = { refreshes++ },
+            )
+        }
+
+        scheduler.runCurrent()                          // subscribed; the initial value is not a completion
+        assertEquals(0, refreshes)
+
+        completions.value = 1; scheduler.runCurrent()   // a batch completed + reported → refresh
+        assertEquals(1, refreshes)
+
+        refreshing = true
+        completions.value = 2; scheduler.runCurrent()   // completion while a refresh is in flight → skipped
+        assertEquals(1, refreshes)
+
+        refreshing = false
+        completions.value = 3; scheduler.runCurrent()   // next completion refreshes
         assertEquals(2, refreshes)
     }
 

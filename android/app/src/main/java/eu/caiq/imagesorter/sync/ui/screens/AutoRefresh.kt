@@ -3,6 +3,8 @@ package eu.caiq.imagesorter.sync.ui.screens
 import android.util.Log
 import eu.caiq.imagesorter.sync.data.media.RefreshThrottle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.drop
 
 private const val TAG = "GOTODATE"
 
@@ -46,5 +48,41 @@ suspend fun autoRefreshLoop(
             refresh()
         }
         delay(pollInterval)
+    }
+}
+
+/**
+ * An event-driven timeline refresh that **bypasses** the 30-second auto-refresh floor (unlike
+ * the periodic [autoRefreshLoop]) but is still skipped while a refresh is already [isRefreshing].
+ * It records the refresh on [throttle] so the periodic loop's leading edge does not immediately
+ * fire a second, redundant refresh. Used when the Photos tab is opened.
+ */
+suspend fun refreshNow(
+    now: () -> Long,
+    isRefreshing: () -> Boolean,
+    throttle: RefreshThrottle,
+    refresh: suspend () -> Unit,
+) {
+    if (isRefreshing()) return
+    throttle.markRefreshed(now())
+    refresh()
+}
+
+/**
+ * Refreshes the timeline each time the sync engine reports a completed batch (its session was
+ * completed and outcomes reported), so newly synced items appear without user interaction. The
+ * [completions] flow is a monotonically-changing signal; its current value on subscription is not
+ * a completion, so the first emission is dropped. Each subsequent change triggers a [refreshNow]
+ * (bypassing the floor, skipped while a refresh is in flight). Runs until the coroutine is cancelled.
+ */
+suspend fun syncCompletionRefreshLoop(
+    completions: Flow<Int>,
+    now: () -> Long,
+    isRefreshing: () -> Boolean,
+    throttle: RefreshThrottle,
+    refresh: suspend () -> Unit,
+) {
+    completions.drop(1).collect {
+        refreshNow(now, isRefreshing, throttle, refresh)
     }
 }

@@ -62,6 +62,16 @@ class SyncEngine(
     private val _progress = MutableStateFlow(SyncProgress())
     val progress: StateFlow<SyncProgress> = _progress.asStateFlow()
 
+    private val _syncCompletions = MutableStateFlow(0)
+
+    /**
+     * A monotonically-increasing counter bumped each time a batch's session is completed and its
+     * outcomes reported (server-side grouping done). Observers (the Photos timeline) refresh on
+     * each change so newly synced items appear without user interaction. The initial value is not
+     * a completion.
+     */
+    val syncCompletions: StateFlow<Int> = _syncCompletions.asStateFlow()
+
     // Single atomic gate shared by run() and discover(). Acquired with
     // compareAndSet at entry and released in finally; closes the check-then-act
     // gap so a re-entrant run()/discover() cannot overlap an active pass.
@@ -70,6 +80,12 @@ class SyncEngine(
     // Watermark of the last completed full enumerate+reconcile, used to debounce
     // back-to-back discover() calls. run() ignores this and always reconciles.
     @Volatile private var lastFullReconcileAt: Long? = null
+
+    // "Sync anyway" overrides requested while a pass was active. They are already
+    // unmarked + queued the instant the user taps; this remembers they still need a
+    // force_place upload so the request is deferred (never dropped) and drained once
+    // the guard is free.
+    private val overrideQueue = java.util.concurrent.ConcurrentLinkedQueue<MediaItem>()
 
     /**
      * Run one full sync. Safe to call again to resume — discovery + the persisted
@@ -120,6 +136,7 @@ class SyncEngine(
             }
         } finally {
             active.set(false)
+            drainOverrides()
         }
     }
 
@@ -163,6 +180,7 @@ class SyncEngine(
             _progress.value = SyncProgress(phase = SyncPhase.IDLE)
         } finally {
             active.set(false)
+            drainOverrides()
         }
     }
 
@@ -256,36 +274,64 @@ class SyncEngine(
 
     /**
      * Force-upload a user-selected set of "not people" items ("Sync anyway").
-     * Clears their local UNCLASSIFIED mark so they enter the upload set, opens a
-     * dedicated session with force_place=true (the server skips classification and
-     * places them into the primary group), uploads them, and reports. A "synced"
-     * outcome flips each row to SYNCED so it leaves the Not People set; an
-     * unclassified/failed outcome cannot recur here because force_place always
-     * places, so completeAndReport handles the synced path.
+     *
+     * The items leave the Not People set the instant this is called: their local
+     * UNCLASSIFIED mark is cleared and they enter the pending queue immediately,
+     * unconditionally — even if a sync pass is already active — so the request is
+     * never lost and nothing lingers in the list. The force_place upload then runs
+     * right away if the engine is free, or is deferred and drained by the active
+     * pass when it releases the guard (see [drainOverrides]).
      */
     suspend fun overrideUpload(items: List<MediaItem>) {
         if (items.isEmpty()) return
-        if (!active.compareAndSet(false, true)) return
-        try {
-            val profileId = securePrefs.getProfileId()
-            if (profileId.isNullOrEmpty()) return
 
-            // Clear the not-syncable mark and queue them so the upload plumbing
-            // (uploadAll / completeAndReport) can find their file ids.
-            items.forEach { item ->
-                syncedCacheDao.delete(item.identity.name, item.identity.createdOn, item.identity.size)
-            }
-            pendingUploadDao.upsert(items.map { it.toPending() })
+        // Clear the not-syncable mark and queue them now so the upload plumbing
+        // (uploadAll / completeAndReport) can find their file ids, and so the Not
+        // People list drops them regardless of whether a pass is currently running.
+        items.forEach { item ->
+            syncedCacheDao.delete(item.identity.name, item.identity.createdOn, item.identity.size)
+        }
+        pendingUploadDao.upsert(items.map { it.toPending() })
 
-            val total = items.size
-            val completed = java.util.concurrent.atomic.AtomicInteger(0)
-            for (batch in items.chunked(uploadBatchSize)) {
-                val sessionId = openSession(profileId, forcePlace = true)
-                uploadAll(sessionId, batch, total, completed)
-                completeAndReportSafely(sessionId)
+        overrideQueue.addAll(items)
+        drainOverrides()
+    }
+
+    /**
+     * Force-upload any queued "Sync anyway" overrides — but only if the engine is
+     * free. While a pass holds the guard this is a no-op; that pass drains the queue
+     * from its own `finally`, so a request landing mid-pass is deferred, not dropped.
+     */
+    private suspend fun drainOverrides() {
+        while (overrideQueue.isNotEmpty()) {
+            if (!active.compareAndSet(false, true)) return
+            try {
+                val batch = ArrayList<MediaItem>()
+                while (true) {
+                    batch.add(overrideQueue.poll() ?: break)
+                }
+                if (batch.isNotEmpty()) forcePlaceUpload(batch)
+            } finally {
+                active.set(false)
             }
-        } finally {
-            active.set(false)
+        }
+    }
+
+    /**
+     * Open a dedicated session with force_place=true per batch (the server skips
+     * classification and places the files into the primary group), upload them, and
+     * report. A "synced" outcome flips each row to SYNCED so it leaves the Not People
+     * set; a force_place session cannot yield an unclassified outcome.
+     */
+    private suspend fun forcePlaceUpload(items: List<MediaItem>) {
+        val profileId = securePrefs.getProfileId()
+        if (profileId.isNullOrEmpty()) return
+        val total = items.size
+        val completed = java.util.concurrent.atomic.AtomicInteger(0)
+        for (batch in items.chunked(uploadBatchSize)) {
+            val sessionId = openSession(profileId, forcePlace = true)
+            uploadAll(sessionId, batch, total, completed)
+            completeAndReportSafely(sessionId)
         }
     }
 
@@ -419,6 +465,8 @@ class SyncEngine(
             }
         }
         _progress.value = _progress.value.copy(failedFiles = _progress.value.failedFiles + failed)
+        // Session completed + outcomes reported: signal observers to refresh the timeline.
+        _syncCompletions.value += 1
     }
 
     private suspend fun recordFailure(
