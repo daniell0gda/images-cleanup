@@ -83,6 +83,9 @@ enum class StatusFilter { WORKING_SET, SYNCED_TODAY, ALL, NOT_PEOPLE }
 /** Test tag on each status tile, so the rendered tile count is assertable. */
 const val STATUS_TILE_TAG = "statusTile"
 
+/** Test tag on the working-set loading state (initial device scan in progress). */
+const val LOADING_STATE_TAG = "statusLoading"
+
 /** Test tag on the header's clickable failed-count chip (opens the failures modal). */
 const val FAILED_CHIP_TAG = "failedCountChip"
 
@@ -133,6 +136,9 @@ fun MainStatusScreen(
     onSyncNow: () -> Unit,
     onCleanup: () -> Unit,
     modifier: Modifier = Modifier,
+    // True while the initial working-set scan runs; an empty list then reads as
+    // "still scanning" rather than "nothing to back up".
+    isDiscovering: Boolean = false,
     syncProgress: SyncProgress = SyncProgress(),
     totals: StatusTotals = StatusTotals.fromRows(rows),
     failures: List<FailureDetail> = emptyList(),
@@ -253,6 +259,7 @@ fun MainStatusScreen(
 
         Box(Modifier.weight(1f)) {
             when {
+                rows.isEmpty() && isDiscovering -> LoadingState()
                 rows.isEmpty() -> EmptyState()
                 notPeople -> Column {
                     AnimatedVisibility(selectionMode) {
@@ -535,5 +542,20 @@ private fun EmptyState() {
         Text("All caught up", style = MaterialTheme.typography.titleMedium, color = c.text)
         Spacer(Modifier.height(6.dp))
         Text("Nothing waiting to back up.", style = MonoLabel.copy(fontSize = 13.sp), color = c.muted)
+    }
+}
+
+/** Shown in place of [EmptyState] while the first device scan is still running. */
+@Composable
+private fun LoadingState() {
+    val c = VaultTheme.colors
+    Column(
+        Modifier.fillMaxSize().testTag(LOADING_STATE_TAG),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp, color = c.accent)
+        Spacer(Modifier.height(14.dp))
+        Text("Finding your photos…", style = MonoLabel.copy(fontSize = 13.sp), color = c.muted)
     }
 }

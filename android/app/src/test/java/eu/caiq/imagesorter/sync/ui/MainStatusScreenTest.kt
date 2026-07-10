@@ -25,6 +25,7 @@ import eu.caiq.imagesorter.sync.sync.SyncPhase
 import eu.caiq.imagesorter.sync.sync.SyncProgress
 import eu.caiq.imagesorter.sync.ui.screens.FAILED_CHIP_TAG
 import eu.caiq.imagesorter.sync.ui.screens.FailureDetail
+import eu.caiq.imagesorter.sync.ui.screens.LOADING_STATE_TAG
 import eu.caiq.imagesorter.sync.ui.screens.STATUS_TILE_TAG
 import eu.caiq.imagesorter.sync.ui.screens.MainStatusScreen
 import eu.caiq.imagesorter.sync.ui.screens.StatusFilter
@@ -128,6 +129,26 @@ class MainStatusScreenTest {
         }
         composeRule.onNodeWithText("All caught up").assertIsDisplayed()
         composeRule.onAllNodesWithTag(STATUS_TILE_TAG).assertCountEquals(0)
+    }
+
+    @Test
+    fun emptyRowsWhileDiscoveringShowsLoadingNotEmptyState() {
+        // An empty working set during the initial device scan must read as "loading",
+        // not the misleading "All caught up" (which looks like the scan already finished).
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MainStatusScreen(
+                    rows = emptyList(),
+                    isDiscovering = true,
+                    selectedFilter = StatusFilter.ALL,
+                    onFilterChange = {},
+                    onSyncNow = {},
+                    onCleanup = {},
+                )
+            }
+        }
+        composeRule.onNodeWithTag(LOADING_STATE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("All caught up").assertDoesNotExist()
     }
 
     @Test

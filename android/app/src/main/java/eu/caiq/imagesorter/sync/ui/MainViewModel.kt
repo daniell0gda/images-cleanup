@@ -144,6 +144,13 @@ class MainViewModel(
     private val _filter = MutableStateFlow(StatusFilter.WORKING_SET)
     val filter: StateFlow<StatusFilter> = _filter.asStateFlow()
 
+    // True while a working-set scan is running, starting true so the very first open
+    // (before the initial discover() finishes) reads as "scanning" rather than an empty
+    // working set. Lets the main view tell "still finding photos" apart from "nothing to
+    // back up" instead of showing a misleading empty state during the scan.
+    private val _discovering = MutableStateFlow(true)
+    val discovering: StateFlow<Boolean> = _discovering.asStateFlow()
+
     /**
      * Live sync progress. The engine is a process-wide singleton, so this is the
      * same flow the foreground service drives — the UI mirrors the running pass.
@@ -345,7 +352,10 @@ class MainViewModel(
      * a sync is already running.
      */
     fun discoverNow() {
-        viewModelScope.launch(Dispatchers.Default) { locator.syncEngine.discover() }
+        _discovering.value = true
+        viewModelScope.launch(Dispatchers.Default) {
+            try { locator.syncEngine.discover() } finally { _discovering.value = false }
+        }
     }
 
     /** Permission flow result: refresh discovery once media access is granted. */

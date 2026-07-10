@@ -233,6 +233,7 @@ private fun SyncTabContent(
             // device before the user taps "Back up now".
             LaunchedEffect(Unit) { viewModel.discoverNow() }
             val rows by viewModel.rows.collectAsStateWithLifecycle()
+            val discovering by viewModel.discovering.collectAsStateWithLifecycle()
             val filter by viewModel.filter.collectAsStateWithLifecycle()
             val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
             val totals by viewModel.totals.collectAsStateWithLifecycle()
@@ -248,6 +249,7 @@ private fun SyncTabContent(
 
             MainStatusScreen(
                 rows = rows,
+                isDiscovering = discovering,
                 selectedFilter = filter,
                 onFilterChange = viewModel::setFilter,
                 onSyncNow = viewModel::syncNow,
