@@ -202,16 +202,41 @@ def test_video_websafe_null_when_ffprobe_absent(tmp_path, monkeypatch):
     assert app.state.media_indexer.get(mid)["video_websafe"] is None
 
 
-def test_video_websafe_set_from_probe_when_available(tmp_path, monkeypatch):
-    # Inject a fake prober so the build sets video_websafe without real ffprobe.
+def test_safety_flags_set_from_probe_when_available(tmp_path, monkeypatch):
+    # Inject fake codecs so the build classifies both flags without real ffprobe.
+    # An exotic (mpeg4) codec is neither web- nor app-safe -> both flags 0.
     monkeypatch.setattr(media_mod, "ffprobe_available", lambda: True)
-    monkeypatch.setattr(media_mod, "probe_video_websafe", lambda p: False)
+    monkeypatch.setattr(media_mod, "probe_video_codecs", lambda p: ("mpeg4", "aac"))
     root = tmp_path / "lib"
     _make_video(root / "v.mp4", VIDEO_BYTES)
     app = _build_app(tmp_path, [root])
     _index(app)
     mid = _video_id(app)
-    assert app.state.media_indexer.get(mid)["video_websafe"] == 0
+    row = app.state.media_indexer.get(mid)
+    assert row["video_websafe"] == 0
+    assert row["video_appsafe"] == 0
+
+
+def test_hevc_is_appsafe_but_not_websafe(tmp_path, monkeypatch):
+    # HEVC: the app plays it natively (appsafe=1) but a browser can't (websafe=0).
+    monkeypatch.setattr(media_mod, "ffprobe_available", lambda: True)
+    monkeypatch.setattr(media_mod, "probe_video_codecs", lambda p: ("hevc", "aac"))
+    root = tmp_path / "lib"
+    _make_video(root / "v.mp4", VIDEO_BYTES)
+    app = _build_app(tmp_path, [root])
+    _index(app)
+    row = app.state.media_indexer.get(_video_id(app))
+    assert row["video_websafe"] == 0
+    assert row["video_appsafe"] == 1
+
+
+def test_video_codec_classifiers():
+    assert media_mod.video_websafe("h264", "aac") is True
+    assert media_mod.video_websafe("hevc", "aac") is False  # browser can't
+    assert media_mod.video_appsafe("hevc", "aac") is True   # ExoPlayer can
+    assert media_mod.video_appsafe("h264", None) is True     # no audio is fine
+    assert media_mod.video_appsafe("h264", "opus") is False  # audio not supported
+    assert media_mod.video_appsafe("av1", "aac") is False    # neither h264 nor hevc
 
 
 @pytest.mark.skipif(not media_mod.ffprobe_available(),
@@ -235,13 +260,15 @@ def test_probe_video_websafe_runs_real_ffprobe(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _nonwebsafe_app(tmp_path):
+    # A codec the app itself can't play (appsafe=0): the device endpoint
+    # transcodes it, exercising the proxy path.
     root = tmp_path / "lib"
     _make_video(root / "v.mp4", VIDEO_BYTES)
     app = _build_app(tmp_path, [root])
     _index(app)
     mid = _video_id(app)
     app.state.media_indexer._conn().execute(
-        "UPDATE media SET video_websafe=0 WHERE id=?", (mid,)
+        "UPDATE media SET video_websafe=0, video_appsafe=0 WHERE id=?", (mid,)
     )
     app.state.media_indexer._conn().commit()
     return app, mid
@@ -320,13 +347,13 @@ def test_stream_nonwebsafe_serves_proxy(tmp_path):
     assert (tmp_path / "proxies" / f"{mid}.mp4").exists()
 
 
-def test_build_pretranscodes_nonwebsafe_video(tmp_path, monkeypatch):
-    # A non-web-safe video discovered during indexing is proxied in the
-    # background, so its first play is instant instead of blocking on a full
-    # encode. ffprobe/ffmpeg are faked so the test needs neither binary.
+def test_build_pretranscodes_app_unplayable_video(tmp_path, monkeypatch):
+    # A codec the app can't play natively (mpeg4) is proxied in the background
+    # during indexing, so its first play is instant instead of blocking on a
+    # full encode. ffprobe/ffmpeg are faked so the test needs neither binary.
     monkeypatch.setattr(media_mod, "ffprobe_available", lambda: True)
     monkeypatch.setattr(media_mod, "ffmpeg_available", lambda: True)
-    monkeypatch.setattr(media_mod, "probe_video_websafe", lambda p: False)
+    monkeypatch.setattr(media_mod, "probe_video_codecs", lambda p: ("mpeg4", "aac"))
     root = tmp_path / "lib"
     _make_video(root / "v.mp4", VIDEO_BYTES)
     app = _build_app(tmp_path, [root])
@@ -353,7 +380,7 @@ def test_build_skips_pretranscode_when_ffmpeg_absent(tmp_path, monkeypatch):
     # encode is queued (and no worker pool is created) since it would fail.
     monkeypatch.setattr(media_mod, "ffprobe_available", lambda: True)
     monkeypatch.setattr(media_mod, "ffmpeg_available", lambda: False)
-    monkeypatch.setattr(media_mod, "probe_video_websafe", lambda p: False)
+    monkeypatch.setattr(media_mod, "probe_video_codecs", lambda p: ("mpeg4", "aac"))
     root = tmp_path / "lib"
     _make_video(root / "v.mp4", VIDEO_BYTES)
     app = _build_app(tmp_path, [root])
@@ -363,9 +390,48 @@ def test_build_skips_pretranscode_when_ffmpeg_absent(tmp_path, monkeypatch):
     indexer.build()
 
     mid = _video_id(app)
-    assert indexer.get(mid)["video_websafe"] == 0
+    assert indexer.get(mid)["video_appsafe"] == 0
     assert not (tmp_path / "proxies" / f"{mid}.mp4").exists()
     assert indexer._pretranscode_pool is None
+
+
+def test_build_skips_pretranscode_for_hevc(tmp_path, monkeypatch):
+    # HEVC is app-safe, so no background proxy is built for the app; the browser
+    # proxy is left to build on demand from the share surface.
+    monkeypatch.setattr(media_mod, "ffprobe_available", lambda: True)
+    monkeypatch.setattr(media_mod, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(media_mod, "probe_video_codecs", lambda p: ("hevc", "aac"))
+    root = tmp_path / "lib"
+    _make_video(root / "v.mp4", VIDEO_BYTES)
+    app = _build_app(tmp_path, [root])
+    indexer = app.state.media_indexer
+    indexer._thumbnail = lambda row_id, path, kind: False
+
+    indexer.build()
+
+    assert not (tmp_path / "proxies" / f"{_video_id(app)}.mp4").exists()
+    assert indexer._pretranscode_pool is None
+
+
+def test_stream_hevc_serves_original_to_app(tmp_path):
+    # HEVC (appsafe=1, websafe=0): the device endpoint serves the original with
+    # Range and never transcodes, since ExoPlayer decodes it natively.
+    root = tmp_path / "lib"
+    _make_video(root / "v.mp4", VIDEO_BYTES)
+    app = _build_app(tmp_path, [root])
+    _index(app)
+    mid = _video_id(app)
+    app.state.media_indexer._conn().execute(
+        "UPDATE media SET video_websafe=0, video_appsafe=1 WHERE id=?", (mid,)
+    )
+    app.state.media_indexer._conn().commit()
+    client = TestClient(app)
+
+    resp = client.get(f"/api/media/{mid}/stream",
+                      headers={"Range": "bytes=0-3", **_auth(client)})
+    assert resp.status_code == 206
+    assert resp.content == VIDEO_BYTES[0:4]
+    assert not (tmp_path / "proxies" / f"{mid}.mp4").exists()
 
 
 @pytest.mark.skipif(media_mod.ffmpeg_available(),

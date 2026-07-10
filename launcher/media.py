@@ -239,14 +239,18 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+# Browsers can only play H.264 progressively; Android's ExoPlayer also decodes
+# HEVC (H.265) in hardware, so the app plays those originals with no transcode.
 _WEBSAFE_VIDEO_CODECS = {"h264"}
+_APPSAFE_VIDEO_CODECS = {"h264", "hevc"}
 _WEBSAFE_AUDIO_CODECS = {"aac", "mp3"}
 
 
-def probe_video_websafe(path: Path) -> bool:
-    """Return True iff ``path`` is ExoPlayer-progressive web-safe.
+def probe_video_codecs(path: Path) -> tuple[str | None, str | None]:
+    """Return ``(video_codec, audio_codec)`` for ``path`` via one ffprobe call.
 
-    Web-safe means an H.264 video stream plus AAC/MP3 (or no) audio. Requires
+    Each is the ffprobe ``codec_name`` (e.g. ``"h264"``, ``"hevc"``, ``"aac"``)
+    of the first stream of that type, or ``None`` when absent. Requires
     ``ffprobe`` on PATH; callers must gate with :func:`ffprobe_available`.
     """
     import json
@@ -260,18 +264,37 @@ def probe_video_websafe(path: Path) -> bool:
         capture_output=True, text=True, check=True,
     )
     streams = json.loads(out.stdout).get("streams", [])
-    video_ok = False
-    audio_ok = True
+    video_codec = audio_codec = None
     for s in streams:
-        codec_type = s.get("codec_type")
-        codec_name = s.get("codec_name")
-        if codec_type == "video":
-            if codec_name in _WEBSAFE_VIDEO_CODECS:
-                video_ok = True
-        elif codec_type == "audio":
-            if codec_name not in _WEBSAFE_AUDIO_CODECS:
-                audio_ok = False
-    return video_ok and audio_ok
+        if s.get("codec_type") == "video" and video_codec is None:
+            video_codec = s.get("codec_name")
+        elif s.get("codec_type") == "audio" and audio_codec is None:
+            audio_codec = s.get("codec_name")
+    return video_codec, audio_codec
+
+
+def _audio_websafe(audio_codec: str | None) -> bool:
+    """A missing audio track is fine; otherwise it must be AAC/MP3."""
+    return audio_codec is None or audio_codec in _WEBSAFE_AUDIO_CODECS
+
+
+def video_websafe(video_codec: str | None, audio_codec: str | None) -> bool:
+    """Browser-playable: H.264 video + AAC/MP3 (or no) audio."""
+    return video_codec in _WEBSAFE_VIDEO_CODECS and _audio_websafe(audio_codec)
+
+
+def video_appsafe(video_codec: str | None, audio_codec: str | None) -> bool:
+    """App-playable: H.264 or HEVC video + AAC/MP3 (or no) audio.
+
+    ExoPlayer decodes both in hardware, so the app streams these originals
+    directly; only the browser share surface needs the H.264 proxy.
+    """
+    return video_codec in _APPSAFE_VIDEO_CODECS and _audio_websafe(audio_codec)
+
+
+def probe_video_websafe(path: Path) -> bool:
+    """True iff ``path`` is browser web-safe (single-call convenience wrapper)."""
+    return video_websafe(*probe_video_codecs(path))
 
 
 def transcode_to_mp4(src: Path, dest: Path) -> None:
@@ -451,6 +474,7 @@ class MediaIndexer:
                     width          INTEGER,
                     height         INTEGER,
                     video_websafe  INTEGER,
+                    video_appsafe  INTEGER,
                     thumb_ready    INTEGER NOT NULL DEFAULT 0,
                     profile        TEXT
                 );
@@ -479,6 +503,11 @@ class MediaIndexer:
             cols = {r["name"] for r in con.execute("PRAGMA table_info(media)")}
             if "profile" not in cols:
                 con.execute("ALTER TABLE media ADD COLUMN profile TEXT")
+            # Added when the app began playing HEVC originals directly: existing
+            # videos stay NULL until re-probed, which safely serves the original
+            # to the app (the common H.264/HEVC case) rather than transcoding.
+            if "video_appsafe" not in cols:
+                con.execute("ALTER TABLE media ADD COLUMN video_appsafe INTEGER")
             con.execute("CREATE INDEX IF NOT EXISTS idx_media_profile ON media (profile)")
             con.commit()
 
@@ -762,11 +791,14 @@ class MediaIndexer:
         status.added += 1
         if kind == "video" and ffprobe_available():
             try:
-                websafe = probe_video_websafe(path)
-                self._set_video_websafe(row_id, websafe)
-                if not websafe:
-                    # Build the H.264 proxy in the background so the first play is
-                    # instant rather than blocking on a full encode.
+                vcodec, acodec = probe_video_codecs(path)
+                appsafe = video_appsafe(vcodec, acodec)
+                self._set_video_safety(row_id, video_websafe(vcodec, acodec), appsafe)
+                if not appsafe:
+                    # The app can't play this codec natively, so build the H.264
+                    # proxy in the background — its first play is then instant
+                    # instead of blocking on a full encode. (HEVC is app-safe and
+                    # streams as the original; its browser proxy builds on demand.)
                     self._submit_pretranscode(row_id, path)
             except Exception:
                 logger.warning("media build: ffprobe failed for %s", path, exc_info=True)
@@ -783,18 +815,23 @@ class MediaIndexer:
             ).fetchone()
 
     def _upsert(self, path, root, kind, size, mtime, date_taken, width, height, profile=None) -> int:
-        websafe_clause = "NULL" if kind == "video" else "video_websafe"
+        # Videos re-probe on every (re)index, so reset both safety flags to NULL;
+        # images carry the columns forward unchanged (they never apply).
+        safe_clause = "NULL" if kind == "video" else None
+        websafe_clause = safe_clause or "video_websafe"
+        appsafe_clause = safe_clause or "video_appsafe"
         with self._lock:
             self._conn().execute(
                 "INSERT INTO media "
                 "(path, root, kind, size, mtime, date_taken, width, height, "
-                " video_websafe, thumb_ready, profile) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?) "
+                " video_websafe, video_appsafe, thumb_ready, profile) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?) "
                 "ON CONFLICT(path) DO UPDATE SET "
                 "  root=excluded.root, kind=excluded.kind, size=excluded.size, "
                 "  mtime=excluded.mtime, date_taken=excluded.date_taken, "
                 "  width=excluded.width, height=excluded.height, "
-                f"  video_websafe={websafe_clause}, thumb_ready=0, profile=excluded.profile",
+                f"  video_websafe={websafe_clause}, video_appsafe={appsafe_clause}, "
+                "  thumb_ready=0, profile=excluded.profile",
                 (path, root, kind, size, mtime, date_taken, width, height, profile),
             )
             self._conn().commit()
@@ -803,11 +840,11 @@ class MediaIndexer:
             ).fetchone()
         return row["id"]
 
-    def _set_video_websafe(self, row_id: int, websafe: bool) -> None:
+    def _set_video_safety(self, row_id: int, websafe: bool, appsafe: bool) -> None:
         with self._lock:
             self._conn().execute(
-                "UPDATE media SET video_websafe=? WHERE id=?",
-                (1 if websafe else 0, row_id),
+                "UPDATE media SET video_websafe=?, video_appsafe=? WHERE id=?",
+                (1 if websafe else 0, 1 if appsafe else 0, row_id),
             )
             self._conn().commit()
 

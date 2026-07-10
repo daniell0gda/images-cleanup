@@ -791,9 +791,10 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         if row["kind"] != "video":
             raise HTTPException(status_code=404, detail="Not a video")
         _assert_within_root(Path(row["path"]), row["root"])
-        # Web-safe (or not-yet-probed NULL) -> serve the original with Range.
-        # Only a KNOWN-non-web-safe (video_websafe == 0) video is transcoded.
-        if row["video_websafe"] == 0:
+        # ExoPlayer decodes H.264 and HEVC natively, so the app streams those
+        # originals directly. Only a KNOWN app-unplayable (video_appsafe == 0)
+        # codec is transcoded; app-safe and not-yet-probed NULL serve the original.
+        if row["video_appsafe"] == 0:
             try:
                 # Off the event loop: a cache miss runs a blocking ffmpeg encode,
                 # which would otherwise stall the single worker for every client.
