@@ -297,7 +297,7 @@ fun MainStatusScreen(
                         modifier = Modifier.weight(1f),
                     ) { row -> MediaTileContent(row) }
                 }
-                else -> ReadOnlyGrid(rows)
+                else -> StatusGrid(rows, onTap = { index -> previewIndex = index })
             }
             SweepOverlay(visible = activeSync)
         }
@@ -335,8 +335,10 @@ fun MainStatusScreen(
     }
 
         // Fullscreen preview overlay — opens with a scale+fade expand from the grid.
+        // Shared by the Not People review and the read-only status filters; the action
+        // row differs (Not People also offers "Sync anyway"), the delete plumbing is the same.
         AnimatedVisibility(
-            visible = notPeople && previewIndex != null,
+            visible = previewIndex != null,
             enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.92f, animationSpec = tween(260)),
             exit = fadeOut(tween(160)) + scaleOut(targetScale = 0.92f, animationSpec = tween(160)),
         ) {
@@ -349,14 +351,16 @@ fun MainStatusScreen(
                     actions = { page ->
                         val c = VaultTheme.colors
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(
-                                onClick = {
-                                    rows.getOrNull(page)?.let { onOverride(listOf(it)) }
-                                    previewIndex = null
-                                },
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
-                            ) { Text("Sync anyway", fontWeight = FontWeight.SemiBold) }
+                            if (notPeople) {
+                                Button(
+                                    onClick = {
+                                        rows.getOrNull(page)?.let { onOverride(listOf(it)) }
+                                        previewIndex = null
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+                                ) { Text("Sync anyway", fontWeight = FontWeight.SemiBold) }
+                            }
                             OutlinedButton(
                                 onClick = {
                                     rows.getOrNull(page)?.let { onDelete(listOf(it)) }
@@ -419,9 +423,13 @@ private fun Pill(label: String, on: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Read-only 3-column status grid used by every filter except Not People. */
+/**
+ * 3-column status grid used by every filter except Not People. Tapping a tile opens
+ * the fullscreen preview at that item; there is no multi-select here (long-press is a
+ * no-op) — that is exclusive to the Not People review grid.
+ */
 @Composable
-private fun ReadOnlyGrid(rows: List<StatusRow>) {
+private fun StatusGrid(rows: List<StatusRow>, onTap: (Int) -> Unit) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -437,7 +445,8 @@ private fun ReadOnlyGrid(rows: List<StatusRow>) {
                     Modifier
                         .testTag(STATUS_TILE_TAG)
                         .aspectRatio(1f)
-                        .clip(RoundedCornerShape(13.dp)),
+                        .clip(RoundedCornerShape(13.dp))
+                        .clickableScale { onTap(index) },
                 ) {
                     MediaTileContent(row)
                 }

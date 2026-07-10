@@ -446,26 +446,112 @@ class MainStatusScreenTest {
         composeRule.onAllNodesWithContentDescription(SELECTION_CHECK_DESC).assertCountEquals(1)
     }
 
-    @Test
-    fun nonNotPeopleGridIsReadOnly() {
+    private fun setSyncScreen(
+        filter: StatusFilter,
+        onOverride: (List<StatusRow>) -> Unit = {},
+        onDelete: (List<StatusRow>) -> Unit = {},
+    ) {
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {
                 MainStatusScreen(
                     rows = rows,
-                    selectedFilter = StatusFilter.ALL,
+                    selectedFilter = filter,
                     onFilterChange = {},
                     onSyncNow = {},
                     onCleanup = {},
+                    onOverride = onOverride,
+                    onDelete = onDelete,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun syncTabWorkingSetTileTapOpensPreview() {
+        setSyncScreen(StatusFilter.WORKING_SET)
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun syncTabSyncedTodayTileTapOpensPreview() {
+        setSyncScreen(StatusFilter.SYNCED_TODAY)
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun syncTabAllTileTapOpensPreview() {
+        setSyncScreen(StatusFilter.ALL)
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun syncTabTileTapDoesNotEnterSelectionMode() {
+        // A non-Not-People filter has no multi-select: a long-press does nothing.
+        setSyncScreen(StatusFilter.ALL)
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst()
+            .performTouchInput { longClick() }
+        composeRule.onNodeWithTag(SELECTION_BAR_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun syncTabPreviewDeleteInvokesOnDeleteWithCurrentRow() {
+        val deleted = mutableListOf<List<StatusRow>>()
+        setSyncScreen(StatusFilter.ALL, onDelete = { deleted.add(it) })
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[1].performClick()
+        composeRule.onNodeWithText("Delete").performClick()
+        assertEquals(listOf(rows[1]), deleted.single())
+    }
+
+    @Test
+    fun syncTabPreviewDeleteDismissesPreview() {
+        setSyncScreen(StatusFilter.ALL)
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Delete").performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun syncTabPreviewCloseReturnsToGrid() {
+        setSyncScreen(StatusFilter.ALL)
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Close").performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).assertCountEquals(rows.size)
+    }
+
+    @Test
+    fun notPeoplePreviewActionsInvokeCallbacksAndDismiss() {
+        val overridden = mutableListOf<List<StatusRow>>()
+        val deleted = mutableListOf<List<StatusRow>>()
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MainStatusScreen(
+                    rows = notPeopleRows,
+                    selectedFilter = StatusFilter.NOT_PEOPLE,
+                    onFilterChange = {},
+                    onSyncNow = {},
+                    onCleanup = {},
+                    onOverride = { overridden.add(it) },
+                    onDelete = { deleted.add(it) },
                 )
             }
         }
         composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
-        // No preview opens and no selection mode is entered under a non-Not-People filter.
+        composeRule.onNodeWithText("Sync anyway").performClick()
+        assertEquals(listOf(notPeopleRows[0]), overridden.single())
         composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(SELECTION_BAR_TAG).assertDoesNotExist()
-        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst()
-            .performTouchInput { longClick() }
-        composeRule.onNodeWithTag(SELECTION_BAR_TAG).assertDoesNotExist()
+
+        // Re-open and delete the current row.
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithText("Delete").performClick()
+        assertEquals(listOf(notPeopleRows[0]), deleted.single())
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
     }
 
     @Test
