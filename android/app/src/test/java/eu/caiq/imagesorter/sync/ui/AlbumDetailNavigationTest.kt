@@ -12,7 +12,6 @@ import eu.caiq.imagesorter.sync.data.api.dto.AlbumNameBody
 import eu.caiq.imagesorter.sync.data.api.dto.CreateAlbumBody
 import eu.caiq.imagesorter.sync.data.api.dto.DeletedDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
-import eu.caiq.imagesorter.sync.data.api.dto.RevokedDto
 import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
 import eu.caiq.imagesorter.sync.data.media.AlbumRepository
 import eu.caiq.imagesorter.sync.data.media.MediaUrls
@@ -43,7 +42,7 @@ private class DetailAlbumApi(private val album: AlbumDto) : AlbumApi {
     override suspend fun items(id: Long): List<MediaItemDto> =
         listOf(MediaItemDto(1, "image", "2024-03-10T00:00:00", 100, 80))
     override suspend fun share(id: Long): ShareDto = ShareDto("t", "https://x/share/t")
-    override suspend fun revoke(id: Long): RevokedDto = RevokedDto(true)
+    override suspend fun revoke(id: Long) {}
 }
 
 /**

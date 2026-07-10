@@ -7,7 +7,6 @@ import eu.caiq.imagesorter.sync.data.api.dto.AlbumNameBody
 import eu.caiq.imagesorter.sync.data.api.dto.CreateAlbumBody
 import eu.caiq.imagesorter.sync.data.api.dto.DeletedDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
-import eu.caiq.imagesorter.sync.data.api.dto.RevokedDto
 import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
 import eu.caiq.imagesorter.sync.data.media.AlbumRepository
 import kotlinx.coroutines.test.runTest
@@ -24,7 +23,6 @@ private class FakeAlbumApi : AlbumApi {
     var itemsResponse: List<MediaItemDto> = emptyList()
     var shareResponse: ShareDto = ShareDto("tok", "https://s/share/tok")
     var deletedResponse: DeletedDto = DeletedDto(true)
-    var revokedResponse: RevokedDto = RevokedDto(true)
 
     var lastCreate: CreateAlbumBody? = null
     var lastRename: AlbumNameBody? = null
@@ -42,7 +40,7 @@ private class FakeAlbumApi : AlbumApi {
     override suspend fun removeItems(id: Long, body: AlbumItemsBody): AlbumDto { lastRemove = body; return entryResponse }
     override suspend fun items(id: Long): List<MediaItemDto> = itemsResponse
     override suspend fun share(id: Long): ShareDto { lastSharedId = id; return shareResponse }
-    override suspend fun revoke(id: Long): RevokedDto { lastRevokedId = id; return revokedResponse }
+    override suspend fun revoke(id: Long) { lastRevokedId = id }
 }
 
 class AlbumRepositoryTest {
@@ -130,11 +128,11 @@ class AlbumRepositoryTest {
     }
 
     @Test
-    fun revokeReturnsServerFlag() = runTest {
-        val api = FakeAlbumApi().apply { revokedResponse = RevokedDto(true) }
+    fun revokeCallsApiWithAlbumId() = runTest {
+        val api = FakeAlbumApi()
         val repo = AlbumRepository(api)
 
-        assertTrue(repo.revoke(9))
+        repo.revoke(9)
         assertEquals(9L, api.lastRevokedId)
     }
 

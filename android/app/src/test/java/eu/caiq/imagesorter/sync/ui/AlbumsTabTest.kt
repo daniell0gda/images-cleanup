@@ -10,7 +10,6 @@ import eu.caiq.imagesorter.sync.data.api.dto.AlbumNameBody
 import eu.caiq.imagesorter.sync.data.api.dto.CreateAlbumBody
 import eu.caiq.imagesorter.sync.data.api.dto.DeletedDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
-import eu.caiq.imagesorter.sync.data.api.dto.RevokedDto
 import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
 import eu.caiq.imagesorter.sync.data.media.AlbumRepository
 import eu.caiq.imagesorter.sync.ui.screens.AlbumTile
@@ -52,7 +51,7 @@ private class RecordingAlbumApi : AlbumApi {
         lastSharedId = id
         return ShareDto("t", "https://photos.example.com/share/t")
     }
-    override suspend fun revoke(id: Long): RevokedDto = RevokedDto(true)
+    override suspend fun revoke(id: Long) {}
 }
 
 @RunWith(RobolectricTestRunner::class)

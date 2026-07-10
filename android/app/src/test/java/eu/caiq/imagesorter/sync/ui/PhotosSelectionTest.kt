@@ -12,7 +12,6 @@ import eu.caiq.imagesorter.sync.data.api.dto.AlbumNameBody
 import eu.caiq.imagesorter.sync.data.api.dto.CreateAlbumBody
 import eu.caiq.imagesorter.sync.data.api.dto.DeletedDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
-import eu.caiq.imagesorter.sync.data.api.dto.RevokedDto
 import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
 import eu.caiq.imagesorter.sync.data.media.AlbumRepository
 import eu.caiq.imagesorter.sync.ui.screens.AlbumSelectionAction
@@ -48,7 +47,7 @@ private class FakeAlbumApi : AlbumApi {
     override suspend fun removeItems(id: Long, body: AlbumItemsBody): AlbumDto = entryResponse
     override suspend fun items(id: Long): List<MediaItemDto> = emptyList()
     override suspend fun share(id: Long): ShareDto { lastSharedId = id; return shareResponse }
-    override suspend fun revoke(id: Long): RevokedDto = RevokedDto(true)
+    override suspend fun revoke(id: Long) {}
 }
 
 @RunWith(RobolectricTestRunner::class)

@@ -462,11 +462,14 @@ private fun AlbumDetail(
                     },
                     onRevoke = {
                         shareMenuOpen = false
+                        // Reflect the revoke immediately so the link icon changes back
+                        // right away; roll back if the request fails.
+                        val previous = shareState
+                        shareState = shareState.copy(shared = false, shareUrl = null)
                         scope.launch {
-                            runCatching { repo.revoke(albumId) }.onSuccess {
-                                shareState = shareState.copy(shared = false, shareUrl = null)
-                                snackbarHostState.showSnackbar("Album is no longer shared")
-                            }
+                            runCatching { repo.revoke(albumId) }
+                                .onSuccess { snackbarHostState.showSnackbar("Album is no longer shared") }
+                                .onFailure { shareState = previous }
                         }
                     },
                 )

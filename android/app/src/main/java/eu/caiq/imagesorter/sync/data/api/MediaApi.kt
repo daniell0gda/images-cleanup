@@ -8,7 +8,6 @@ import eu.caiq.imagesorter.sync.data.api.dto.DeletedDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaPageDto
-import eu.caiq.imagesorter.sync.data.api.dto.RevokedDto
 import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
 import retrofit2.http.Body
 import retrofit2.http.DELETE
@@ -75,6 +74,8 @@ interface AlbumApi {
     @POST("api/albums/{id}/share")
     suspend fun share(@Path("id") id: Long): ShareDto
 
+    // Success is signalled by a 2xx status; the response body is not consumed, so
+    // the client tolerates older servers that echoed the album id instead of a flag.
     @DELETE("api/albums/{id}/share")
-    suspend fun revoke(@Path("id") id: Long): RevokedDto
+    suspend fun revoke(@Path("id") id: Long)
 }

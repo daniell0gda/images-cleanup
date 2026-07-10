@@ -43,5 +43,5 @@ class AlbumRepository(private val api: AlbumApi) {
     /** Mints a fresh share token; the returned [ShareDto.shareUrl] is used verbatim. */
     suspend fun share(id: Long): ShareDto = api.share(id)
 
-    suspend fun revoke(id: Long): Boolean = api.revoke(id).revoked
+    suspend fun revoke(id: Long) = api.revoke(id)
 }

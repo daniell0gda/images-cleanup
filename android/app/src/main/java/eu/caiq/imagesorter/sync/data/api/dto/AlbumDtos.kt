@@ -47,7 +47,3 @@ data class ShareDto(
 /** Response of `DELETE /api/albums/{id}`. */
 @JsonClass(generateAdapter = true)
 data class DeletedDto(val deleted: Boolean)
-
-/** Response of `DELETE /api/albums/{id}/share`. */
-@JsonClass(generateAdapter = true)
-data class RevokedDto(val revoked: Boolean)
