@@ -163,6 +163,50 @@ def test_rebuild_prunes_vanished_files_and_their_cache(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Single-item delete (drops the row and its cached artifacts)
+# ---------------------------------------------------------------------------
+
+def test_delete_removes_row_and_cached_artifacts(tmp_path):
+    root = tmp_path / "lib"
+    make_image(root / "a.jpg")
+    make_image(root / "b.jpg")
+
+    thumbs = tmp_path / "thumbs"
+    proxies = tmp_path / "proxies"
+    indexer = MediaIndexer(
+        db_path=tmp_path / "media.db",
+        thumbs_dir=thumbs,
+        proxies_dir=proxies,
+        folders=[str(root)],
+    )
+    indexer.build()
+    rows = {Path(r["path"]).name: r for r in indexer.list_all()}
+    gone_id = rows["b.jpg"]["id"]
+
+    # Simulate the cached artifacts for the item we are about to delete.
+    thumbs.mkdir(parents=True, exist_ok=True)
+    proxies.mkdir(parents=True, exist_ok=True)
+    (thumbs / f"{gone_id}.jpg").write_bytes(b"x")
+    (proxies / f"{gone_id}.mp4").write_bytes(b"y")
+
+    indexer.delete(gone_id)
+
+    assert {Path(r["path"]).name for r in indexer.list_all()} == {"a.jpg"}
+    assert not (thumbs / f"{gone_id}.jpg").exists()
+    assert not (proxies / f"{gone_id}.mp4").exists()
+
+
+def test_delete_unknown_id_is_a_noop(tmp_path):
+    root = tmp_path / "lib"
+    make_image(root / "a.jpg")
+    indexer = make_indexer(tmp_path, [root])
+    indexer.build()
+
+    indexer.delete(999999)  # must not raise
+    assert len(indexer.list_all()) == 1
+
+
+# ---------------------------------------------------------------------------
 # Profile: which sync profile placed the file (for filtering)
 # ---------------------------------------------------------------------------
 

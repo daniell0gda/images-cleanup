@@ -531,6 +531,16 @@ class MediaIndexer:
         """Set ``thumb_ready=1`` for ``media_id`` (used by the lazy thumb route)."""
         self._mark_thumb_ready(media_id)
 
+    def delete(self, media_id: int) -> None:
+        """Drop a single item's index row and its cached thumbnail/proxy.
+
+        The single-item counterpart to prune, exposed for the delete endpoint:
+        the caller removes the source file (guarded against escaping its root);
+        this forgets the row so the item leaves the timeline. A no-op when the
+        row is already gone.
+        """
+        self._delete_row(media_id)
+
     # -- video proxy (transcode-if-needed cache) -------------------------
 
     def set_transcoder(self, transcoder) -> None:

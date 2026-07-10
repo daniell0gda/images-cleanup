@@ -737,6 +737,27 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         _require_device(authorization)
         return media_indexer.available_dates()
 
+    @app.delete("/api/media/{media_id}")
+    async def media_delete(media_id: int, authorization: str | None = Header(default=None)):
+        _require_device(authorization)
+        row = _media_row_or_404(media_id)
+        path = Path(row["path"])
+        _assert_within_root(path, row["root"])
+        # Remove the original file, the server-owned preview cache, and the index
+        # row (which also drops its thumb/proxy caches) so the item is gone from
+        # disk and from every client's timeline.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("media delete: cannot delete file %s", path, exc_info=True)
+        preview = media_mod.media_previews_dir() / f"{media_id}.jpg"
+        try:
+            preview.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("media delete: cannot delete preview %s", preview, exc_info=True)
+        media_indexer.delete(media_id)
+        return {"deleted": True}
+
     def _serve_with_range(path: Path, media_type: str = "video/mp4") -> Response:
         """Serve ``path`` as a Range-aware, chunked stream (200 full / 206 partial).
 

@@ -170,3 +170,57 @@ def test_preview_unknown_id_404(tmp_path):
 
     resp = client.get("/api/media/999999/preview", headers=_auth(client))
     assert resp.status_code == 404
+
+
+def test_delete_removes_file_index_and_caches(tmp_path):
+    root = tmp_path / "lib"
+    src = root / "a.jpg"
+    _make_image(src, size=(4000, 2000))
+    app = _build_app(tmp_path, [root])
+    _build_index(app)
+    client = TestClient(app)
+    headers = _auth(client)
+    media_id = _ids(app)[0]
+
+    # Materialise the preview cache so the delete has one to clean up.
+    client.get(f"/api/media/{media_id}/preview", headers=headers)
+    thumb = tmp_path / "thumbs" / f"{media_id}.jpg"
+    preview = tmp_path / "previews" / f"{media_id}.jpg"
+    assert thumb.exists() and preview.exists()
+
+    resp = client.delete(f"/api/media/{media_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": True}
+
+    # File gone from disk, row gone from the index, caches cleaned up.
+    assert not src.exists()
+    assert _ids(app) == []
+    assert not thumb.exists()
+    assert not preview.exists()
+    # And the item no longer resolves.
+    assert client.get(f"/api/media/{media_id}/thumb", headers=headers).status_code == 404
+
+
+def test_delete_unknown_id_404(tmp_path):
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+    app = _build_app(tmp_path, [root])
+    _build_index(app)
+    client = TestClient(app)
+
+    resp = client.delete("/api/media/999999", headers=_auth(client))
+    assert resp.status_code == 404
+
+
+def test_delete_requires_auth(tmp_path):
+    root = tmp_path / "lib"
+    _make_image(root / "a.jpg")
+    app = _build_app(tmp_path, [root])
+    _build_index(app)
+    client = TestClient(app)
+    media_id = _ids(app)[0]
+
+    resp = client.delete(f"/api/media/{media_id}")
+    assert resp.status_code == 401
+    # The file is untouched by an unauthorized request.
+    assert (root / "a.jpg").exists()
