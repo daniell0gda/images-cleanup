@@ -46,6 +46,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -337,16 +338,23 @@ fun MainStatusScreen(
         // Fullscreen preview overlay — opens with a scale+fade expand from the grid.
         // Shared by the Not People review and the read-only status filters; the action
         // row differs (Not People also offers "Sync anyway"), the delete plumbing is the same.
+        //
+        // Delete keeps the preview open so the system delete dialog appears over it (not
+        // over the grid). As the confirmed row leaves [rows] the pager slides to the next
+        // item; this effect closes the preview once the last item is gone.
+        LaunchedEffect(rows.isEmpty()) {
+            if (rows.isEmpty()) previewIndex = null
+        }
         AnimatedVisibility(
-            visible = previewIndex != null,
+            visible = previewIndex != null && rows.isNotEmpty(),
             enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.92f, animationSpec = tween(260)),
             exit = fadeOut(tween(160)) + scaleOut(targetScale = 0.92f, animationSpec = tween(160)),
         ) {
             val idx = previewIndex
-            if (idx != null && idx in rows.indices) {
+            if (idx != null && rows.isNotEmpty()) {
                 MediaPreviewPager(
                     items = rows,
-                    startIndex = idx,
+                    startIndex = idx.coerceIn(0, rows.size - 1),
                     onClose = { previewIndex = null },
                     actions = { page ->
                         val c = VaultTheme.colors
@@ -362,10 +370,9 @@ fun MainStatusScreen(
                                 ) { Text("Sync anyway", fontWeight = FontWeight.SemiBold) }
                             }
                             OutlinedButton(
-                                onClick = {
-                                    rows.getOrNull(page)?.let { onDelete(listOf(it)) }
-                                    previewIndex = null
-                                },
+                                // No dismiss here: the preview stays up while the system
+                                // delete dialog shows, then follows [rows] as it shrinks.
+                                onClick = { rows.getOrNull(page)?.let { onDelete(listOf(it)) } },
                                 modifier = Modifier.weight(1f),
                             ) { Text("Delete") }
                         }

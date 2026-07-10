@@ -507,10 +507,40 @@ class MainStatusScreenTest {
     }
 
     @Test
-    fun syncTabPreviewDeleteDismissesPreview() {
+    fun syncTabPreviewDeleteKeepsPreviewOpen() {
+        // Delete must not close the preview: the system delete dialog should appear
+        // over it. Here onDelete doesn't mutate rows, so the preview simply stays.
         setSyncScreen(StatusFilter.ALL)
         composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
         composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Delete").performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun syncTabPreviewStaysThenClosesAsDeletedRowsLeave() {
+        // Mirror the real flow: onDelete removes the row from the live list. The
+        // preview stays open (sliding to the next item) until nothing remains, then
+        // closes on its own.
+        val live = androidx.compose.runtime.mutableStateListOf(rows[0], rows[1])
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MainStatusScreen(
+                    rows = live,
+                    selectedFilter = StatusFilter.ALL,
+                    onFilterChange = {},
+                    onSyncNow = {},
+                    onCleanup = {},
+                    onDelete = { toDelete -> live.removeAll(toDelete) },
+                )
+            }
+        }
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+        // One item still remains after the first delete → preview stays open.
+        composeRule.onNodeWithText("Delete").performClick()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+        // Deleting the last item closes the preview.
         composeRule.onNodeWithText("Delete").performClick()
         composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
     }
@@ -526,7 +556,7 @@ class MainStatusScreenTest {
     }
 
     @Test
-    fun notPeoplePreviewActionsInvokeCallbacksAndDismiss() {
+    fun notPeoplePreviewActionsInvokeCallbacks() {
         val overridden = mutableListOf<List<StatusRow>>()
         val deleted = mutableListOf<List<StatusRow>>()
         composeRule.setContent {
@@ -542,16 +572,17 @@ class MainStatusScreenTest {
                 )
             }
         }
+        // "Sync anyway" dismisses the preview (no confirmation dialog follows).
         composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
         composeRule.onNodeWithText("Sync anyway").performClick()
         assertEquals(listOf(notPeopleRows[0]), overridden.single())
         composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
 
-        // Re-open and delete the current row.
+        // Delete invokes the callback but keeps the preview open for the system dialog.
         composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
         composeRule.onNodeWithText("Delete").performClick()
         assertEquals(listOf(notPeopleRows[0]), deleted.single())
-        composeRule.onNodeWithTag(PREVIEW_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
     }
 
     @Test
