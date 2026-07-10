@@ -32,6 +32,7 @@ interface MediaApi {
         @Query("limit") limit: Int? = null,
         @Query("from_date") fromDate: String? = null,
         @Query("before") before: String? = null,
+        @Query("profile") profile: String? = null,
     ): MediaPageDto
 
     /** Full year → month → day tree of dates that have at least one indexed photo. */

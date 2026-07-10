@@ -16,9 +16,12 @@ interface MediaDao {
      * server keyset `(date_taken DESC, id DESC)` via [MediaEntity.orderKey].
      * Drives the Room cache path: pre-populated rows are served without a network
      * load, then RemoteMediator refreshes.
+     *
+     * Scoped to the active [profile] filter (null = the unfiltered all-profiles view)
+     * so rows cached under one filter never leak into another's view.
      */
-    @Query("SELECT * FROM media ORDER BY orderKey ASC")
-    fun pagingSource(): PagingSource<Int, MediaEntity>
+    @Query("SELECT * FROM media WHERE profile IS :profile ORDER BY orderKey ASC")
+    fun pagingSource(profile: String?): PagingSource<Int, MediaEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(items: List<MediaEntity>)
@@ -35,6 +38,7 @@ interface MediaDao {
     @Query("DELETE FROM media_remote_key")
     suspend fun clearRemoteKey()
 
-    @Query("SELECT COUNT(*) FROM media")
-    suspend fun count(): Int
+    /** Row count scoped to the active [profile] filter (null = all-profiles view). */
+    @Query("SELECT COUNT(*) FROM media WHERE profile IS :profile")
+    suspend fun count(profile: String?): Int
 }

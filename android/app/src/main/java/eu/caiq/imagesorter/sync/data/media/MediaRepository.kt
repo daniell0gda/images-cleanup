@@ -37,12 +37,21 @@ class MediaRepository(
      */
     val refreshThrottle = RefreshThrottle()
 
-    fun timeline(): Flow<PagingData<MediaEntity>> =
-        Pager(
+    /**
+     * The newest-first server timeline, optionally scoped to a single sync [profile]
+     * (null = the all-profiles default). The active profile is armed on the mediator so
+     * its next REFRESH requests `GET /api/media?profile=<id>` and tags the cached rows;
+     * the paging source is scoped to the same profile so filtered and unfiltered pages
+     * never leak into each other. Switching profile (rebuilding this flow) refreshes.
+     */
+    fun timeline(profile: String? = null): Flow<PagingData<MediaEntity>> {
+        mediator.setProfile(profile)
+        return Pager(
             config = PagingConfig(pageSize = pageSize, enablePlaceholders = false),
             remoteMediator = mediator,
-            pagingSourceFactory = { db.mediaDao().pagingSource() },
+            pagingSourceFactory = { db.mediaDao().pagingSource(profile) },
         ).flow
+    }
 
     /**
      * A bounded, server-backed timeline for a single date segment. Independent of [timeline]:

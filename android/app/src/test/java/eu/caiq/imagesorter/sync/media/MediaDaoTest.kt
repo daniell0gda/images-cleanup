@@ -46,13 +46,40 @@ class MediaDaoTest {
             ),
         )
 
-        val source = dao.pagingSource()
+        val source = dao.pagingSource(profile = null)
         val result = source.load(
             PagingSource.LoadParams.Refresh(key = null, loadSize = 10, placeholdersEnabled = false),
         )
 
         val page = result as PagingSource.LoadResult.Page
         assertEquals(listOf(30L, 20L, 10L), page.data.map { it.id })
+    }
+
+    @Test
+    fun pagingSourceScopedToProfileServesOnlyMatchingRowsAndNeverLeaks() = runTest {
+        val dao = db.mediaDao()
+        dao.insertAll(
+            listOf(
+                MediaEntity(id = 1, kind = "image", dateTaken = "2024-03-03T00:00:00", orderKey = 0, profile = null),
+                MediaEntity(id = 2, kind = "image", dateTaken = "2024-03-02T00:00:00", orderKey = 1, profile = "p1"),
+                MediaEntity(id = 3, kind = "image", dateTaken = "2024-03-01T00:00:00", orderKey = 2, profile = "p1"),
+            ),
+        )
+
+        // All-profiles view (null) shows only untagged rows — p1 rows never leak in.
+        assertEquals(listOf(1L), scoped(profile = null))
+        // A profile filter shows only that profile's rows — the all-profiles row never leaks in.
+        assertEquals(listOf(2L, 3L), scoped(profile = "p1"))
+        // count() is likewise scoped, so RemoteMediator.initialize refreshes per profile.
+        assertEquals(1, dao.count(profile = null))
+        assertEquals(2, dao.count(profile = "p1"))
+    }
+
+    private suspend fun scoped(profile: String?): List<Long> {
+        val result = db.mediaDao().pagingSource(profile).load(
+            PagingSource.LoadParams.Refresh(key = null, loadSize = 10, placeholdersEnabled = false),
+        )
+        return (result as PagingSource.LoadResult.Page).data.map { it.id }
     }
 
     @Test
@@ -66,7 +93,7 @@ class MediaDaoTest {
         dao.clear()
         dao.clearRemoteKey()
 
-        val source = dao.pagingSource()
+        val source = dao.pagingSource(profile = null)
         val result = source.load(
             PagingSource.LoadParams.Refresh(key = null, loadSize = 10, placeholdersEnabled = false),
         )

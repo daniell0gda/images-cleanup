@@ -25,7 +25,7 @@ import org.robolectric.annotation.Config
 private class QueueMediaApi(private val pages: List<MediaPageDto>) : MediaApi {
     var calls = 0
         private set
-    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto =
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?, profile: String?): MediaPageDto =
         pages[calls++]
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
@@ -34,7 +34,7 @@ private class QueueMediaApi(private val pages: List<MediaPageDto>) : MediaApi {
 /** Records the `from_date` of every refresh and always returns one terminal page. */
 private class RecordingMediaApi : MediaApi {
     val fromDates = mutableListOf<String?>()
-    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto {
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?, profile: String?): MediaPageDto {
         if (cursor == null && before == null) fromDates.add(fromDate)
         return MediaPageDto(items = emptyList(), nextCursor = null)
     }
@@ -48,7 +48,7 @@ private class RecordingMediaApi : MediaApi {
  * semantics the segment paging source relies on.
  */
 private class DatasetMediaApi(private val all: List<MediaItemDto>) : MediaApi {
-    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto {
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?, profile: String?): MediaPageDto {
         val start = when {
             cursor != null -> cursor.toInt()
             fromDate != null -> all.indexOfFirst { it.dateTaken.substring(0, 10) <= fromDate }.let { if (it < 0) all.size else it }
@@ -67,9 +67,28 @@ private class DatasetMediaApi(private val all: List<MediaItemDto>) : MediaApi {
 private class TerminalMediaApi : MediaApi {
     var hit = false
         private set
-    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto {
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?, profile: String?): MediaPageDto {
         hit = true
         return MediaPageDto(items = emptyList(), nextCursor = null)
+    }
+
+    override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
+}
+
+/** Returns profile-specific items and records the profile of every refresh request. */
+private class ProfileRecordingApi : MediaApi {
+    val profiles = mutableListOf<String?>()
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?, profile: String?): MediaPageDto {
+        if (cursor == null && before == null) profiles.add(profile)
+        val items = if (profile == "p1") {
+            listOf(MediaItemDto(id = 30, kind = "image", dateTaken = "2024-03-03T00:00:00"))
+        } else {
+            listOf(
+                MediaItemDto(id = 30, kind = "image", dateTaken = "2024-03-03T00:00:00"),
+                MediaItemDto(id = 20, kind = "image", dateTaken = "2024-03-02T00:00:00"),
+            )
+        }
+        return MediaPageDto(items = items, nextCursor = null)
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
@@ -134,6 +153,18 @@ class MediaRepositoryTest {
 
         assertEquals(listOf(30L, 20L), ids)
         assertFalse("cache must serve before any network call", api.hit)
+    }
+
+    @Test
+    fun selectingAProfileRefreshesTheTimelineThroughProfileQueryShowingOnlyItsMedia() = runTest {
+        val api = ProfileRecordingApi()
+        val repo = MediaRepository(api, db, pageSize = 50)
+
+        // Selecting a profile refreshes through GET /api/media?profile=p1 and shows only its media.
+        val filtered = repo.timeline(profile = "p1").asSnapshot().map { it.id }
+
+        assertEquals(listOf(30L), filtered)
+        assertEquals("p1", api.profiles.last())
     }
 
     @Test

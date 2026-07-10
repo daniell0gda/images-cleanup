@@ -33,11 +33,13 @@ private class FakeMediaApi(private val pages: List<MediaPageDto>) : MediaApi {
     val cursors = mutableListOf<String?>()
     val fromDates = mutableListOf<String?>()
     val befores = mutableListOf<String?>()
+    val profiles = mutableListOf<String?>()
     private var index = 0
-    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?): MediaPageDto {
+    override suspend fun media(cursor: String?, limit: Int?, fromDate: String?, before: String?, profile: String?): MediaPageDto {
         cursors.add(cursor)
         fromDates.add(fromDate)
         befores.add(before)
+        profiles.add(profile)
         return pages[index++]
     }
 
@@ -89,6 +91,66 @@ class MediaRemoteMediatorTest {
         val cached = loadCached()
         assertEquals(listOf(30L, 20L), cached.map { it.id }) // stale row gone, ordered
         assertEquals("c1", db.mediaDao().remoteKey()?.nextCursor)
+    }
+
+    @Test
+    fun refreshPassesActiveProfileToApiAndTagsCachedRowsWithIt() = runTest {
+        val api = FakeMediaApi(listOf(MediaPageDto(listOf(item(30, "2024-03-03"), item(20, "2024-03-02")), nextCursor = "c1")))
+        val mediator = MediaRemoteMediator(api, db, profile = "p1")
+
+        mediator.load(LoadType.REFRESH, emptyState())
+
+        // The active profile rides along on the request so the server filters the timeline.
+        assertEquals("p1", api.profiles.single())
+        // Rows are tagged with the active profile so the scoped paging source serves only them.
+        val rows = loadCached(profile = "p1")
+        assertEquals(listOf(30L, 20L), rows.map { it.id })
+        assertTrue(rows.all { it.profile == "p1" })
+        // ...and they never appear in the unfiltered (all-profiles) view.
+        assertTrue(loadCached(profile = null).isEmpty())
+    }
+
+    @Test
+    fun switchingProfileBackToAllRefetchesUnfilteredAndNoFilteredRowsLeak() = runTest {
+        val api = FakeMediaApi(
+            listOf(
+                // filtered (p1) refresh: one row
+                MediaPageDto(listOf(item(30, "2024-03-03")), nextCursor = null),
+                // all-profiles refresh after clearing the filter: the full timeline
+                MediaPageDto(listOf(item(30, "2024-03-03"), item(20, "2024-03-02")), nextCursor = null),
+            ),
+        )
+        val mediator = MediaRemoteMediator(api, db, profile = "p1")
+        mediator.load(LoadType.REFRESH, emptyState())
+        // While the filter is active its rows never appear in the unfiltered (all-profiles) view.
+        assertTrue(loadCached(profile = null).isEmpty())
+
+        // Clearing the filter (all-profiles) and refreshing returns the complete timeline...
+        mediator.setProfile(null)
+        mediator.load(LoadType.REFRESH, emptyState())
+
+        assertEquals(listOf(30L, 20L), loadCached(profile = null).map { it.id })
+        // ...and the previously-filtered rows do not leak into it: the p1 view is now cleared.
+        assertTrue(loadCached(profile = "p1").isEmpty())
+        // The requests carried the active filter each time (p1, then cleared).
+        assertEquals(listOf("p1", null), api.profiles)
+    }
+
+    @Test
+    fun appendCarriesActiveProfileAndTagsAppendedRows() = runTest {
+        val api = FakeMediaApi(
+            listOf(
+                MediaPageDto(listOf(item(30, "2024-03-03")), nextCursor = "c1"),
+                MediaPageDto(listOf(item(20, "2024-03-02")), nextCursor = null),
+            ),
+        )
+        val mediator = MediaRemoteMediator(api, db, profile = "p1")
+        mediator.load(LoadType.REFRESH, emptyState())
+
+        mediator.load(LoadType.APPEND, emptyState())
+
+        assertEquals(listOf("p1", "p1"), api.profiles)
+        assertEquals(listOf(30L, 20L), loadCached(profile = "p1").map { it.id })
     }
 
     @Test
@@ -372,8 +434,8 @@ class MediaRemoteMediatorTest {
         assertEquals(-1L, key?.prevOrderKey)
     }
 
-    private suspend fun loadCached(): List<MediaEntity> {
-        val result = db.mediaDao().pagingSource().load(
+    private suspend fun loadCached(profile: String? = null): List<MediaEntity> {
+        val result = db.mediaDao().pagingSource(profile).load(
             PagingSource.LoadParams.Refresh(key = null, loadSize = 50, placeholdersEnabled = false),
         )
         return (result as PagingSource.LoadResult.Page).data

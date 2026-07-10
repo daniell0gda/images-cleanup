@@ -18,4 +18,10 @@ data class MediaEntity(
     val height: Int? = null,
     /** Monotonic insertion order across pages; lower = newer (matches server order). */
     val orderKey: Long,
+    /**
+     * The active timeline filter this row was cached under: null for the unfiltered
+     * (all-profiles) view, otherwise the profile id. The paging source is scoped by
+     * this so filtered and unfiltered pages never leak into each other.
+     */
+    val profile: String? = null,
 )

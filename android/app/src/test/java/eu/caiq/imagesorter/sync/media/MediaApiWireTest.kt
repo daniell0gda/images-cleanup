@@ -73,6 +73,16 @@ class MediaApiWireTest {
     }
 
     @Test
+    fun mediaPassesProfileAsQuery() = runTest {
+        server.enqueue(MockResponse().setBody("""{"items":[],"next_cursor":null}"""))
+        val api = buildMediaApi(server)
+
+        api.media(profile = "vacation")
+
+        assertEquals("/api/media?profile=vacation", server.takeRequest().path)
+    }
+
+    @Test
     fun mediaParsesPrevCursorAndPassesBeforeAsQuery() = runTest {
         server.enqueue(MockResponse().setBody("""{"items":[],"next_cursor":null,"prev_cursor":"p1"}"""))
         val api = buildMediaApi(server)
