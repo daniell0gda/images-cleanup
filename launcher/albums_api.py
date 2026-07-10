@@ -31,6 +31,7 @@ def register_album_routes(
 ) -> None:
     from fastapi import Header, HTTPException, Request
     from fastapi.responses import FileResponse, HTMLResponse
+    from starlette.concurrency import run_in_threadpool
     from .api_models import (
         AlbumCreateRequest as _AlbumCreateRequest,
         AlbumItemsRequest as _AlbumItemsRequest,
@@ -215,27 +216,30 @@ def register_album_routes(
         )
 
     @app.get("/share/{token}/media/{media_id}/stream")
-    async def share_stream(token: str, media_id: int, request: Request):
+    async def share_stream(token: str, media_id: int):
         row = _share_member_row_or_404(token, media_id)
         if row["kind"] != "video":
             raise HTTPException(status_code=404, detail="Not a video")
         _assert_within_root(Path(row["path"]), row["root"])
-        range_header = request.headers.get("range")
         # Browsers (unlike the app's ExoPlayer) cannot fall back on non-H.264
         # codecs (e.g. HEVC), so the public page serves the original ONLY when it
         # is KNOWN web-safe (video_websafe == 1); 0 or not-yet-probed NULL are
         # transcoded to an H.264/AAC proxy. Requires ffmpeg/ffprobe on the server.
         if row["video_websafe"] != 1:
             try:
-                proxy = media_indexer.ensure_proxy(media_id, Path(row["path"]))
+                # Off the event loop: a cache miss runs a blocking ffmpeg encode,
+                # which would otherwise stall the single worker for every client.
+                proxy = await run_in_threadpool(
+                    media_indexer.ensure_proxy, media_id, Path(row["path"])
+                )
             except Exception:
                 logger.warning(
                     "share stream: transcode failed for media %s (%s)",
                     media_id, row["path"], exc_info=True,
                 )
                 raise HTTPException(status_code=503, detail="Transcode unavailable")
-            resp = _serve_with_range(proxy, range_header)
+            resp = _serve_with_range(proxy)
         else:
-            resp = _serve_with_range(Path(row["path"]), range_header)
+            resp = _serve_with_range(Path(row["path"]))
         resp.headers.update(_SHARE_NOBOT_HEADERS)
         return resp

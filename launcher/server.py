@@ -646,6 +646,7 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     # handlers serve the correct bytes/format/404 so the gate can wrap them.
 
     from fastapi.responses import FileResponse, Response
+    from starlette.concurrency import run_in_threadpool
 
     _THUMB_CACHE = "public, max-age=31536000, immutable"
 
@@ -736,31 +737,16 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         _require_device(authorization)
         return media_indexer.available_dates()
 
-    def _serve_with_range(path: Path, range_header: str | None,
-                          media_type: str = "video/mp4") -> Response:
-        """Serve ``path`` honouring an HTTP ``Range`` header (200 full / 206 partial)."""
-        file_size = path.stat().st_size
-        rng = media_mod.parse_byte_range(range_header, file_size)
-        if rng is None:
-            return Response(
-                content=path.read_bytes(),
-                media_type=media_type,
-                headers={
-                    "Accept-Ranges": "bytes",
-                    "Content-Length": str(file_size),
-                },
-            )
-        start, end = rng
-        return Response(
-            content=media_mod.read_file_slice(path, start, end),
-            status_code=206,
-            media_type=media_type,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Content-Length": str(end - start + 1),
-            },
-        )
+    def _serve_with_range(path: Path, media_type: str = "video/mp4") -> Response:
+        """Serve ``path`` as a Range-aware, chunked stream (200 full / 206 partial).
+
+        Starlette's ``FileResponse`` reads the request's ``Range`` header from the
+        ASGI scope, answers 206/partial or 200/full, and streams the file in 64 KiB
+        chunks off the event loop. Playback therefore starts on the first chunk
+        instead of after the whole file is buffered into memory — the old behaviour
+        that made a large clip sit on a spinner even over local wifi.
+        """
+        return FileResponse(str(path), media_type=media_type)
 
     @app.get("/api/media/{media_id}/thumb")
     async def media_thumb(media_id: int, authorization: str | None = Header(default=None)):
@@ -798,7 +784,6 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     @app.get("/api/media/{media_id}/stream")
     async def media_stream(
         media_id: int,
-        request: Request,
         authorization: str | None = Header(default=None),
     ):
         _require_device(authorization)
@@ -806,20 +791,23 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
         if row["kind"] != "video":
             raise HTTPException(status_code=404, detail="Not a video")
         _assert_within_root(Path(row["path"]), row["root"])
-        range_header = request.headers.get("range")
         # Web-safe (or not-yet-probed NULL) -> serve the original with Range.
         # Only a KNOWN-non-web-safe (video_websafe == 0) video is transcoded.
         if row["video_websafe"] == 0:
             try:
-                proxy = media_indexer.ensure_proxy(media_id, Path(row["path"]))
+                # Off the event loop: a cache miss runs a blocking ffmpeg encode,
+                # which would otherwise stall the single worker for every client.
+                proxy = await run_in_threadpool(
+                    media_indexer.ensure_proxy, media_id, Path(row["path"])
+                )
             except Exception:
                 logger.warning(
                     "stream: transcode failed for media %s (%s)",
                     media_id, row["path"], exc_info=True,
                 )
                 raise HTTPException(status_code=503, detail="Transcode unavailable")
-            return _serve_with_range(proxy, range_header)
-        return _serve_with_range(Path(row["path"]), range_header)
+            return _serve_with_range(proxy)
+        return _serve_with_range(Path(row["path"]))
 
     # -- settings + manual index refresh (local management UI) -----------
     # These mirror the device-management routes: reachable from the launcher UI
