@@ -583,7 +583,7 @@ fun PhotosScreen(
             // The Go-To-Date FAB shares the bottom edge with the selection action bar;
             // hide it while selecting so it doesn't sit under (and fight) that bar. When the
             // album-created bar is up it lifts a little so the bar isn't hidden behind it.
-            if (!inSelectionMode) {
+            if (shouldShowGoToDateFab(inSelectionMode, previewOpen = previewIndex != null)) {
                 val fabPadding = fabBottomPadding(snackbarHostState.currentSnackbarData != null)
                 DatePickerFab(
                     onClick = { datePickerOpen = true },

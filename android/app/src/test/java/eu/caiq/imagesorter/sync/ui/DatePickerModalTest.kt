@@ -11,6 +11,8 @@ import eu.caiq.imagesorter.sync.ui.screens.DATE_PICKER_LOADING_TAG
 import eu.caiq.imagesorter.sync.ui.screens.DatePickerFab
 import eu.caiq.imagesorter.sync.ui.screens.DatePickerSheet
 import eu.caiq.imagesorter.sync.ui.screens.DatePickerState
+import eu.caiq.imagesorter.sync.ui.screens.shouldShowGoToDateFab
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
 import org.junit.Assert.assertEquals
@@ -33,6 +35,24 @@ class DatePickerModalTest {
 
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun goToDateFabHiddenWhilePreviewOpen() {
+        // Criterion: the FAB is not shown while the fullscreen preview overlay is open.
+        assertFalse(shouldShowGoToDateFab(inSelectionMode = false, previewOpen = true))
+    }
+
+    @Test
+    fun goToDateFabShownWhenPreviewClosedAndNotSelecting() {
+        // Criterion: closing the preview restores the FAB (no selection active).
+        assertTrue(shouldShowGoToDateFab(inSelectionMode = false, previewOpen = false))
+    }
+
+    @Test
+    fun goToDateFabHiddenWhileSelecting() {
+        // Criterion: the existing multi-select gate still hides the FAB.
+        assertFalse(shouldShowGoToDateFab(inSelectionMode = true, previewOpen = false))
+    }
 
     @Test
     fun calendarFabIsVisibleAndReportsTaps() {

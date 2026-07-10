@@ -56,6 +56,14 @@ const val DATE_PICKER_CANCEL_TAG = "datePickerCancel"
 /** Test tag on each selectable date tile (year / month / day). */
 const val DATE_PICKER_TILE_TAG = "datePickerTile"
 
+/**
+ * Whether the Go-To-Date FAB should be shown. It is hidden while multi-select is active
+ * (it shares the bottom edge with the selection action bar) and while the fullscreen
+ * preview overlay is open ([previewOpen]) so it does not show through the overlay.
+ */
+fun shouldShowGoToDateFab(inSelectionMode: Boolean, previewOpen: Boolean): Boolean =
+    !inSelectionMode && !previewOpen
+
 /** Bottom-end FAB that opens the Go-To-Date picker modal. */
 @Composable
 fun DatePickerFab(onClick: () -> Unit, modifier: Modifier = Modifier) {
