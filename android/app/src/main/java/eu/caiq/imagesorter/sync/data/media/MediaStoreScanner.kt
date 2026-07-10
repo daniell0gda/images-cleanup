@@ -86,9 +86,14 @@ class MediaStoreScanner(context: Context) : MediaSource {
                     dateTakenMillis = if (cursor.isNull(takenCol)) null else cursor.getLong(takenCol),
                     dateAddedSeconds = if (cursor.isNull(addedCol)) null else cursor.getLong(addedCol),
                 )
+                val uri = ContentUris.withAppendedId(collection, id)
+                // Skip phantom rows: a MediaStore entry can outlive its file when a
+                // delete didn't propagate to the media index. It has no bytes to
+                // upload and would only surface as an empty (thumbnail-less) tile.
+                if (!fileExists(uri)) continue
                 out += MediaItem(
                     mediaStoreId = id,
-                    uri = ContentUris.withAppendedId(collection, id),
+                    uri = uri,
                     identity = Identity(name = name, createdOn = createdOn, size = size),
                     mimeType = mime,
                 )
@@ -96,6 +101,15 @@ class MediaStoreScanner(context: Context) : MediaSource {
         }
         return out
     }
+
+    /**
+     * Whether [uri]'s underlying file is actually present. Opening the descriptor
+     * is a cheap metadata check (no decode / byte read) that fails only when the
+     * file is gone, so it filters out dangling media-index rows.
+     */
+    private fun fileExists(uri: Uri): Boolean =
+        runCatching { resolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false }
+            .getOrDefault(false)
 
     private fun buildSelection(
         sinceGeneration: Long,
