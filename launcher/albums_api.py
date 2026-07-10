@@ -156,7 +156,7 @@ def register_album_routes(
         _require_device(authorization)
         _album_or_404(album_id)
         album_store.revoke(album_id)
-        return {"revoked": album_id}
+        return {"revoked": True}
 
     # -- public share (no device token; token + membership IS the auth) ---
     # Spec §5.2/§6/§3.10/§3.12. These routes carry no bearer token: the share
