@@ -1,5 +1,6 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
+import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -433,6 +434,16 @@ private fun AlbumDetail(
                             scope.launch { snackbarHostState.showSnackbar("Link copied") }
                         }
                     },
+                    onShare = {
+                        shareMenuOpen = false
+                        shareState.shareUrl?.let { url ->
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, url)
+                            }
+                            context.startActivity(Intent.createChooser(send, null))
+                        }
+                    },
                     onCreateLink = {
                         shareMenuOpen = false
                         scope.launch {
@@ -579,9 +590,10 @@ const val ALBUM_DELETE_TAG = "albumDelete"
 
 /**
  * The album-detail share control (§7.2): a link icon (accent-tinted when the album
- * is already shared) that opens a menu. When [shared] the menu offers **Copy link**
- * and **Stop sharing**; otherwise a single **Create link**. Stateless — the actions
- * are reported to the caller, which performs the share/revoke and reflects the state.
+ * is already shared) that opens a menu. When [shared] the menu offers **Copy link**,
+ * **Share** (Android share sheet) and **Stop sharing**; otherwise a single
+ * **Create link**. Stateless — the actions are reported to the caller, which performs
+ * the share/revoke and reflects the state.
  */
 @Composable
 private fun ShareMenu(
@@ -589,6 +601,7 @@ private fun ShareMenu(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     onCopyLink: () -> Unit,
+    onShare: () -> Unit,
     onCreateLink: () -> Unit,
     onRevoke: () -> Unit,
 ) {
@@ -612,6 +625,10 @@ private fun ShareMenu(
                 androidx.compose.material3.DropdownMenuItem(
                     text = { Text("Copy link") },
                     onClick = onCopyLink,
+                )
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Share") },
+                    onClick = onShare,
                 )
                 androidx.compose.material3.DropdownMenuItem(
                     text = { Text("Stop sharing") },
