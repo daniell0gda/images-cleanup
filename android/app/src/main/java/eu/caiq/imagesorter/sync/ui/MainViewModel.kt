@@ -445,18 +445,23 @@ class MainViewModel(
     }
 
     /**
-     * After the system delete dialog returns: prune the cache rows for the deleted
-     * ids so they leave the grid (reconcile never deletes UNCLASSIFIED rows itself).
+     * After the system delete dialog returns. Always clears the queued ids so the
+     * launch effect doesn't re-fire, but only prunes the cache rows when the user
+     * actually confirmed ([deleted] == true) — cancelling must leave the tile.
+     *
+     * When confirmed, the rows are pruned from both caches by MediaStore id,
+     * whatever the status was — not just the UNCLASSIFIED "not people" rows — so
+     * the tile leaves the grid immediately (the file is gone; the row is stale
+     * until the next scan).
      */
-    fun onNotPeopleDeleteCompleted() {
+    fun onNotPeopleDeleteFinished(deleted: Boolean) {
         val uris = _notPeopleDeleteIds.value
         _notPeopleDeleteIds.value = emptyList()
-        if (uris.isEmpty()) return
-        val ids = uris.map { android.content.ContentUris.parseId(it) }.toSet()
+        if (!deleted || uris.isEmpty()) return
+        val ids = uris.map { android.content.ContentUris.parseId(it) }
         viewModelScope.launch(Dispatchers.Default) {
-            locator.syncedCacheDao().unclassifiedItems()
-                .filter { it.mediaStoreId in ids }
-                .forEach { locator.syncedCacheDao().delete(it.name, it.createdOn, it.size) }
+            locator.syncedCacheDao().deleteByMediaStoreIds(ids)
+            locator.pendingUploadDao().deleteByMediaStoreIds(ids)
         }
     }
 

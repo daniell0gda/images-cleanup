@@ -156,7 +156,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     // System delete dialog launcher for the Not People "Delete from phone" flow.
     val notPeopleDeleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
-    ) { viewModel.onNotPeopleDeleteCompleted() }
+    ) { result -> viewModel.onNotPeopleDeleteFinished(result.resultCode == android.app.Activity.RESULT_OK) }
 
     when (screen) {
         AppScreen.SERVER_SETUP -> {

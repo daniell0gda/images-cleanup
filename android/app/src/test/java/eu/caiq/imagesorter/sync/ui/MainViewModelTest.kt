@@ -282,6 +282,21 @@ class MainViewModelTest {
     }
 
     @Test
+    fun cancellingSystemDeleteClearsTheQueueWithoutPruning() = runTest(dispatcher) {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+        vm.requestNotPeopleDelete(
+            listOf(StatusRow(name = "p.jpg", status = SyncStatus.PENDING, mediaStoreId = 5, mimeType = "image/jpeg")),
+        )
+        assertEquals(1, vm.notPeopleDeleteIds.value.size)
+
+        // Cancel (RESULT_OK == false): the queue must clear so the launch effect
+        // doesn't re-fire, and no prune coroutine is started.
+        vm.onNotPeopleDeleteFinished(deleted = false)
+
+        assertTrue(vm.notPeopleDeleteIds.value.isEmpty())
+    }
+
+    @Test
     fun homeShellOpensOnPhotosTabByDefault() {
         val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
         assertEquals(HomeTab.PHOTOS, vm.homeTab.value)

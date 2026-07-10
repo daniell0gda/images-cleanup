@@ -71,6 +71,38 @@ class RoomDaoTest {
     }
 
     @Test
+    fun syncedCacheDeleteByMediaStoreIdsRemovesMatchingRowsRegardlessOfStatus() = runTest {
+        val dao = db.syncedCacheDao()
+        dao.upsert(
+            listOf(
+                SyncedCacheEntity("synced.jpg", "2024-01-01T00:00:00", 10, "SYNCED", mediaStoreId = 100, syncedAt = 1),
+                SyncedCacheEntity("notpeople.jpg", "2024-01-02T00:00:00", 20, "UNCLASSIFIED", mediaStoreId = 200, syncedAt = 2),
+                SyncedCacheEntity("keep.jpg", "2024-01-03T00:00:00", 30, "SYNCED", mediaStoreId = 300, syncedAt = 3),
+            ),
+        )
+
+        // Deleting from the sync grid must prune a SYNCED row too, not only UNCLASSIFIED.
+        dao.deleteByMediaStoreIds(listOf(100, 200))
+
+        assertEquals(listOf(300L), dao.observeAll().first().map { it.mediaStoreId })
+    }
+
+    @Test
+    fun pendingUploadDeleteByMediaStoreIdsRemovesMatchingRows() = runTest {
+        val dao = db.pendingUploadDao()
+        dao.upsert(
+            listOf(
+                PendingUploadEntity("f1", 100, "a.jpg", "2024-01-01T00:00:00", 1, "image/jpeg", status = "PENDING", sortKey = 100),
+                PendingUploadEntity("f2", 200, "b.jpg", "2024-02-01T00:00:00", 1, "image/jpeg", status = "PENDING", sortKey = 200),
+            ),
+        )
+
+        dao.deleteByMediaStoreIds(listOf(100))
+
+        assertEquals(listOf("f2"), dao.pending().map { it.fileId })
+    }
+
+    @Test
     fun failureUpsertAndClearRoundTrip() = runTest {
         val dao = db.failureDao()
         dao.upsert(FailureEntity("a.jpg", "2024-01-01T00:00:00", 10, "UNREADABLE", retryable = false, failedAt = 1))

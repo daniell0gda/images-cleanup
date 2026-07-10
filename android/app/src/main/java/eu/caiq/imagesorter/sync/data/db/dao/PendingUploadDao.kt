@@ -39,6 +39,10 @@ interface PendingUploadDao {
     @Query("DELETE FROM pending_upload WHERE name = :name AND createdOn = :createdOn AND size = :size")
     suspend fun deleteByIdentity(name: String, createdOn: String, size: Long)
 
+    /** Remove any queued row for locally-deleted media by MediaStore id. */
+    @Query("DELETE FROM pending_upload WHERE mediaStoreId IN (:mediaStoreIds)")
+    suspend fun deleteByMediaStoreIds(mediaStoreIds: List<Long>)
+
     @Query("DELETE FROM pending_upload")
     suspend fun clear()
 }

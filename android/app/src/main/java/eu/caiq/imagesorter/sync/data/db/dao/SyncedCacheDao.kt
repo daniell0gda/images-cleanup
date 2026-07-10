@@ -45,4 +45,12 @@ interface SyncedCacheDao {
             "WHERE name = :name AND createdOn = :createdOn AND size = :size",
     )
     suspend fun delete(name: String, createdOn: String, size: Long)
+
+    /**
+     * Prune rows for locally-deleted media by MediaStore id, regardless of status,
+     * so a tile removed from the grid leaves the cache immediately — not only the
+     * UNCLASSIFIED "not people" path.
+     */
+    @Query("DELETE FROM synced_cache WHERE mediaStoreId IN (:mediaStoreIds)")
+    suspend fun deleteByMediaStoreIds(mediaStoreIds: List<Long>)
 }
