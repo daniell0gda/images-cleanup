@@ -1006,6 +1006,126 @@ class SyncEngineTest {
     }
 
     @Test
+    fun severalOverridesRequestedWhileAPassIsActiveAreAllDeferredThenForceUploaded() = runBlocking {
+        // "Sync Now" tapped several times while a sync pass is active: every request
+        // must be deferred via the override queue (never dropped) and, once the engine
+        // is free, all of them are force-place-uploaded and flip to SYNCED.
+        val work = item("work.jpg", 5)
+        val a = item("a.jpg", 6)
+        val b = item("b.jpg", 7)
+        listOf(a, b).forEach { np ->
+            db.syncedCacheDao().upsert(
+                eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                    name = np.identity.name,
+                    createdOn = np.identity.createdOn,
+                    size = np.identity.size,
+                    status = "UNCLASSIFIED",
+                    mediaStoreId = np.mediaStoreId,
+                    mimeType = np.mimeType,
+                ),
+            )
+        }
+        val forceSessions = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            val path = req.path!!
+            when {
+                path.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"work.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                path.endsWith("/sessions") -> {
+                    if (req.body.readUtf8().contains("\"force_place\":true")) {
+                        forceSessions.incrementAndGet()
+                        resp("""{"session_id":"npsess"}""")
+                    } else {
+                        resp("""{"session_id":"worksess"}""")
+                    }
+                }
+                path.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                path.endsWith("/files") -> resp("""{"offset":7,"length":7}""")
+                path.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                path.contains("npsess") && path.endsWith("/outcomes") -> resp(
+                    """{"outcomes":[
+                        {"file_id":"x","name":"a.jpg","status":"synced"},
+                        {"file_id":"y","name":"b.jpg","status":"synced"}
+                    ]}""",
+                )
+                path.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
+                else -> resp("{}")
+            }
+        }
+        val gate = GateUploader()
+        val engine = engine(FakeMediaSource(listOf(work)), FakeSyncPrefs(concurrency = 1), uploader = gate)
+
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val first = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
+        gate.awaitEntered() // run() holds the guard, blocked mid-upload
+
+        // Two separate "Sync Now" requests land while the pass is active.
+        kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(a)) }
+        kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(b)) }
+        assertEquals("both requests are deferred, none run while the pass is active", 0, forceSessions.get())
+
+        gate.release()
+        first.join()
+
+        assertTrue("deferred overrides are force-uploaded once the engine is free", forceSessions.get() >= 1)
+        val synced = db.syncedCacheDao().observeAll().first()
+            .filter { it.status == "SYNCED" }
+            .map { it.name }
+            .toSet()
+        assertTrue("both deferred items ended up SYNCED", synced.containsAll(setOf("a.jpg", "b.jpg")))
+    }
+
+    @Test
+    fun overrideUploadOnFailedItemClearsFailureRecordAndSyncs() = runTest {
+        // "Sync Now" on a FAILED row: the force_place synced outcome must clear the
+        // item's failure record (via the existing completeAndReport flow) so it leaves
+        // the working set and the failed count drops.
+        val failed = item("failed.jpg", 8)
+        db.syncedCacheDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = failed.identity.name,
+                createdOn = failed.identity.createdOn,
+                size = failed.identity.size,
+                status = "FAILED",
+                mediaStoreId = failed.mediaStoreId,
+                mimeType = failed.mimeType,
+            ),
+        )
+        db.failureDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.FailureEntity(
+                name = failed.identity.name,
+                createdOn = failed.identity.createdOn,
+                size = failed.identity.size,
+                reason = "UNKNOWN",
+                retryable = true,
+                message = null,
+                failedAt = 1L,
+            ),
+        )
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":8,"length":8}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp(syncedOutcomeForQueued("failed.jpg"))
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(listOf(failed)), FakeSyncPrefs(concurrency = 1)).overrideUpload(listOf(failed))
+
+        assertTrue(
+            "failure record cleared on the synced outcome",
+            db.failureDao().observeAll().first().none { it.name == "failed.jpg" },
+        )
+        val row = db.syncedCacheDao().observeAll().first().firstOrNull { it.name == "failed.jpg" }
+        assertEquals("item becomes SYNCED and leaves the working set", "SYNCED", row?.status)
+        assertTrue("pending cleared after sync", db.pendingUploadDao().pending().none { it.name == "failed.jpg" })
+    }
+
+    @Test
     fun discoverSkipsLocallyUnclassifiedItemsEvenWhenServerSaysNotSynced() = runTest {
         // The server discards "not people" bytes, so it reports already_synced=false
         // for them forever. An item the local cache already marks UNCLASSIFIED must

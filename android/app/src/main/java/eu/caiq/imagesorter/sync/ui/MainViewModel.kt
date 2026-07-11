@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -82,6 +83,15 @@ class MainViewModel(
                 ) {
                     onSyncProfileRemoved()
                 }
+            }
+        }
+        // Self-clearing "Sync Now" in-flight set: as the rows flip, an item leaves
+        // [syncingNow] once the engine has reported its outcome (see [nextSyncing]).
+        viewModelScope.launch {
+            allRows.collect { rows ->
+                val (next, activated) = nextSyncing(_syncingNow.value, syncingActivated, rows)
+                syncingActivated = activated
+                _syncingNow.value = next
             }
         }
     }
@@ -157,6 +167,19 @@ class MainViewModel(
      */
     val syncProgress: StateFlow<eu.caiq.imagesorter.sync.sync.SyncProgress> =
         locator.syncEngine.progress
+
+    private val _syncingNow = MutableStateFlow<Set<Long>>(emptySet())
+
+    /**
+     * MediaStore ids currently being force-synced via [syncItemNow]. An id joins the
+     * moment the action is called and leaves once the engine reports its outcome, so
+     * the per-item "Sync Now" button's disabled/in-progress state is driven by real state.
+     */
+    val syncingNow: StateFlow<Set<Long>> = _syncingNow.asStateFlow()
+
+    // Ids seen in an active (PENDING/IN_PROGRESS) row since their tap, so a fresh FAILED
+    // outcome (re-enable the button) is told apart from the FAILED state a retry began from.
+    private var syncingActivated: Set<Long> = emptySet()
 
     private val _cleanupPhase = MutableStateFlow(CleanupPhase.IDLE)
     val cleanupPhase: StateFlow<CleanupPhase> = _cleanupPhase.asStateFlow()
@@ -434,6 +457,81 @@ class MainViewModel(
                 }
             locator.syncEngine.overrideUpload(items)
         }
+    }
+
+    /**
+     * "Sync Now" for a single working-set item: resolve its [MediaItem] by MediaStore
+     * id from the pending/synced caches and hand it to the engine's force_place
+     * override path, so it is uploaded and placed into the profile's primary group
+     * immediately — not left waiting for a manual "Back up now". The id joins
+     * [syncingNow] synchronously (before the async work) so the button reflects the
+     * tap at once; it leaves once the engine reports the outcome (see [nextSyncing]).
+     */
+    fun syncItemNow(row: StatusRow) {
+        val id = row.mediaStoreId ?: return
+        _syncingNow.value = _syncingNow.value + id
+        viewModelScope.launch(Dispatchers.Default) {
+            val item = resolveMediaItem(id) ?: return@launch
+            locator.syncEngine.overrideUpload(listOf(item))
+        }
+    }
+
+    /**
+     * Rebuild the [MediaItem] for a working-set row by MediaStore id. A PENDING /
+     * IN_PROGRESS row lives in the pending queue (full identity there); a FAILED row
+     * lives in the synced cache. `internal` so the resolution is unit-testable.
+     */
+    internal suspend fun resolveMediaItem(mediaStoreId: Long): MediaItem? {
+        locator.pendingUploadDao().pending()
+            .firstOrNull { it.mediaStoreId == mediaStoreId }
+            ?.let { p ->
+                return MediaItem(
+                    mediaStoreId = p.mediaStoreId,
+                    uri = mediaContentUri(p.mediaStoreId, p.mimeType),
+                    identity = Identity(p.name, p.createdOn, p.size),
+                    mimeType = p.mimeType,
+                )
+            }
+        return locator.syncedCacheDao().observeAll().first()
+            .firstOrNull { it.mediaStoreId == mediaStoreId }
+            ?.let { s ->
+                val id = s.mediaStoreId ?: return null
+                val mime = s.mimeType ?: "image/jpeg"
+                MediaItem(
+                    mediaStoreId = id,
+                    uri = mediaContentUri(id, mime),
+                    identity = Identity(s.name, s.createdOn, s.size),
+                    mimeType = mime,
+                )
+            }
+    }
+
+    /**
+     * Recompute the "Sync Now" in-flight set from the latest rows. [activated] tracks
+     * ids seen in an active (PENDING/IN_PROGRESS) row since their tap so a fresh FAILED
+     * outcome (drop → re-enable the button) is told apart from the FAILED state a retry
+     * started from (keep → still syncing). A SYNCED / gone / not-people row drops the id.
+     * `internal` and pure so the self-clearing behaviour is unit-testable.
+     */
+    internal fun nextSyncing(
+        inFlight: Set<Long>,
+        activated: Set<Long>,
+        rows: List<StatusRow>,
+    ): Pair<Set<Long>, Set<Long>> {
+        val statusById = rows.mapNotNull { r -> r.mediaStoreId?.let { it to r.status } }.toMap()
+        val nextActivated = activated.toHashSet()
+        val nextInFlight = inFlight.filterTo(HashSet()) { id ->
+            when (statusById[id]) {
+                SyncStatus.PENDING, SyncStatus.IN_PROGRESS -> {
+                    nextActivated.add(id)
+                    true
+                }
+                SyncStatus.FAILED -> id !in nextActivated
+                else -> false
+            }
+        }
+        nextActivated.retainAll(nextInFlight)
+        return nextInFlight to nextActivated
     }
 
     /** Queue selected not-people items for the system delete dialog (Activity-owned). */

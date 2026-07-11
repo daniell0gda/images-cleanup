@@ -10,6 +10,7 @@ import eu.caiq.imagesorter.sync.ui.screens.StatusRow
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -411,6 +412,120 @@ class MainViewModelTest {
                 lower.contains("profile") && forbidden.any { lower.contains(it) },
             )
         }
+    }
+
+    private fun mainVm(): MainViewModel =
+        vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+
+    private fun row(id: Long, status: SyncStatus = SyncStatus.PENDING) =
+        StatusRow(name = "f$id.jpg", status = status, mediaStoreId = id, mimeType = "image/jpeg")
+
+    @Test
+    fun resolveMediaItemRebuildsFromPendingQueueByMediaStoreId() = runBlocking {
+        val vm = mainVm()
+        val locator = ServiceLocator(context)
+        locator.pendingUploadDao().deleteByMediaStoreIds(listOf(4001L))
+        locator.pendingUploadDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity(
+                fileId = "fid-4001",
+                mediaStoreId = 4001L,
+                name = "pend.jpg",
+                createdOn = "2024-02-02T00:00:00",
+                size = 12,
+                mimeType = "image/jpeg",
+                status = "PENDING",
+                sortKey = 0,
+            ),
+        )
+
+        val item = vm.resolveMediaItem(4001L)
+
+        assertNotNull(item)
+        assertEquals(4001L, item!!.mediaStoreId)
+        assertEquals("pend.jpg", item.identity.name)
+        assertEquals("2024-02-02T00:00:00", item.identity.createdOn)
+        assertEquals(12L, item.identity.size)
+        assertTrue(item.uri.toString().endsWith("/4001"))
+        locator.pendingUploadDao().deleteByMediaStoreIds(listOf(4001L))
+    }
+
+    @Test
+    fun resolveMediaItemRebuildsFailedRowFromSyncedCacheByMediaStoreId() = runBlocking {
+        val vm = mainVm()
+        val locator = ServiceLocator(context)
+        locator.syncedCacheDao().deleteByMediaStoreIds(listOf(4002L))
+        locator.syncedCacheDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = "failed.jpg",
+                createdOn = "2024-03-03T00:00:00",
+                size = 34,
+                status = "FAILED",
+                mediaStoreId = 4002L,
+                mimeType = "image/jpeg",
+            ),
+        )
+
+        val item = vm.resolveMediaItem(4002L)
+
+        assertNotNull(item)
+        assertEquals(4002L, item!!.mediaStoreId)
+        assertEquals("failed.jpg", item.identity.name)
+        assertEquals(34L, item.identity.size)
+        locator.syncedCacheDao().deleteByMediaStoreIds(listOf(4002L))
+    }
+
+    @Test
+    fun syncItemNowAddsTheItemToInFlightImmediately() = runTest(dispatcher) {
+        val vm = mainVm()
+        assertTrue(vm.syncingNow.value.isEmpty())
+
+        // An id with no backing cache row resolves to null, so no engine/network work
+        // runs; the synchronous in-flight add is what this pins.
+        vm.syncItemNow(row(id = 7771))
+
+        assertTrue("tapped item is in flight at once", vm.syncingNow.value.contains(7771L))
+    }
+
+    @Test
+    fun syncItemNowWithoutMediaStoreIdIsANoOp() {
+        val vm = mainVm()
+        vm.syncItemNow(StatusRow(name = "x.jpg", status = SyncStatus.PENDING, mediaStoreId = null))
+        assertTrue(vm.syncingNow.value.isEmpty())
+    }
+
+    @Test
+    fun syncItemNowForSeveralRowsEnqueuesEachWithoutDropping() = runTest(dispatcher) {
+        val vm = mainVm()
+        vm.syncItemNow(row(id = 7781))
+        vm.syncItemNow(row(id = 7782))
+        vm.syncItemNow(row(id = 7783))
+
+        assertEquals(setOf(7781L, 7782L, 7783L), vm.syncingNow.value)
+    }
+
+    @Test
+    fun inFlightItemClearsOnceItsRowIsSynced() {
+        val vm = mainVm()
+        // Seen active (PENDING) → stays in flight; then SYNCED outcome → drops.
+        val (active, activated) = vm.nextSyncing(setOf(50L), emptySet(), listOf(row(50L, SyncStatus.PENDING)))
+        assertEquals(setOf(50L), active)
+
+        val (afterSync, _) = vm.nextSyncing(active, activated, listOf(row(50L, SyncStatus.SYNCED)))
+        assertTrue("synced item leaves the in-flight set", afterSync.isEmpty())
+    }
+
+    @Test
+    fun inFlightItemStaysForInitialFailedButClearsOnAFreshFailure() {
+        val vm = mainVm()
+        // Retry of a FAILED row: at tap the row is still FAILED (never seen active) → keep.
+        val (afterTap, activated) = vm.nextSyncing(setOf(60L), emptySet(), listOf(row(60L, SyncStatus.FAILED)))
+        assertEquals("initial FAILED state keeps the button in-progress", setOf(60L), afterTap)
+
+        // Engine picks it up (IN_PROGRESS), then it fails again → drop so the button re-enables.
+        val (active, act2) = vm.nextSyncing(afterTap, activated, listOf(row(60L, SyncStatus.IN_PROGRESS)))
+        assertEquals(setOf(60L), active)
+        val (afterFail, _) = vm.nextSyncing(active, act2, listOf(row(60L, SyncStatus.FAILED)))
+        assertTrue("a fresh failure re-enables the button", afterFail.isEmpty())
     }
 
     @Test
