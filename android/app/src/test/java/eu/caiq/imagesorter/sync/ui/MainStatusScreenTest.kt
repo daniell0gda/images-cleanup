@@ -15,6 +15,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.onFirst
 import eu.caiq.imagesorter.sync.ui.components.PREVIEW_TAG
 import eu.caiq.imagesorter.sync.ui.components.SELECTION_BAR_TAG
@@ -27,6 +28,7 @@ import eu.caiq.imagesorter.sync.ui.screens.FAILED_CHIP_TAG
 import eu.caiq.imagesorter.sync.ui.screens.FailureDetail
 import eu.caiq.imagesorter.sync.ui.screens.LOADING_STATE_TAG
 import eu.caiq.imagesorter.sync.ui.screens.STATUS_TILE_TAG
+import eu.caiq.imagesorter.sync.ui.screens.SYNC_NOW_TAG
 import eu.caiq.imagesorter.sync.ui.screens.MainStatusScreen
 import eu.caiq.imagesorter.sync.ui.screens.StatusFilter
 import eu.caiq.imagesorter.sync.ui.screens.StatusRow
@@ -622,5 +624,118 @@ class MainStatusScreenTest {
         // Deselect the only selected tile → selection mode exits.
         composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
         composeRule.onNodeWithTag(SELECTION_BAR_TAG).assertDoesNotExist()
+    }
+
+    // Rows carry explicit MediaStore ids so the in-flight (syncingIds) assertions can
+    // target a specific item. Index 0 SYNCED, 1 PENDING, 2 IN_PROGRESS, 3 FAILED.
+    private val idRows = listOf(
+        StatusRow(name = "synced.jpg", status = SyncStatus.SYNCED, key = "s", mediaStoreId = 10),
+        StatusRow(name = "pending.jpg", status = SyncStatus.PENDING, key = "p", mediaStoreId = 20),
+        StatusRow(name = "uploading.jpg", status = SyncStatus.IN_PROGRESS, key = "u", mediaStoreId = 30),
+        StatusRow(name = "failed.jpg", status = SyncStatus.FAILED, key = "f", mediaStoreId = 40),
+    )
+
+    private fun setSyncItemScreen(
+        filter: StatusFilter = StatusFilter.ALL,
+        rowsArg: List<StatusRow> = idRows,
+        onSyncItem: (StatusRow) -> Unit = {},
+        syncingIds: Set<Long> = emptySet(),
+    ) {
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MainStatusScreen(
+                    rows = rowsArg,
+                    selectedFilter = filter,
+                    onFilterChange = {},
+                    onSyncNow = {},
+                    onCleanup = {},
+                    onSyncItem = onSyncItem,
+                    syncingIds = syncingIds,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun syncNowButtonShownAlongsideDeleteForPendingItem() {
+        setSyncItemScreen()
+        // Open the PENDING item's preview.
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[1].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Delete").assertIsDisplayed()
+    }
+
+    @Test
+    fun syncNowButtonShownForInProgressAndFailedItems() {
+        setSyncItemScreen()
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[2].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Close").performClick()
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[3].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun syncNowButtonNotShownForSyncedItem() {
+        setSyncItemScreen()
+        // Open the SYNCED item's preview → no Sync Now, but Delete still there.
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[0].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertDoesNotExist()
+        composeRule.onNodeWithText("Delete").assertIsDisplayed()
+    }
+
+    @Test
+    fun notPeoplePreviewShowsSyncAnywayNotSyncNow() {
+        setSyncItemScreen(filter = StatusFilter.NOT_PEOPLE, rowsArg = notPeopleRows)
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG).onFirst().performClick()
+        composeRule.onNodeWithText("Sync anyway").assertIsDisplayed()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun tappingSyncNowInvokesCallbackWithCurrentRowAndKeepsPreviewOpen() {
+        val synced = mutableListOf<StatusRow>()
+        setSyncItemScreen(onSyncItem = { synced.add(it) })
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[1].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).performClick()
+        assertEquals(listOf(idRows[1]), synced)
+        // Preview stays open (Delete pattern) so the user watches the item finish.
+        composeRule.onNodeWithTag(PREVIEW_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun syncNowButtonDisabledWhileItemInFlightButEnabledForOthers() {
+        // The PENDING item (id 20) is in flight; its button is disabled.
+        setSyncItemScreen(syncingIds = setOf(20L))
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[1].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsNotEnabled()
+        // A different, non-in-flight item's button stays enabled.
+        composeRule.onNodeWithContentDescription("Close").performClick()
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[2].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsEnabled()
+    }
+
+    @Test
+    fun syncNowButtonReEnablesWhenInFlightStateClears() {
+        val ids = androidx.compose.runtime.mutableStateOf(setOf(20L))
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MainStatusScreen(
+                    rows = idRows,
+                    selectedFilter = StatusFilter.ALL,
+                    onFilterChange = {},
+                    onSyncNow = {},
+                    onCleanup = {},
+                    onSyncItem = {},
+                    syncingIds = ids.value,
+                )
+            }
+        }
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[1].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsNotEnabled()
+        // The engine reports the outcome and the id leaves the in-flight set →
+        // the button re-enables so a failed item can be retried.
+        ids.value = emptySet()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsEnabled()
     }
 }

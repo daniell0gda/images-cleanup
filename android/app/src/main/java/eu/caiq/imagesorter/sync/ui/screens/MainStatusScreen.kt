@@ -84,6 +84,9 @@ enum class StatusFilter { WORKING_SET, SYNCED_TODAY, ALL, NOT_PEOPLE }
 /** Test tag on each status tile, so the rendered tile count is assertable. */
 const val STATUS_TILE_TAG = "statusTile"
 
+/** Test tag on the preview's per-item "Sync Now" button (disabled while in flight). */
+const val SYNC_NOW_TAG = "syncNowButton"
+
 /** Test tag on the working-set loading state (initial device scan in progress). */
 const val LOADING_STATE_TAG = "statusLoading"
 
@@ -147,6 +150,11 @@ fun MainStatusScreen(
     // the existing screen tests need not supply them.
     onOverride: (List<StatusRow>) -> Unit = {},
     onDelete: (List<StatusRow>) -> Unit = {},
+    // Per-item "Sync Now" from the preview: force-place-uploads the current item.
+    onSyncItem: (StatusRow) -> Unit = {},
+    // MediaStore ids currently in flight via "Sync Now"; drives the button's
+    // disabled/in-progress state until the engine reports the item's outcome.
+    syncingIds: Set<Long> = emptySet(),
 ) {
     val c = VaultTheme.colors
     // Interactive state for the Not People review grid. Keyed on the active filter so
@@ -368,6 +376,33 @@ fun MainStatusScreen(
                                     modifier = Modifier.weight(1f),
                                     colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
                                 ) { Text("Sync anyway", fontWeight = FontWeight.SemiBold) }
+                            }
+                            val current = rows.getOrNull(page)
+                            val notSynced = current?.status == SyncStatus.PENDING ||
+                                current?.status == SyncStatus.IN_PROGRESS ||
+                                current?.status == SyncStatus.FAILED
+                            if (!notPeople && notSynced) {
+                                val inFlight = syncingIds.contains(current?.mediaStoreId)
+                                Button(
+                                    // No dismiss: the preview stays open (like Delete) so the
+                                    // user watches the item complete and leave the working set.
+                                    onClick = { current?.let { onSyncItem(it) } },
+                                    enabled = !inFlight,
+                                    modifier = Modifier.weight(1f).testTag(SYNC_NOW_TAG),
+                                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+                                ) {
+                                    if (inFlight) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = c.onAccent,
+                                        )
+                                        Spacer(Modifier.size(8.dp))
+                                        Text("Syncing…", fontWeight = FontWeight.SemiBold)
+                                    } else {
+                                        Text("Sync Now", fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
                             }
                             OutlinedButton(
                                 // No dismiss here: the preview stays up while the system

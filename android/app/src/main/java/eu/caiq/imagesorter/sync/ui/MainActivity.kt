@@ -238,6 +238,7 @@ private fun SyncTabContent(
             val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
             val totals by viewModel.totals.collectAsStateWithLifecycle()
             val failures by viewModel.failures.collectAsStateWithLifecycle()
+            val syncingIds by viewModel.syncingNow.collectAsStateWithLifecycle()
 
             // Fire the system delete dialog when the Not People grid requests it.
             val notPeopleDeleteIds by viewModel.notPeopleDeleteIds.collectAsStateWithLifecycle()
@@ -259,6 +260,8 @@ private fun SyncTabContent(
                 failures = failures,
                 onOverride = viewModel::overrideSelected,
                 onDelete = viewModel::requestNotPeopleDelete,
+                onSyncItem = viewModel::syncItemNow,
+                syncingIds = syncingIds,
             )
         }
 
