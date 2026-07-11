@@ -59,7 +59,7 @@ class PhotosSelectionTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun selectionBarOffersCreateAlbumAddToAlbumAndCreateLink() {
+    fun selectionBarOffersCreateAlbumAddToAlbumAndShareNow() {
         val actions = mutableListOf<AlbumSelectionAction>()
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {
@@ -69,10 +69,10 @@ class PhotosSelectionTest {
         composeRule.onNodeWithText("2 selected").assertIsDisplayed()
         composeRule.onNodeWithText("Create album").assertIsDisplayed()
         composeRule.onNodeWithText("Add to album").assertIsDisplayed()
-        composeRule.onNodeWithText("Create link").assertIsDisplayed()
+        composeRule.onNodeWithText("Share now").assertIsDisplayed()
 
-        composeRule.onNodeWithText("Create link").performClick()
-        assertEquals(listOf(AlbumSelectionAction.CreateLink), actions)
+        composeRule.onNodeWithText("Share now").performClick()
+        assertEquals(listOf(AlbumSelectionAction.ShareNow), actions)
     }
 
     @Test
@@ -130,13 +130,13 @@ class PhotosSelectionTest {
     }
 
     @Test
-    fun createLinkDoesNotInvokeOnCreated() = runTest {
+    fun shareNowDoesNotInvokeOnCreated() = runTest {
         val api = FakeAlbumApi()
         val repo = AlbumRepository(api)
         var created: AlbumDto? = null
 
         runAlbumNameAction(
-            action = AlbumSelectionAction.CreateLink,
+            action = AlbumSelectionAction.ShareNow,
             name = "Trip",
             mediaIds = listOf(9),
             createdBy = "Pixel",
@@ -146,31 +146,35 @@ class PhotosSelectionTest {
             onCreated = { created = it },
         )
 
-        assertNull("Create link must not fire the album-created signal", created)
+        assertNull("Share now must not fire the album-created signal", created)
     }
 
     @Test
-    fun createLinkCreatesThenSharesAndCopiesVerbatimShareUrl() = runTest {
+    fun shareNowCreatesSharesCopiesConfirmsAndOpensShareSheetWithVerbatimUrl() = runTest {
         val serverUrl = "https://photos.example.com/share/Xq7zZ-token"
         val api = FakeAlbumApi().apply { shareResponse = ShareDto("Xq7zZ-token", serverUrl) }
         val repo = AlbumRepository(api)
         val copied = mutableListOf<String>()
         var confirmed: String? = null
+        val shared = mutableListOf<String>()
 
         runAlbumNameAction(
-            action = AlbumSelectionAction.CreateLink,
+            action = AlbumSelectionAction.ShareNow,
             name = "Album 2024-03-02",
             mediaIds = listOf(9),
             createdBy = "Pixel",
             repo = repo,
             copyToClipboard = { copied.add(it) },
             confirm = { confirmed = it },
+            onShareUrl = { shared.add(it) },
         )
 
         assertEquals("Album 2024-03-02", api.lastCreate?.name)
         assertEquals(42L, api.lastSharedId)
+        // The link is still copied + confirmed as before, and also handed to the share sheet.
         assertEquals(listOf(serverUrl), copied)
         assertEquals(serverUrl, confirmed)
+        assertEquals(listOf(serverUrl), shared)
     }
 
     @Test

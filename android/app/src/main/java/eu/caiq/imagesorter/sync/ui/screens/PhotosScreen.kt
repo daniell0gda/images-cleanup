@@ -450,6 +450,7 @@ fun PhotosScreen(
                                     onCreated = { album ->
                                         scope.launch { confirmAlbumCreated(snackbarHostState, album.id, onGoToAlbum) }
                                     },
+                                    onShareUrl = { url -> shareLinkViaChooser(context, url) },
                                 )
                             }
                         }
@@ -710,7 +711,7 @@ fun fabBottomPadding(snackbarVisible: Boolean): androidx.compose.ui.unit.Dp =
     if (snackbarVisible) 84.dp else 16.dp
 
 /** The three album actions offered over a Photos-grid selection (§7.1). */
-enum class AlbumSelectionAction { CreateAlbum, AddToAlbum, CreateLink }
+enum class AlbumSelectionAction { CreateAlbum, AddToAlbum, ShareNow }
 
 /** Test tag on the Photos selection-mode action bar. */
 const val ALBUM_SELECTION_BAR_TAG = "albumSelectionBar"
@@ -720,9 +721,10 @@ fun defaultAlbumName(today: java.time.LocalDate): String = "Album $today"
 
 /**
  * Runs a name-dialog confirm for the two create actions (§7.1). Create album just
- * creates; Create link creates, then shares, then copies the server-built
- * [eu.caiq.imagesorter.sync.data.api.dto.ShareDto.shareUrl] VERBATIM (§3.11) and
- * confirms it. [AlbumSelectionAction.AddToAlbum] does not flow through here.
+ * creates; Share now creates, shares, copies the server-built
+ * [eu.caiq.imagesorter.sync.data.api.dto.ShareDto.shareUrl] VERBATIM (§3.11) to the
+ * clipboard, confirms it, then hands the URL to [onShareUrl] (the system share
+ * sheet). [AlbumSelectionAction.AddToAlbum] does not flow through here.
  */
 suspend fun runAlbumNameAction(
     action: AlbumSelectionAction,
@@ -733,12 +735,14 @@ suspend fun runAlbumNameAction(
     copyToClipboard: (String) -> Unit,
     confirm: (String) -> Unit,
     onCreated: (eu.caiq.imagesorter.sync.data.api.dto.AlbumDto) -> Unit = {},
+    onShareUrl: (String) -> Unit = {},
 ) {
     val album = repo.create(name, mediaIds, createdBy)
-    if (action == AlbumSelectionAction.CreateLink) {
+    if (action == AlbumSelectionAction.ShareNow) {
         val share = repo.share(album.id)
         copyToClipboard(share.shareUrl)
         confirm(share.shareUrl)
+        onShareUrl(share.shareUrl)
     } else {
         onCreated(album)
     }
@@ -779,7 +783,7 @@ fun SelectionActionsBar(
         ) {
             androidx.compose.material3.TextButton(onClick = { onAction(AlbumSelectionAction.CreateAlbum) }) { Text("Create album") }
             androidx.compose.material3.TextButton(onClick = { onAction(AlbumSelectionAction.AddToAlbum) }) { Text("Add to album") }
-            androidx.compose.material3.TextButton(onClick = { onAction(AlbumSelectionAction.CreateLink) }) { Text("Create link") }
+            androidx.compose.material3.TextButton(onClick = { onAction(AlbumSelectionAction.ShareNow) }) { Text("Share now") }
         }
     }
 }

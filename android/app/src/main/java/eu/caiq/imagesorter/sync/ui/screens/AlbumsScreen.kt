@@ -1,6 +1,5 @@
 package eu.caiq.imagesorter.sync.ui.screens
 
-import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -436,13 +435,7 @@ private fun AlbumDetail(
                     },
                     onShare = {
                         shareMenuOpen = false
-                        shareState.shareUrl?.let { url ->
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, url)
-                            }
-                            context.startActivity(Intent.createChooser(send, null))
-                        }
+                        shareState.shareUrl?.let { url -> shareLinkViaChooser(context, url) }
                     },
                     onCreateLink = {
                         shareMenuOpen = false
