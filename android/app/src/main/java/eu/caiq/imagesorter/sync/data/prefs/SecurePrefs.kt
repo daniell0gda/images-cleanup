@@ -98,10 +98,18 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.images
      * The last MediaStore generation processed. A value < 0 means "no watermark"
      * and forces a full enumerate on the next discovery.
      */
-    fun getMediaGeneration(): Long = plain.getLong(KEY_MEDIA_GENERATION, NO_WATERMARK)
+    override fun getMediaGeneration(): Long = plain.getLong(KEY_MEDIA_GENERATION, NO_WATERMARK)
 
     override fun setMediaGeneration(value: Long) {
         plain.edit().putLong(KEY_MEDIA_GENERATION, value).apply()
+    }
+
+    /** Wall-clock completion time of the last full sync, or null if none has run. */
+    override fun getLastFullSyncAtMillis(): Long? =
+        if (plain.contains(KEY_LAST_FULL_SYNC_AT)) plain.getLong(KEY_LAST_FULL_SYNC_AT, 0L) else null
+
+    override fun setLastFullSyncAtMillis(value: Long) {
+        plain.edit().putLong(KEY_LAST_FULL_SYNC_AT, value).apply()
     }
 
     override fun getServerAddress(): String? = plain.getString(KEY_SERVER_ADDRESS, null)
@@ -137,6 +145,7 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, eu.caiq.images
         private const val KEY_PAIRING_CODE = "pairing_code"
         private const val KEY_PROFILE_ID = "profile_id"
         private const val KEY_MEDIA_GENERATION = "media_generation"
+        private const val KEY_LAST_FULL_SYNC_AT = "last_full_sync_at"
         private const val KEY_TRUSTED_SSID = "trusted_ssid"
         private const val KEY_UPLOAD_CONCURRENCY = "upload_concurrency"
         private const val KEY_SERVER_ADDRESS = "server_address"

@@ -6,6 +6,7 @@ import eu.caiq.imagesorter.sync.data.api.MediaApi
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.media.MediaSource
 import eu.caiq.imagesorter.sync.data.prefs.CredentialStore
+import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
 import eu.caiq.imagesorter.sync.data.prefs.SyncPrefs
 import eu.caiq.imagesorter.sync.data.prefs.TokenStore
 import eu.caiq.imagesorter.sync.domain.model.MediaItem
@@ -48,9 +49,11 @@ class FakeCredentialStore(
 class FakeSyncPrefs(
     private val profileId: String? = "groupby",
     private val concurrency: Int = 1,
+    private val mediaGenerationWatermark: Long = SecurePrefs.NO_WATERMARK,
 ) : SyncPrefs {
     var mediaGeneration: Long? = null
         private set
+    private var storedLastFullSyncAtMillis: Long? = null
     var repairCleared = false
         private set
     var profileCleared = false
@@ -60,7 +63,10 @@ class FakeSyncPrefs(
     override fun getProfileId(): String? = profileId
     override fun clearProfileId() { profileCleared = true }
     override fun getUploadConcurrency(): Int = concurrency
+    override fun getMediaGeneration(): Long = mediaGenerationWatermark
     override fun setMediaGeneration(value: Long) { mediaGeneration = value }
+    override fun getLastFullSyncAtMillis(): Long? = storedLastFullSyncAtMillis
+    override fun setLastFullSyncAtMillis(value: Long) { storedLastFullSyncAtMillis = value }
     override fun clearTokenForRepair() { repairCleared = true }
     override fun getServerAddress(): String? = storedServerAddress
     override fun setServerAddress(value: String?) { storedServerAddress = value }
@@ -75,8 +81,13 @@ class FakeMediaSource(
     var lastFolders: Set<String>? = null
         private set
 
+    /** The sinceGeneration argument of the last [enumerate] call, for assertions. */
+    var lastSinceGeneration: Long? = null
+        private set
+
     override fun enumerate(sinceGeneration: Long, folders: Set<String>): List<MediaItem> {
         lastFolders = folders
+        lastSinceGeneration = sinceGeneration
         return items
     }
     override fun currentGeneration(): Long = generation

@@ -12,7 +12,14 @@ interface SyncPrefs {
     /** Forget the chosen profile (e.g. session-open reported it removed server-side). */
     fun clearProfileId()
     fun getUploadConcurrency(): Int
+
+    /** The persisted MediaStore generation watermark (or [SecurePrefs.NO_WATERMARK]). */
+    fun getMediaGeneration(): Long
     fun setMediaGeneration(value: Long)
+
+    /** Wall-clock time the last full sync completed, or null if none has. */
+    fun getLastFullSyncAtMillis(): Long?
+    fun setLastFullSyncAtMillis(value: Long)
     fun clearTokenForRepair()
 
     /** Stored `host:port` of the configured server, or null when unset. */

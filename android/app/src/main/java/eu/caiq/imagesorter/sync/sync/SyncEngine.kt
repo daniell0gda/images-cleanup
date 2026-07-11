@@ -88,10 +88,17 @@ class SyncEngine(
     private val overrideQueue = java.util.concurrent.ConcurrentLinkedQueue<MediaItem>()
 
     /**
-     * Run one full sync. Safe to call again to resume — discovery + the persisted
+     * Run one sync. Safe to call again to resume — discovery + the persisted
      * pending queue make a re-run idempotent.
+     *
+     * A full run ([incremental] = false, the default) enumerates from
+     * [SecurePrefs.NO_WATERMARK] and, on reaching [SyncPhase.DONE], persists its
+     * completion wall-clock timestamp (the app-open throttle reads it). An
+     * [incremental] run enumerates only from the persisted generation watermark
+     * ([SyncPrefs.getMediaGeneration]) and does not touch that full-sync timestamp.
+     * Both share the single atomic guard, so a run while a pass is active is a no-op.
      */
-    suspend fun run() {
+    suspend fun run(incremental: Boolean = false) {
         // Atomic re-entrancy guard: a second run() (or a discover()) while a pass is
         // already active is a no-op — it opens no session and starts no upload pass.
         if (!active.compareAndSet(false, true)) return
@@ -102,11 +109,15 @@ class SyncEngine(
                 return
             }
 
+            val sinceGeneration =
+                if (incremental) securePrefs.getMediaGeneration() else SecurePrefs.NO_WATERMARK
+
             try {
-                val toUpload = discoverAndReconcile()
+                val toUpload = discoverAndReconcile(sinceGeneration)
                 if (toUpload.isEmpty()) {
                     _progress.value = SyncProgress(phase = SyncPhase.DONE, message = "Nothing to sync")
                     advanceWatermark()
+                    if (!incremental) recordFullSyncCompletion()
                     return
                 }
 
@@ -114,6 +125,7 @@ class SyncEngine(
                 advanceWatermark()
 
                 _progress.value = _progress.value.copy(phase = SyncPhase.DONE)
+                if (!incremental) recordFullSyncCompletion()
             } catch (e: HttpException) {
                 _progress.value = when (e.code()) {
                     HTTP_UNAUTHORIZED -> {
@@ -166,7 +178,7 @@ class SyncEngine(
                 _progress.value = SyncProgress(phase = SyncPhase.IDLE)
                 return
             }
-            discoverAndReconcile()
+            discoverAndReconcile(SecurePrefs.NO_WATERMARK)
             _progress.value = SyncProgress(phase = SyncPhase.IDLE)
         } catch (e: HttpException) {
             if (e.code() == HTTP_UNAUTHORIZED) {
@@ -187,13 +199,13 @@ class SyncEngine(
     // --- Discover + reconcile -------------------------------------------------
 
     /** Enumerate, reconcile in batches, persist the pending queue, return items. */
-    private suspend fun discoverAndReconcile(): List<MediaItem> {
+    private suspend fun discoverAndReconcile(sinceGeneration: Long): List<MediaItem> {
         _progress.value = SyncProgress(phase = SyncPhase.DISCOVERING)
-        // Discovery may be incremental, but the design mandates a FULL reconcile
-        // every run, so enumerate the whole library here for the reconcile pass.
-        // Restricted to the camera folder so app media (Viber, screenshots, etc.)
-        // is never backed up — only photos/videos the camera produced.
-        val items = scanner.enumerate(sinceGeneration = SecurePrefs.NO_WATERMARK, folders = CAMERA_FOLDERS)
+        // A full pass enumerates from NO_WATERMARK; an incremental pass enumerates
+        // only from the caller's generation watermark. Either way it is restricted
+        // to the camera folder so app media (Viber, screenshots, etc.) is never
+        // backed up — only photos/videos the camera produced.
+        val items = scanner.enumerate(sinceGeneration = sinceGeneration, folders = CAMERA_FOLDERS)
         val byIdentity = items.associateBy { it.identity }
 
         _progress.value = SyncProgress(phase = SyncPhase.RECONCILING, totalFiles = items.size)
@@ -520,6 +532,11 @@ class SyncEngine(
     private fun advanceWatermark() {
         val generation = scanner.currentGeneration()
         if (generation > 0) securePrefs.setMediaGeneration(generation)
+    }
+
+    /** Persist the wall-clock time a full run completed; the app-open throttle reads it. */
+    private fun recordFullSyncCompletion() {
+        securePrefs.setLastFullSyncAtMillis(now())
     }
 
     // --- Mapping helpers ------------------------------------------------------

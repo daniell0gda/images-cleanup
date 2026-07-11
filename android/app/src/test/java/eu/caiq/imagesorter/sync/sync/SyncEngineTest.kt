@@ -9,6 +9,7 @@ import eu.caiq.imagesorter.sync.data.api.ChunkUploader
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.dto.ChunkResponse
 import eu.caiq.imagesorter.sync.data.db.AppDatabase
+import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
 import eu.caiq.imagesorter.sync.data.prefs.SyncPrefs
 import eu.caiq.imagesorter.sync.domain.model.Identity
 import eu.caiq.imagesorter.sync.domain.model.MediaItem
@@ -128,6 +129,83 @@ class SyncEngineTest {
         engine(scanner, FakeSyncPrefs()).discover()
 
         assertEquals(setOf("DCIM/Camera/"), scanner.lastFolders)
+    }
+
+    @Test
+    fun incrementalRunEnumeratesFromThePersistedGenerationWatermark() = runTest {
+        // A capture-triggered incremental run enumerates only what changed since the
+        // persisted watermark, but stays restricted to the camera folder.
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp("""{"results":[]}""")
+                else -> resp("{}")
+            }
+        }
+        val scanner = FakeMediaSource(emptyList())
+        engine(scanner, FakeSyncPrefs(mediaGenerationWatermark = 42L)).run(incremental = true)
+
+        assertEquals(42L, scanner.lastSinceGeneration)
+        assertEquals(setOf("DCIM/Camera/"), scanner.lastFolders)
+    }
+
+    @Test
+    fun fullRunAndDiscoverEnumerateFromNoWatermarkDespiteAPersistedGeneration() = runTest {
+        // Full run() and discover() ignore the persisted watermark and enumerate the
+        // whole camera folder (NO_WATERMARK) so the mandated full reconcile is exact.
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp("""{"results":[]}""")
+                else -> resp("{}")
+            }
+        }
+        val runScanner = FakeMediaSource(emptyList())
+        engine(runScanner, FakeSyncPrefs(mediaGenerationWatermark = 42L)).run()
+        assertEquals(SecurePrefs.NO_WATERMARK, runScanner.lastSinceGeneration)
+        assertEquals(setOf("DCIM/Camera/"), runScanner.lastFolders)
+
+        val discoverScanner = FakeMediaSource(emptyList())
+        engine(discoverScanner, FakeSyncPrefs(mediaGenerationWatermark = 42L)).discover()
+        assertEquals(SecurePrefs.NO_WATERMARK, discoverScanner.lastSinceGeneration)
+        assertEquals(setOf("DCIM/Camera/"), discoverScanner.lastFolders)
+    }
+
+    @Test
+    fun fullRunReachingDonePersistsCompletionTimestamp() = runTest {
+        // A full run that completes stamps its wall-clock completion time (the value
+        // the app-open throttle later reads) using the engine's now provider.
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp("""{"results":[]}""")
+                else -> resp("{}")
+            }
+        }
+        val prefs = FakeSyncPrefs()
+        val engine = engine(FakeMediaSource(emptyList()), prefs, now = FakeClock(123_456))
+        engine.run()
+
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        assertEquals(123_456L, prefs.getLastFullSyncAtMillis())
+    }
+
+    @Test
+    fun runEndingInErrorDoesNotPersistTheCompletionTimestamp() = runTest {
+        // A run that ends in ERROR (session-open 503) must NOT stamp a completion
+        // time, so the throttle never treats a failed sync as a successful one.
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"a.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> MockResponse().setResponseCode(503).setBody("{}")
+                else -> resp("{}")
+            }
+        }
+        val prefs = FakeSyncPrefs()
+        val engine = engine(FakeMediaSource(listOf(item("a.jpg", 5))), prefs, now = FakeClock(999))
+        engine.run()
+
+        assertEquals(SyncPhase.ERROR, engine.progress.value.phase)
+        assertEquals(null, prefs.getLastFullSyncAtMillis())
     }
 
     @Test
@@ -1286,6 +1364,45 @@ class SyncEngineTest {
         assertEquals(SyncPhase.DONE, engine.progress.value.phase)
     }
 
+    @Test
+    fun incrementalRunWhileAFullPassIsActiveIsANoOpAndOpensNoNewSession() = runBlocking {
+        // Capture triggers share the single engine path: an incremental run() that
+        // lands while a full pass holds the atomic guard is a no-op — no second
+        // engine, no new session, no second upload pass.
+        val one = item("one.jpg", 5)
+        val sessionsOpened = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"one.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> {
+                    sessionsOpened.incrementAndGet()
+                    resp("""{"session_id":"sess"}""")
+                }
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
+                else -> resp("{}")
+            }
+        }
+
+        val gate = GateUploader()
+        val engine = engine(FakeMediaSource(listOf(one)), FakeSyncPrefs(), uploader = gate)
+
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val first = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
+        gate.awaitEntered()
+
+        kotlinx.coroutines.withTimeout(5_000) { engine.run(incremental = true) }
+        assertEquals("incremental run must open no new session while a pass is active", 1, sessionsOpened.get())
+
+        gate.release()
+        first.join()
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+    }
+
     /** Suspends one upload until released, signalling when it has entered. */
     private class GateUploader : ChunkUploader {
         private val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
@@ -1353,7 +1470,10 @@ class SyncEngineTest {
         }
         override fun clearProfileId() {}
         override fun getUploadConcurrency(): Int = 1
+        override fun getMediaGeneration(): Long = eu.caiq.imagesorter.sync.data.prefs.SecurePrefs.NO_WATERMARK
         override fun setMediaGeneration(value: Long) {}
+        override fun getLastFullSyncAtMillis(): Long? = null
+        override fun setLastFullSyncAtMillis(value: Long) {}
         override fun clearTokenForRepair() {}
         override fun getServerAddress(): String? = null
         override fun setServerAddress(value: String?) {}
