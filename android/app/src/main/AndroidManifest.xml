@@ -19,6 +19,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
+    <!-- Re-arm the capture job after a device reboot. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".SyncApp"
         android:allowBackup="false"
@@ -33,6 +36,7 @@
             android:name=".ui.MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.ImageSorterSync">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -47,6 +51,22 @@
             android:name=".sync.SyncForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Content-trigger job: fires when the camera writes new media, then
+             starts an incremental pass on SyncForegroundService. -->
+        <service
+            android:name=".sync.CaptureSyncJobService"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
+
+        <!-- Re-registers the capture job after a reboot. -->
+        <receiver
+            android:name=".sync.BootCompletedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

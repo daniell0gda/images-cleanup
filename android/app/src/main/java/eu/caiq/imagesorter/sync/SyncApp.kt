@@ -15,6 +15,7 @@ import eu.caiq.imagesorter.sync.data.media.MediaRepository
 import eu.caiq.imagesorter.sync.data.media.MediaStoreScanner
 import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
 import eu.caiq.imagesorter.sync.pairing.PairingManager
+import eu.caiq.imagesorter.sync.sync.CaptureSyncScheduler
 import eu.caiq.imagesorter.sync.sync.CleanupManager
 import eu.caiq.imagesorter.sync.sync.ManualSyncTrigger
 import eu.caiq.imagesorter.sync.sync.SyncEngine
@@ -38,6 +39,7 @@ class SyncApp : Application() {
     override fun onCreate() {
         super.onCreate()
         serviceLocator = ServiceLocator(this)
+        CaptureSyncScheduler.schedule(this)
     }
 }
 
@@ -204,6 +206,10 @@ class ServiceLocator(private val app: Context) {
             syncedCacheDao = database.syncedCacheDao(),
             pendingUploadDao = database.pendingUploadDao(),
             failureDao = database.failureDao(),
+            // Wall clock so the persisted last-full-sync timestamp survives process
+            // death / reboot and matches the app-open throttle gate, which also uses
+            // System.currentTimeMillis().
+            now = System::currentTimeMillis,
         )
     }
 
