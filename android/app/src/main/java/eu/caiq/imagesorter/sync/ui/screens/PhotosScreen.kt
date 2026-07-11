@@ -302,7 +302,6 @@ fun PhotosScreen(
     val scope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
     val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
-    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     val albumRepo = remember(locator) { runCatching { locator.albumRepository }.getOrNull() }
     val deviceName = remember { android.os.Build.MODEL }
     val inSelectionMode = selectedIds.isNotEmpty()
@@ -421,7 +420,27 @@ fun PhotosScreen(
                 onAction = { action ->
                     when (action) {
                         AlbumSelectionAction.AddToAlbum -> addPickerOpen = true
-                        else -> nameDialogAction = action
+                        // Share now is instant: no name prompt — create a default-named
+                        // album, share it, and open the system share sheet straight away.
+                        AlbumSelectionAction.ShareNow -> {
+                            val ids = selectedIds.toList()
+                            selectedIds = emptySet()
+                            if (albumRepo != null) {
+                                scope.launch {
+                                    runCatching {
+                                        runAlbumNameAction(
+                                            action = AlbumSelectionAction.ShareNow,
+                                            name = defaultAlbumName(java.time.LocalDate.now()),
+                                            mediaIds = ids,
+                                            createdBy = deviceName,
+                                            repo = albumRepo,
+                                            onShareUrl = { url -> shareLinkViaChooser(context, url) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        AlbumSelectionAction.CreateAlbum -> nameDialogAction = action
                     }
                 },
                 modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
@@ -445,12 +464,9 @@ fun PhotosScreen(
                                     mediaIds = ids,
                                     createdBy = deviceName,
                                     repo = albumRepo,
-                                    copyToClipboard = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) },
-                                    confirm = { scope.launch { snackbarHostState.showSnackbar("Link copied") } },
                                     onCreated = { album ->
                                         scope.launch { confirmAlbumCreated(snackbarHostState, album.id, onGoToAlbum) }
                                     },
-                                    onShareUrl = { url -> shareLinkViaChooser(context, url) },
                                 )
                             }
                         }
@@ -720,11 +736,11 @@ const val ALBUM_SELECTION_BAR_TAG = "albumSelectionBar"
 fun defaultAlbumName(today: java.time.LocalDate): String = "Album $today"
 
 /**
- * Runs a name-dialog confirm for the two create actions (§7.1). Create album just
- * creates; Share now creates, shares, copies the server-built
- * [eu.caiq.imagesorter.sync.data.api.dto.ShareDto.shareUrl] VERBATIM (§3.11) to the
- * clipboard, confirms it, then hands the URL to [onShareUrl] (the system share
- * sheet). [AlbumSelectionAction.AddToAlbum] does not flow through here.
+ * Creates the album for a selection and, for [AlbumSelectionAction.ShareNow], shares
+ * it and hands the server-built [eu.caiq.imagesorter.sync.data.api.dto.ShareDto.shareUrl]
+ * VERBATIM (§3.11) to [onShareUrl] — the system share sheet, which owns copy-to-clipboard
+ * and every other target itself. Create album just creates, then [onCreated].
+ * [AlbumSelectionAction.AddToAlbum] does not flow through here.
  */
 suspend fun runAlbumNameAction(
     action: AlbumSelectionAction,
@@ -732,16 +748,12 @@ suspend fun runAlbumNameAction(
     mediaIds: List<Long>,
     createdBy: String?,
     repo: eu.caiq.imagesorter.sync.data.media.AlbumRepository,
-    copyToClipboard: (String) -> Unit,
-    confirm: (String) -> Unit,
     onCreated: (eu.caiq.imagesorter.sync.data.api.dto.AlbumDto) -> Unit = {},
     onShareUrl: (String) -> Unit = {},
 ) {
     val album = repo.create(name, mediaIds, createdBy)
     if (action == AlbumSelectionAction.ShareNow) {
         val share = repo.share(album.id)
-        copyToClipboard(share.shareUrl)
-        confirm(share.shareUrl)
         onShareUrl(share.shareUrl)
     } else {
         onCreated(album)

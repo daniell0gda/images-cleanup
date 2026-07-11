@@ -81,11 +81,10 @@ class PhotosSelectionTest {
     }
 
     @Test
-    fun createAlbumCallsCreateAndDoesNotShareOrCopy() = runTest {
+    fun createAlbumCallsCreateAndDoesNotShare() = runTest {
         val api = FakeAlbumApi()
         val repo = AlbumRepository(api)
-        val copied = mutableListOf<String>()
-        var confirmed: String? = null
+        val shared = mutableListOf<String>()
 
         runAlbumNameAction(
             action = AlbumSelectionAction.CreateAlbum,
@@ -93,26 +92,24 @@ class PhotosSelectionTest {
             mediaIds = listOf(1, 2, 3),
             createdBy = "Pixel",
             repo = repo,
-            copyToClipboard = { copied.add(it) },
-            confirm = { confirmed = it },
+            onShareUrl = { shared.add(it) },
         )
 
         assertEquals("Album 2024-03-02", api.lastCreate?.name)
         assertEquals(listOf(1L, 2L, 3L), api.lastCreate?.mediaIds)
         assertEquals("Pixel", api.lastCreate?.createdBy)
         assertNull(api.lastSharedId)
-        assertTrue(copied.isEmpty())
-        assertNull(confirmed)
+        assertTrue(shared.isEmpty())
     }
 
     @Test
-    fun createAlbumInvokesOnCreatedWithTheNewAlbumAndDoesNotFireLinkConfirm() = runTest {
+    fun createAlbumInvokesOnCreatedWithTheNewAlbumAndDoesNotShare() = runTest {
         val api = FakeAlbumApi().apply {
             entryResponse = AlbumDto(99, "Trip", null, "2024-01-01T00:00:00", 3, null, false, null)
         }
         val repo = AlbumRepository(api)
         var created: AlbumDto? = null
-        var confirmed: String? = null
+        val shared = mutableListOf<String>()
 
         runAlbumNameAction(
             action = AlbumSelectionAction.CreateAlbum,
@@ -120,13 +117,12 @@ class PhotosSelectionTest {
             mediaIds = listOf(1, 2, 3),
             createdBy = "Pixel",
             repo = repo,
-            copyToClipboard = {},
-            confirm = { confirmed = it },
             onCreated = { created = it },
+            onShareUrl = { shared.add(it) },
         )
 
         assertEquals(99L, created?.id)
-        assertNull("Create album must not fire the link-copied confirm", confirmed)
+        assertTrue("Create album must not share", shared.isEmpty())
     }
 
     @Test
@@ -141,8 +137,6 @@ class PhotosSelectionTest {
             mediaIds = listOf(9),
             createdBy = "Pixel",
             repo = repo,
-            copyToClipboard = {},
-            confirm = {},
             onCreated = { created = it },
         )
 
@@ -150,12 +144,10 @@ class PhotosSelectionTest {
     }
 
     @Test
-    fun shareNowCreatesSharesCopiesConfirmsAndOpensShareSheetWithVerbatimUrl() = runTest {
+    fun shareNowCreatesSharesAndOpensShareSheetWithVerbatimUrlWithoutClipboard() = runTest {
         val serverUrl = "https://photos.example.com/share/Xq7zZ-token"
         val api = FakeAlbumApi().apply { shareResponse = ShareDto("Xq7zZ-token", serverUrl) }
         val repo = AlbumRepository(api)
-        val copied = mutableListOf<String>()
-        var confirmed: String? = null
         val shared = mutableListOf<String>()
 
         runAlbumNameAction(
@@ -164,16 +156,12 @@ class PhotosSelectionTest {
             mediaIds = listOf(9),
             createdBy = "Pixel",
             repo = repo,
-            copyToClipboard = { copied.add(it) },
-            confirm = { confirmed = it },
             onShareUrl = { shared.add(it) },
         )
 
         assertEquals("Album 2024-03-02", api.lastCreate?.name)
         assertEquals(42L, api.lastSharedId)
-        // The link is still copied + confirmed as before, and also handed to the share sheet.
-        assertEquals(listOf(serverUrl), copied)
-        assertEquals(serverUrl, confirmed)
+        // The share sheet gets the verbatim URL; the app no longer copies it itself.
         assertEquals(listOf(serverUrl), shared)
     }
 
