@@ -506,7 +506,10 @@ fun PhotosScreen(
                     // the preview once the last remaining item is deleted.
                     val entity = mediaItems.getOrNull(deletedIndex)
                     if (entity != null && repository != null) {
-                        scope.launch { runCatching { repository.delete(entity.id) } }
+                        scope.launch {
+                            runCatching { repository.delete(entity.id) }
+                                .onFailure { snackbarHostState.showSnackbar("Couldn't delete photo") }
+                        }
                     }
                     previewIndex = previewIndexAfterDelete(mediaItems.size - 1, deletedIndex)
                 },

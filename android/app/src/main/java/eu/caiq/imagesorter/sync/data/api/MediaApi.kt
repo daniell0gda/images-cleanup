@@ -38,9 +38,14 @@ interface MediaApi {
     @GET("api/media/dates")
     suspend fun dates(): MediaDatesDto
 
-    /** Permanently deletes a media item server-side (original file + index row). */
+    /**
+     * Permanently deletes a media item server-side (original file + index row).
+     * Success is signalled by a 2xx status; the response body is not consumed, so an
+     * older server that returns a different `deleted` shape can't fail the parse and
+     * silently swallow the delete.
+     */
     @DELETE("api/media/{id}")
-    suspend fun deleteMedia(@Path("id") id: Long): DeletedDto
+    suspend fun deleteMedia(@Path("id") id: Long)
 }
 
 /**

@@ -44,8 +44,7 @@ private class FakeMediaApi(private val pages: List<MediaPageDto>) : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
-    override suspend fun deleteMedia(id: Long): eu.caiq.imagesorter.sync.data.api.dto.DeletedDto =
-        eu.caiq.imagesorter.sync.data.api.dto.DeletedDto(deleted = true)
+    override suspend fun deleteMedia(id: Long) {}
 }
 
 @OptIn(ExperimentalPagingApi::class)

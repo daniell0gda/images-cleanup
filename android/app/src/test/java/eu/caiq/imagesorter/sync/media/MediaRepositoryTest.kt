@@ -4,7 +4,6 @@ import androidx.paging.testing.asSnapshot
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import eu.caiq.imagesorter.sync.data.api.MediaApi
-import eu.caiq.imagesorter.sync.data.api.dto.DeletedDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
 import eu.caiq.imagesorter.sync.data.api.dto.MediaPageDto
 import eu.caiq.imagesorter.sync.data.db.AppDatabase
@@ -30,7 +29,7 @@ private class QueueMediaApi(private val pages: List<MediaPageDto>) : MediaApi {
         pages[calls++]
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
-    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
+    override suspend fun deleteMedia(id: Long) {}
 }
 
 /** Records the `from_date` of every refresh and the id of every delete; returns terminal pages. */
@@ -43,9 +42,8 @@ private class RecordingMediaApi : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
-    override suspend fun deleteMedia(id: Long): DeletedDto {
+    override suspend fun deleteMedia(id: Long) {
         deleted.add(id)
-        return DeletedDto(deleted = true)
     }
 }
 
@@ -68,7 +66,7 @@ private class DatasetMediaApi(private val all: List<MediaItemDto>) : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
-    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
+    override suspend fun deleteMedia(id: Long) {}
 }
 
 /** Records whether the network was hit; returns a terminal empty page. */
@@ -81,7 +79,7 @@ private class TerminalMediaApi : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
-    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
+    override suspend fun deleteMedia(id: Long) {}
 }
 
 /** Returns profile-specific items and records the profile of every refresh request. */
@@ -101,7 +99,7 @@ private class ProfileRecordingApi : MediaApi {
     }
 
     override suspend fun dates(): eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto = emptyMap()
-    override suspend fun deleteMedia(id: Long): DeletedDto = DeletedDto(deleted = true)
+    override suspend fun deleteMedia(id: Long) {}
 }
 
 @RunWith(RobolectricTestRunner::class)
