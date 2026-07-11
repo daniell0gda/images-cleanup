@@ -1,19 +1,15 @@
 package eu.caiq.imagesorter.sync.sync
 
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
-import androidx.core.app.NotificationCompat
 import eu.caiq.imagesorter.sync.R
 import eu.caiq.imagesorter.sync.SyncApp
-import eu.caiq.imagesorter.sync.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,56 +55,25 @@ class SyncForegroundService : Service() {
     }
 
     private fun updateNotification(progress: SyncProgress) {
-        val text = progress.message ?: when (progress.phase) {
-            SyncPhase.UPLOADING -> "Uploading ${progress.completedFiles}/${progress.totalFiles}"
-            else -> progress.phase.name.lowercase().replaceFirstChar { it.uppercase() }
-        }
-        val notification = buildNotification(text, progress.totalFiles, progress.completedFiles)
-        notificationManager().notify(NOTIFICATION_ID, notification)
+        val notification = buildNotification(
+            SyncNotification.textFor(progress), progress.totalFiles, progress.completedFiles,
+        )
+        notificationManager().notify(SyncNotification.ID, notification)
     }
 
-    internal fun buildNotification(text: String, max: Int, progress: Int): Notification {
-        ensureChannel()
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.sync_notification_title))
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setContentIntent(syncTabPendingIntent())
-        if (max > 0) builder.setProgress(max, progress, false)
-        return builder.build()
-    }
-
-    /** Tapping the ongoing notification opens the app on the Sync tab. */
-    private fun syncTabPendingIntent(): PendingIntent {
-        val intent = Intent(this, MainActivity::class.java)
-            .putExtra(MainActivity.EXTRA_HOME_TAB, MainActivity.EXTRA_HOME_TAB_SYNC)
-            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
-    }
+    internal fun buildNotification(text: String, max: Int, progress: Int): Notification =
+        SyncNotification.build(this, text, max, progress)
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(SyncNotification.ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            startForeground(SyncNotification.ID, notification)
         }
     }
 
-    private fun ensureChannel() {
-        val manager = notificationManager()
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.sync_channel_name),
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply { description = getString(R.string.sync_channel_description) }
-        manager.createNotificationChannel(channel)
-    }
-
     private fun notificationManager(): NotificationManager =
-        getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        getSystemService(NotificationManager::class.java)
 
     override fun onDestroy() {
         scope.cancel()
@@ -116,8 +81,6 @@ class SyncForegroundService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "sync_progress"
-        private const val NOTIFICATION_ID = 1001
 
         /**
          * Intent extra selecting the engine run mode. `true` = incremental

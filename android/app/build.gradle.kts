@@ -106,6 +106,9 @@ dependencies {
     // DataStore — non-secret cursors / prefs
     implementation(libs.androidx.datastore.preferences)
 
+    // WorkManager — background capture-sync foreground worker
+    implementation(libs.androidx.work.runtime.ktx)
+
     // Unit testing (JVM)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -117,6 +120,7 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.room.testing)
     testImplementation(libs.androidx.paging.testing)
+    testImplementation(libs.androidx.work.testing)
     testImplementation(platform(libs.androidx.compose.bom))
     testImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
