@@ -79,6 +79,20 @@ class PhotosGridTest {
     }
 
     @Test
+    fun reportsAccessForEveryRenderedRowSoPagingCanPrefetch() {
+        val accessed = mutableSetOf<Int>()
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                PhotosGrid(items = items, onOpen = {}, onAccess = { accessed.add(it) }, cell = { _, m -> Box(m) })
+            }
+        }
+        composeRule.waitForIdle()
+        // Every flat row (headers + cells) reports its index; the live screen forwards this to
+        // LazyPagingItems.get(index) so Paging prefetches the next page instead of stalling.
+        assertEquals((items.indices).toSet(), accessed)
+    }
+
+    @Test
     fun gridRootCarriesPhotosTag() {
         composeRule.setContent {
             ImageSorterSyncTheme(darkTheme = false) {

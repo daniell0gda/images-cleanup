@@ -118,6 +118,11 @@ private const val TAG = "GOTODATE"
  * excluded), the same domain the preview pager pages over. The [cell] slot draws one
  * square thumbnail for an entity (Coil in production); video cells get a play badge.
  *
+ * [onAccess] fires with each row's flat index as that row composes (i.e. scrolls into
+ * view). The live screen forwards it to `LazyPagingItems.get(index)` so Paging learns
+ * the scroll position and prefetches the next page — without it the timeline would stall
+ * at the initial load and never page past it.
+ *
  * Stateless and source-agnostic so a Compose test can drive it with a fixed list.
  */
 @OptIn(ExperimentalFoundationApi::class)
@@ -131,6 +136,7 @@ fun PhotosGrid(
     inSelectionMode: Boolean = false,
     onToggle: (MediaEntity) -> Unit = {},
     onLongPress: (MediaEntity) -> Unit = {},
+    onAccess: (index: Int) -> Unit = {},
     cell: @Composable (MediaEntity, Modifier) -> Unit,
 ) {
     val c = VaultTheme.colors
@@ -158,6 +164,7 @@ fun PhotosGrid(
                     // Stable key so the grid preserves scroll position when newer pages
                     // prepend above the viewport (e.g. after a date seek) instead of drifting.
                     item(key = "h:${item.day}", span = { GridItemSpan(maxLineSpan) }) {
+                        onAccess(i)
                         Text(
                             item.day,
                             style = MaterialTheme.typography.titleSmall,
@@ -173,6 +180,7 @@ fun PhotosGrid(
                     val mediaIndex = mediaIndexAt[i]
                     val entity = item.entity
                     item(key = "m:${entity.id}") {
+                        onAccess(i)
                         MediaCell(
                             entity = entity,
                             selected = entity.id in selectedIds,
@@ -392,6 +400,9 @@ fun PhotosScreen(
                     selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
                 },
                 onLongPress = { entity -> selectedIds = selectedIds + entity.id },
+                // Report each composed row to Paging so it prefetches older pages as the user
+                // scrolls; the flat grid index matches the LazyPagingItems index one-for-one.
+                onAccess = { index -> lazyItems?.get(index) },
                 modifier = gridModifier,
             ) { entity, cellModifier ->
                 MediaThumb(

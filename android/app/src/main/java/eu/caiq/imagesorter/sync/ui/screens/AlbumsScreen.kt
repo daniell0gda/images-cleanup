@@ -721,6 +721,8 @@ private fun AddPhotosPicker(
                 selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
             },
             onLongPress = { entity -> selectedIds = selectedIds + entity.id },
+            // Report each composed row so Paging prefetches older pages as the picker scrolls.
+            onAccess = { index -> lazyItems?.get(index) },
             modifier = Modifier.weight(1f),
         ) { entity, cellModifier ->
             MediaThumb(
