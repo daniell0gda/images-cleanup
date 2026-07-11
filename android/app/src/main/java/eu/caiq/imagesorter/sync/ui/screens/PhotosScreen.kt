@@ -81,7 +81,6 @@ import eu.caiq.imagesorter.sync.data.media.insertDayHeaders
 import eu.caiq.imagesorter.sync.serverAddressToBaseUrl
 import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.MediaThumb
-import eu.caiq.imagesorter.sync.ui.components.previewIndexAfterDelete
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -295,6 +294,7 @@ fun PhotosScreen(
     }
 
     var previewIndex by remember { mutableStateOf<Int?>(null) }
+    var deletingPreview by remember { mutableStateOf(false) }
     var datePickerOpen by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var nameDialogAction by remember { mutableStateOf<AlbumSelectionAction?>(null) }
@@ -498,20 +498,23 @@ fun PhotosScreen(
             PhotosPreview(
                 items = mediaItems,
                 startIndex = idx,
+                deleting = deletingPreview,
                 onClose = { previewIndex = null },
                 onDelete = { deletedIndex ->
                     // Delete the item server-side (original file + index) and drop its cached
                     // Room row; that invalidates the timeline paging source so the item leaves
-                    // the grid and the pager slides to the next one. The index update closes
-                    // the preview once the last remaining item is deleted.
+                    // the grid. The trash icon shows a spinner until it resolves; on success the
+                    // preview closes, revealing the refreshed timeline without the deleted item.
                     val entity = mediaItems.getOrNull(deletedIndex)
-                    if (entity != null && repository != null) {
+                    if (entity != null && repository != null && !deletingPreview) {
+                        deletingPreview = true
                         scope.launch {
                             runCatching { repository.delete(entity.id) }
+                                .onSuccess { previewIndex = null }
                                 .onFailure { snackbarHostState.showSnackbar("Couldn't delete photo") }
+                            deletingPreview = false
                         }
                     }
-                    previewIndex = previewIndexAfterDelete(mediaItems.size - 1, deletedIndex)
                 },
             ) { entity -> MediaPreviewContent(entity, urls, token) }
         }
@@ -681,6 +684,7 @@ fun PhotosPreview(
     onClose: () -> Unit,
     onDelete: (mediaIndex: Int) -> Unit,
     modifier: Modifier = Modifier,
+    deleting: Boolean = false,
     image: @Composable (MediaEntity) -> Unit,
 ) {
     MediaPreviewPager(
@@ -690,8 +694,16 @@ fun PhotosPreview(
         modifier = modifier,
         zoomable = { it.kind != KIND_VIDEO },
         actions = { index ->
-            IconButton(onClick = { onDelete(index) }) {
-                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
+            if (deleting) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(24.dp),
+                )
+            } else {
+                IconButton(onClick = { onDelete(index) }) {
+                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
+                }
             }
         },
         image = image,

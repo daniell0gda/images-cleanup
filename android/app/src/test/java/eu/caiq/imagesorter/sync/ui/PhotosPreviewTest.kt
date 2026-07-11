@@ -67,4 +67,21 @@ class PhotosPreviewTest {
         composeRule.onNodeWithContentDescription("Delete").performClick()
         assertEquals(listOf(0), deleted)
     }
+
+    @Test
+    fun whileDeletingTheTrashButtonIsReplacedByASpinner() {
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                PhotosPreview(
+                    items = listOf(img(1), img(2)),
+                    startIndex = 0,
+                    deleting = true,
+                    onClose = {},
+                    onDelete = {},
+                ) { Text("img-${it.id}") }
+            }
+        }
+        // The trash button is gone while the delete is in flight (spinner in its place).
+        composeRule.onNodeWithContentDescription("Delete").assertDoesNotExist()
+    }
 }
