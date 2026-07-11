@@ -85,15 +85,6 @@ class MainViewModel(
                 }
             }
         }
-        // Self-clearing "Sync Now" in-flight set: as the rows flip, an item leaves
-        // [syncingNow] once the engine has reported its outcome (see [nextSyncing]).
-        viewModelScope.launch {
-            allRows.collect { rows ->
-                val (next, activated) = nextSyncing(_syncingNow.value, syncingActivated, rows)
-                syncingActivated = activated
-                _syncingNow.value = next
-            }
-        }
     }
 
     private val _screen = MutableStateFlow(initialScreen())
@@ -205,6 +196,21 @@ class MainViewModel(
         ) { synced, pending, failures ->
             buildAllRows(synced, pending, failures)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // Self-clearing "Sync Now" in-flight set: as the rows flip, an item leaves
+    // [syncingNow] once the engine has reported its outcome (see [nextSyncing]).
+    // Declared here (after [allRows] + [_syncingNow]) so the collector never runs
+    // against an uninitialised property — viewModelScope dispatches eagerly on the
+    // main thread, so an init block above these fields would deref them as null.
+    init {
+        viewModelScope.launch {
+            allRows.collect { rows ->
+                val (next, activated) = nextSyncing(_syncingNow.value, syncingActivated, rows)
+                syncingActivated = activated
+                _syncingNow.value = next
+            }
+        }
+    }
 
     /** The status rows shown on the main view, after applying the active filter. */
     val rows: StateFlow<List<StatusRow>> =
