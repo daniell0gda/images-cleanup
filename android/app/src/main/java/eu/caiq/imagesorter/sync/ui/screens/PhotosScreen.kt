@@ -509,10 +509,19 @@ fun PhotosScreen(
                     if (entity != null && repository != null && !deletingPreview) {
                         deletingPreview = true
                         scope.launch {
-                            runCatching { repository.delete(entity.id) }
-                                .onSuccess { previewIndex = null }
-                                .onFailure { snackbarHostState.showSnackbar("Couldn't delete photo") }
+                            // Bound the wait so a stalled server response can't spin forever,
+                            // and surface the real reason so failures are never silent.
+                            val result = runCatching {
+                                kotlinx.coroutines.withTimeout(30_000) { repository.delete(entity.id) }
+                            }
                             deletingPreview = false
+                            result
+                                .onSuccess { previewIndex = null }
+                                .onFailure { e ->
+                                    snackbarHostState.showSnackbar(
+                                        "Delete failed: ${e.message ?: e.javaClass.simpleName}",
+                                    )
+                                }
                         }
                     }
                 },
