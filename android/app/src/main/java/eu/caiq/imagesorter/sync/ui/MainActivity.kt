@@ -1,7 +1,11 @@
 package eu.caiq.imagesorter.sync.ui
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.IntentSender
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -17,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Collections
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -26,7 +31,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import eu.caiq.imagesorter.sync.ui.screens.shouldShowSyncSpinner
 import eu.caiq.imagesorter.sync.ServiceLocator
 import eu.caiq.imagesorter.sync.SyncApp
 import eu.caiq.imagesorter.sync.ui.screens.AlbumsScreen
@@ -56,11 +66,45 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleDeepLink(intent)
         setContent {
             ImageSorterSyncTheme {
                 Surface { AppRoot(viewModel) }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleTop: while the app is open, a notification tap re-delivers here
+        // instead of re-creating the activity. Adopt it as the current intent so a
+        // later getIntent() reads the deep link, then route.
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    /**
+     * Route a Sync-tab deep-link intent to the ViewModel, then strip the extra so a
+     * config-change recreation (which re-reads getIntent()) can't re-navigate — the
+     * tab switch fires once per intent.
+     */
+    private fun handleDeepLink(intent: Intent?) {
+        if (homeTabFromIntent(intent) == HomeTab.SYNC) {
+            viewModel.goToSyncTab()
+            intent?.removeExtra(EXTRA_HOME_TAB)
+        }
+    }
+
+    companion object {
+        /** Intent extra naming the home tab a deep link should open. */
+        const val EXTRA_HOME_TAB = "eu.caiq.imagesorter.sync.EXTRA_HOME_TAB"
+
+        /** [EXTRA_HOME_TAB] value selecting the Sync tab. */
+        const val EXTRA_HOME_TAB_SYNC = "SYNC"
+
+        /** Pure intent → [HomeTab] seam so the deep-link mapping is unit-testable. */
+        internal fun homeTabFromIntent(intent: Intent?): HomeTab? =
+            if (intent?.getStringExtra(EXTRA_HOME_TAB) == EXTRA_HOME_TAB_SYNC) HomeTab.SYNC else null
     }
 }
 
@@ -70,6 +114,9 @@ class MainActivity : ComponentActivity() {
  * (no server is configured yet, so pairing cannot succeed).
  */
 internal fun shouldStartPairing(screen: AppScreen): Boolean = screen == AppScreen.PAIRING
+
+/** testTag for the bottom-nav Sync-tab active-sync spinner. */
+const val SYNC_TAB_SPINNER_TAG = "syncTabSpinner"
 
 /**
  * The post-pairing screens render inside the home shell (a [Scaffold] with the
@@ -93,6 +140,7 @@ internal fun HomeShell(
     photos: @Composable () -> Unit,
     albums: @Composable () -> Unit,
     sync: @Composable () -> Unit,
+    syncActive: Boolean = false,
 ) {
     Scaffold(
         bottomBar = {
@@ -112,7 +160,18 @@ internal fun HomeShell(
                 NavigationBarItem(
                     selected = selectedTab == HomeTab.SYNC,
                     onClick = { onTabSelected(HomeTab.SYNC) },
-                    icon = { Icon(Icons.Rounded.Sync, contentDescription = null) },
+                    // While a sync runs, the icon becomes a small spinner so the
+                    // activity is visible from the Photos and Albums tabs too.
+                    icon = {
+                        if (syncActive) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp).testTag(SYNC_TAB_SPINNER_TAG),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(Icons.Rounded.Sync, contentDescription = null)
+                        }
+                    },
                     label = { Text("Sync") },
                 )
             }
@@ -131,6 +190,7 @@ internal fun HomeShell(
 @Composable
 private fun AppRoot(viewModel: MainViewModel) {
     val screen by viewModel.screen.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     // Request media + notification permissions on entry. The result is not
     // gated on here (placeholder); production should block sync until granted.
@@ -146,6 +206,14 @@ private fun AppRoot(viewModel: MainViewModel) {
     // at the pairing screen by connecting — not only when the app opens there.
     LaunchedEffect(screen) {
         if (shouldStartPairing(screen)) viewModel.startPairing()
+    }
+
+    // App-open auto-sync: once the app reaches the post-pairing MAIN state, consult
+    // the Wi-Fi/throttle gate and start a full sync if eligible — regardless of the
+    // active bottom-nav tab (this runs in AppRoot, above the tab switch). The VM's
+    // throttle guards against re-firing when the screen re-enters MAIN.
+    LaunchedEffect(screen) {
+        if (screen == AppScreen.MAIN) viewModel.maybeAutoSyncOnOpen(isUnmeteredNetwork(context))
     }
 
     // System delete dialog launcher for the cleanup flow.
@@ -175,9 +243,17 @@ private fun AppRoot(viewModel: MainViewModel) {
         AppScreen.PROFILE_PICKER, AppScreen.MAIN, AppScreen.CLEANUP -> {
             val homeTab by viewModel.homeTab.collectAsStateWithLifecycle()
             val pendingAlbumId by viewModel.pendingAlbumId.collectAsStateWithLifecycle()
+            val pendingTab by viewModel.pendingTab.collectAsStateWithLifecycle()
+            val shellSyncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
+            // The deep link's tab switch is applied via homeTab already; reset the
+            // one-shot marker so it doesn't linger.
+            LaunchedEffect(pendingTab) {
+                if (pendingTab != null) viewModel.consumePendingTab()
+            }
             HomeShell(
                 selectedTab = homeTab,
                 onTabSelected = viewModel::selectHomeTab,
+                syncActive = shouldShowSyncSpinner(shellSyncProgress),
                 photos = { PhotosScreen(onGoToAlbum = viewModel::goToAlbum) },
                 albums = {
                     AlbumsScreen(
@@ -291,6 +367,18 @@ private fun launchDelete(
 ) {
     val sender: IntentSender = viewModel.buildDeleteRequest(uris) ?: return
     launch(IntentSenderRequest.Builder(sender).build())
+}
+
+/**
+ * Whether the active network is unmetered (Wi-Fi-like). Drives the app-open
+ * auto-sync gate so a full backup never starts on a metered/cellular connection.
+ * Absent connectivity or capabilities read as metered (do not sync).
+ */
+private fun isUnmeteredNetwork(context: Context): Boolean {
+    val connectivity = context.getSystemService(ConnectivityManager::class.java) ?: return false
+    val network = connectivity.activeNetwork ?: return false
+    val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
+    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
 }
 
 private fun requiredPermissions(): Array<String> =

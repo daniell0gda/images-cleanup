@@ -124,6 +124,14 @@ data class StatusTotals(val safe: Int, val todo: Int, val failed: Int) {
 }
 
 /**
+ * Whether a sync run is active (from discovery through reporting), i.e. not idle
+ * and not finished. Drives both the in-screen sweep/progress and the bottom-nav
+ * Sync-tab spinner so both react to the same shared [SyncProgress].
+ */
+fun shouldShowSyncSpinner(progress: SyncProgress): Boolean =
+    progress.phase != SyncPhase.IDLE && !progress.isFinished
+
+/**
  * Main status — the hero. A photo-tile grid keyed to each item's sync state, with
  * a count headline, filter pills, and the two primary actions. While a sync is in
  * flight, a mint "secure sweep" crosses the grid.
@@ -187,7 +195,7 @@ fun MainStatusScreen(
     var showFailures by remember { mutableStateOf(false) }
     // A run is active from discovery through reporting; placement to the server's
     // destination only happens in REPORTING, after the whole batch has uploaded.
-    val activeSync = syncProgress.phase != SyncPhase.IDLE && !syncProgress.isFinished
+    val activeSync = shouldShowSyncSpinner(syncProgress)
     val phaseText = phaseLabel(syncProgress)
 
     Box(modifier = modifier.fillMaxSize()) {

@@ -3,6 +3,7 @@ package eu.caiq.imagesorter.sync.sync
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import eu.caiq.imagesorter.sync.R
 import eu.caiq.imagesorter.sync.SyncApp
+import eu.caiq.imagesorter.sync.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,16 +38,16 @@ class SyncForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundCompat(buildNotification(getString(R.string.sync_notification_idle), 0, 0))
-        startRunIfIdle()
+        startRunIfIdle(isIncremental(intent))
         return START_NOT_STICKY
     }
 
-    private fun startRunIfIdle() {
+    private fun startRunIfIdle(incremental: Boolean) {
         if (runJob?.isActive == true) return
         val engine = (application as SyncApp).serviceLocator.syncEngine
         runJob = scope.launch {
             launch { collectProgress(engine) }
-            engine.run()
+            engine.run(incremental = incremental)
             stopSelf()
         }
     }
@@ -65,7 +67,7 @@ class SyncForegroundService : Service() {
         notificationManager().notify(NOTIFICATION_ID, notification)
     }
 
-    private fun buildNotification(text: String, max: Int, progress: Int): Notification {
+    internal fun buildNotification(text: String, max: Int, progress: Int): Notification {
         ensureChannel()
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.sync_notification_title))
@@ -73,8 +75,17 @@ class SyncForegroundService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setContentIntent(syncTabPendingIntent())
         if (max > 0) builder.setProgress(max, progress, false)
         return builder.build()
+    }
+
+    /** Tapping the ongoing notification opens the app on the Sync tab. */
+    private fun syncTabPendingIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java)
+            .putExtra(MainActivity.EXTRA_HOME_TAB, MainActivity.EXTRA_HOME_TAB_SYNC)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
     }
 
     private fun startForegroundCompat(notification: Notification) {
@@ -108,10 +119,26 @@ class SyncForegroundService : Service() {
         private const val CHANNEL_ID = "sync_progress"
         private const val NOTIFICATION_ID = 1001
 
-        /** Start the service (used by [ManualSyncTrigger]). */
-        fun start(context: Context) {
+        /**
+         * Intent extra selecting the engine run mode. `true` = incremental
+         * (watermark-based), used by the capture job; absent/`false` = full pass,
+         * used by the manual/app-open path.
+         */
+        const val EXTRA_INCREMENTAL = "eu.caiq.imagesorter.sync.EXTRA_INCREMENTAL"
+
+        /**
+         * Start the service. [incremental] `true` runs the engine incrementally
+         * (capture trigger); the default `false` runs a full pass (manual path via
+         * [ManualSyncTrigger]).
+         */
+        fun start(context: Context, incremental: Boolean = false) {
             val intent = Intent(context, SyncForegroundService::class.java)
+                .putExtra(EXTRA_INCREMENTAL, incremental)
             context.startForegroundService(intent)
         }
+
+        /** Pure intent → run-mode seam so the mapping is unit-testable. */
+        internal fun isIncremental(intent: Intent?): Boolean =
+            intent?.getBooleanExtra(EXTRA_INCREMENTAL, false) ?: false
     }
 }

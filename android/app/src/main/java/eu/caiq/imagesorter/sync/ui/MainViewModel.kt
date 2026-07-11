@@ -71,6 +71,10 @@ class MainViewModel(
     // Supplier (not a captured instance) so a re-pointed server address is honored:
     // locator.api rebuilds when the address changes.
     private val apiProvider: () -> eu.caiq.imagesorter.sync.data.api.SyncApi = { locator.api },
+    private val syncTrigger: eu.caiq.imagesorter.sync.sync.SyncTrigger = locator.syncTrigger,
+    // Wall-clock timestamp of the last successful full run (persisted), or null if
+    // none has completed. Read as a supplier so the throttle sees the current value.
+    private val lastFullSyncAtMillis: () -> Long? = { locator.securePrefs.getLastFullSyncAtMillis() },
 ) : ViewModel() {
 
     init {
@@ -114,6 +118,22 @@ class MainViewModel(
     /** Clear the pending album once the Albums tab has opened it, so it opens only once. */
     fun consumePendingAlbum() {
         _pendingAlbumId.value = null
+    }
+
+    private val _pendingTab = MutableStateFlow<HomeTab?>(null)
+
+    /** Tab a deep link (e.g. the sync notification) requested opening, or null. */
+    val pendingTab: StateFlow<HomeTab?> = _pendingTab.asStateFlow()
+
+    /** Navigate to the Sync tab (e.g. from the ongoing sync notification). */
+    fun goToSyncTab() {
+        _pendingTab.value = HomeTab.SYNC
+        selectHomeTab(HomeTab.SYNC)
+    }
+
+    /** Clear the pending tab once handled, so a recomposition doesn't re-navigate. */
+    fun consumePendingTab() {
+        _pendingTab.value = null
     }
 
     private val _serverSetupError = MutableStateFlow<String?>(null)
@@ -371,7 +391,23 @@ class MainViewModel(
     // --- Sync ---
 
     fun syncNow() {
-        locator.syncTrigger.requestSync()
+        syncTrigger.requestSync()
+    }
+
+    /**
+     * App-open auto-sync. When the gate passes (unmetered network AND no successful
+     * full run within the throttle window) start a FULL sync via the same trigger
+     * the manual "Back up now" uses. Network detection lives in the Activity (this VM
+     * holds no Android types), which passes [isUnmetered]. Wall-clock now is used so
+     * the throttle compares against the persisted last-full-sync timestamp correctly.
+     */
+    fun maybeAutoSyncOnOpen(isUnmetered: Boolean) {
+        val eligible = eu.caiq.imagesorter.sync.sync.shouldAutoSyncOnOpen(
+            isUnmetered = isUnmetered,
+            lastFullSyncAtMillis = lastFullSyncAtMillis(),
+            nowMillis = System.currentTimeMillis(),
+        )
+        if (eligible) syncTrigger.requestSync()
     }
 
     /**

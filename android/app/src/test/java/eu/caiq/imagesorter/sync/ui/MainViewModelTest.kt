@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import eu.caiq.imagesorter.sync.ServiceLocator
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.domain.model.SyncStatus
+import eu.caiq.imagesorter.sync.sync.SyncTrigger
 import eu.caiq.imagesorter.sync.ui.screens.StatusFilter
 import eu.caiq.imagesorter.sync.ui.screens.StatusRow
 import kotlinx.coroutines.CompletableDeferred
@@ -29,6 +30,16 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import retrofit2.Response
+
+/** Records [requestSync] calls so the auto-sync gate + manual bypass are assertable. */
+private class FakeSyncTrigger : SyncTrigger {
+    var calls = 0
+        private set
+
+    override fun requestSync() {
+        calls++
+    }
+}
 
 /** In-memory [RoutingPrefs] so routing can be driven without EncryptedSharedPreferences. */
 private class FakeRoutingPrefs(
@@ -332,6 +343,39 @@ class MainViewModelTest {
         assertNull(vm.pendingAlbumId.value)
     }
 
+    @Test
+    fun goToSyncTabSwitchesToSyncTabAndMarksItPending() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+
+        vm.goToSyncTab()
+
+        assertEquals(HomeTab.SYNC, vm.homeTab.value)
+        assertEquals(HomeTab.SYNC, vm.pendingTab.value)
+    }
+
+    @Test
+    fun consumePendingTabClearsTheRequestSoItFiresOnlyOnce() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+        vm.goToSyncTab()
+
+        vm.consumePendingTab()
+
+        assertNull(vm.pendingTab.value)
+    }
+
+    @Test
+    fun homeTabFromIntentMapsSyncExtraToSyncTab() {
+        val intent = android.content.Intent()
+            .putExtra(MainActivity.EXTRA_HOME_TAB, MainActivity.EXTRA_HOME_TAB_SYNC)
+        assertEquals(HomeTab.SYNC, MainActivity.homeTabFromIntent(intent))
+    }
+
+    @Test
+    fun homeTabFromIntentIsNullWithoutTheExtraOrForNullIntent() {
+        assertNull(MainActivity.homeTabFromIntent(android.content.Intent()))
+        assertNull(MainActivity.homeTabFromIntent(null))
+    }
+
     private fun profile(id: String) =
         eu.caiq.imagesorter.sync.data.api.dto.ProfileDto(profileId = id, displayName = id)
 
@@ -526,6 +570,71 @@ class MainViewModelTest {
         assertEquals(setOf(60L), active)
         val (afterFail, _) = vm.nextSyncing(active, act2, listOf(row(60L, SyncStatus.FAILED)))
         assertTrue("a fresh failure re-enables the button", afterFail.isEmpty())
+    }
+
+    private fun vmForAutoSync(
+        trigger: SyncTrigger,
+        lastFullSyncAtMillis: Long? = null,
+    ): MainViewModel = MainViewModel(
+        ServiceLocator(context),
+        FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"),
+        syncTrigger = trigger,
+        lastFullSyncAtMillis = { lastFullSyncAtMillis },
+    )
+
+    @Test
+    fun maybeAutoSyncOnOpenStartsFullSyncWhenGatePasses() {
+        val trigger = FakeSyncTrigger()
+        // Unmetered + no prior full run → gate passes.
+        val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = null)
+
+        vm.maybeAutoSyncOnOpen(isUnmetered = true)
+
+        assertEquals(1, trigger.calls)
+    }
+
+    @Test
+    fun maybeAutoSyncOnOpenStartsFullSyncWhenLastRunIsOldEnough() {
+        val trigger = FakeSyncTrigger()
+        // A full run 20 minutes ago is past the throttle window → gate passes.
+        val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = System.currentTimeMillis() - 20 * 60 * 1000L)
+
+        vm.maybeAutoSyncOnOpen(isUnmetered = true)
+
+        assertEquals(1, trigger.calls)
+    }
+
+    @Test
+    fun maybeAutoSyncOnOpenDoesNotStartSyncOnMeteredNetwork() {
+        val trigger = FakeSyncTrigger()
+        val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = null)
+
+        vm.maybeAutoSyncOnOpen(isUnmetered = false)
+
+        assertEquals(0, trigger.calls)
+    }
+
+    @Test
+    fun maybeAutoSyncOnOpenDoesNotStartSyncWhenAFullRunFinishedRecently() {
+        val trigger = FakeSyncTrigger()
+        // A full run 1 minute ago is inside the 15-minute throttle window → gate fails.
+        val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = System.currentTimeMillis() - 60 * 1000L)
+
+        vm.maybeAutoSyncOnOpen(isUnmetered = true)
+
+        assertEquals(0, trigger.calls)
+    }
+
+    @Test
+    fun syncNowStartsSyncUnconditionallyBypassingTheGate() {
+        val trigger = FakeSyncTrigger()
+        // Metered would fail the gate and a recent run would throttle it, yet the
+        // manual "Back up now" path must start regardless.
+        val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = System.currentTimeMillis() - 60 * 1000L)
+
+        vm.syncNow()
+
+        assertEquals(1, trigger.calls)
     }
 
     @Test

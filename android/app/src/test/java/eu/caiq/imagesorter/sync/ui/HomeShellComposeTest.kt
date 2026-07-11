@@ -6,10 +6,15 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import eu.caiq.imagesorter.sync.sync.SyncPhase
+import eu.caiq.imagesorter.sync.sync.SyncProgress
 import eu.caiq.imagesorter.sync.ui.screens.PHOTOS_TAG
 import eu.caiq.imagesorter.sync.ui.screens.PhotosScreen
+import eu.caiq.imagesorter.sync.ui.screens.shouldShowSyncSpinner
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -82,5 +87,57 @@ class HomeShellComposeTest {
         }
         composeRule.onNodeWithText("sync-content").assertIsDisplayed()
         composeRule.onNodeWithTag(PHOTOS_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun shouldShowSyncSpinnerTrueWhileUploading() {
+        assertTrue(shouldShowSyncSpinner(SyncProgress(phase = SyncPhase.UPLOADING)))
+    }
+
+    @Test
+    fun shouldShowSyncSpinnerFalseWhenIdle() {
+        assertFalse(shouldShowSyncSpinner(SyncProgress(phase = SyncPhase.IDLE)))
+    }
+
+    @Test
+    fun shouldShowSyncSpinnerFalseWhenFinished() {
+        assertFalse(shouldShowSyncSpinner(SyncProgress(phase = SyncPhase.DONE)))
+        assertFalse(shouldShowSyncSpinner(SyncProgress(phase = SyncPhase.ERROR)))
+    }
+
+    @Test
+    fun syncTabSpinnerVisibleFromPhotosTabWhenSyncActive() {
+        // The indicator must be visible even when another tab (Photos) is selected,
+        // so a running sync is noticeable from anywhere in the home shell.
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                HomeShell(
+                    selectedTab = HomeTab.PHOTOS,
+                    onTabSelected = {},
+                    syncActive = true,
+                    photos = { Text("photos") },
+                    albums = { Text("albums") },
+                    sync = { Text("sync-content") },
+                )
+            }
+        }
+        composeRule.onNodeWithTag(SYNC_TAB_SPINNER_TAG, useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun syncTabSpinnerAbsentWhenSyncInactive() {
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                HomeShell(
+                    selectedTab = HomeTab.PHOTOS,
+                    onTabSelected = {},
+                    syncActive = false,
+                    photos = { Text("photos") },
+                    albums = { Text("albums") },
+                    sync = { Text("sync-content") },
+                )
+            }
+        }
+        composeRule.onNodeWithTag(SYNC_TAB_SPINNER_TAG, useUnmergedTree = true).assertDoesNotExist()
     }
 }
