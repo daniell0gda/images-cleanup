@@ -35,8 +35,8 @@ class ProfileFilterTest {
         val options = profileFilterOptions(profiles)
 
         assertEquals(listOf<String?>(null, "p1", "p2"), options.map { it.id })
-        assertEquals("All profiles", options.first().label)
-        assertEquals(listOf("All profiles", "Vacation", "Work"), options.map { it.label })
+        assertEquals("Taken by", options.first().label)
+        assertEquals(listOf("Taken by", "Vacation", "Work"), options.map { it.label })
     }
 
     @Test
@@ -72,7 +72,7 @@ class ProfileFilterTest {
         }
 
         composeRule.onNodeWithTag(PROFILE_FILTER_TAG).performClick()
-        composeRule.onNodeWithText("All profiles").performClick()
+        composeRule.onNodeWithText("Taken by").performClick()
 
         assertEquals(listOf<String?>(null), picked)
     }

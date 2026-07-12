@@ -28,7 +28,7 @@ import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
 const val PROFILE_FILTER_TAG = "profileFilter"
 
 /** The label of the always-present default option that clears the filter. */
-const val ALL_PROFILES_LABEL = "All profiles"
+const val ALL_PROFILES_LABEL = "Taken by"
 
 /** One choice in the Photos timeline profile filter; [id] null = the all-profiles default. */
 data class ProfileFilterOption(val id: String?, val label: String)
