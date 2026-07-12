@@ -86,6 +86,7 @@ import eu.caiq.imagesorter.sync.data.media.insertDayHeaders
 import eu.caiq.imagesorter.sync.data.media.pauseTolerantLoadControl
 import eu.caiq.imagesorter.sync.data.media.videoRequestHeaders
 import eu.caiq.imagesorter.sync.serverAddressToBaseUrl
+import eu.caiq.imagesorter.sync.ui.components.LocalMediaPreviewPageActive
 import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.MediaThumb
 import eu.caiq.imagesorter.sync.ui.theme.VaultTheme
@@ -976,9 +977,9 @@ fun AddToAlbumPicker(
 }
 
 /**
- * Renders one media entity full-screen for the preview pager: an autoplaying
- * ExoPlayer page for video, otherwise a Coil preview image. Shared by the Photos
- * tab and album detail so both get identical (autoplaying) video playback.
+ * Renders one media entity full-screen for the preview pager: an ExoPlayer page for
+ * video (autoplaying once it is the visible page — see [VideoPlayerPage]), otherwise a
+ * Coil preview image. Shared by the Photos tab and album detail so both behave alike.
  */
 @Composable
 fun MediaPreviewContent(entity: MediaEntity, urls: MediaUrls, token: String?) {
@@ -1066,13 +1067,18 @@ fun quietBufferingMode(): Int = PlayerView.SHOW_BUFFERING_NEVER
 /**
  * A single video page in the preview pager. Builds an [ExoPlayer] streaming
  * `/api/media/{id}/stream` through the chunked bearer-authed data source and the
- * pause-tolerant load control from the video-loading policy, and **releases it on
+ * pause-tolerant load control from the video-loading policy, autoplays it only while
+ * it is the visible ([LocalMediaPreviewPageActive]) page, and **releases it on
  * dispose** so leaving the page leaks no player.
  */
 @AndroidOptIn(UnstableApi::class)
 @Composable
 private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
     val context = LocalContext.current
+    // Only the settled (visible) preview page autoplays; a neighbour the pager
+    // pre-composes mid-swipe still prepares (preloads) but stays paused until it
+    // becomes visible, so no off-screen video plays before the user sees it.
+    val active = LocalMediaPreviewPageActive.current
     val exoPlayer = remember(id) {
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(chunkedBearerDataSourceFactory(token)))
@@ -1080,10 +1086,13 @@ private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
             .build()
             .apply {
                 setMediaItem(buildVideoMediaItem(urls, id))
-                playWhenReady = true
+                playWhenReady = active
                 prepare()
             }
     }
+    // Follow visibility: start when this page settles into view, pause when it leaves
+    // (keeping the buffered stream), so autoplay stays only while it is on screen.
+    LaunchedEffect(id, active) { exoPlayer.playWhenReady = active }
     // Show the thumb poster + spinner until the first frame is ready. The first play of a
     // non-web-safe video waits on a server-side transcode, so this can take a few seconds.
     // Readiness latches on (see [latchVideoReady]) so a mid-playback rebuffer keeps it hidden.

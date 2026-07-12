@@ -9,6 +9,7 @@ import androidx.compose.ui.test.performClick
 import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import eu.caiq.imagesorter.sync.data.media.ChunkedDataSource
+import eu.caiq.imagesorter.sync.ui.components.LocalMediaPreviewPageActive
 import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.PREVIEW_TAG
 import eu.caiq.imagesorter.sync.ui.components.previewCanPan
@@ -167,6 +168,30 @@ class MediaPreviewPagerTest {
     fun playerViewShowsNoBuiltInBufferingIndicator() {
         // No built-in buffering spinner during a stall — playback resumes quietly.
         assertEquals(PlayerView.SHOW_BUFFERING_NEVER, quietBufferingMode())
+    }
+
+    @Test
+    fun onlyTheSettledPageReportsItselfAsTheVisiblePage() {
+        // The pager tells its image slot which page is visible via
+        // LocalMediaPreviewPageActive; a video page keys autoplay off it. The page the
+        // pager settles on must be the only one flagged active, so a neighbour the
+        // pager pre-composes mid-swipe preloads without autoplaying.
+        val activeByItem = mutableMapOf<String, Boolean>()
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                MediaPreviewPager(
+                    items = listOf("a", "b", "c"),
+                    startIndex = 1,
+                    onClose = {},
+                ) { item ->
+                    activeByItem[item] = LocalMediaPreviewPageActive.current
+                    Text("img-$item")
+                }
+            }
+        }
+        composeRule.waitForIdle()
+        assertEquals(true, activeByItem["b"])
+        activeByItem.filterKeys { it != "b" }.values.forEach { assertFalse(it) }
     }
 
     @Test

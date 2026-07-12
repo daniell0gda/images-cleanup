@@ -32,7 +32,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -191,6 +193,16 @@ fun SelectionTopBar(
 }
 
 /**
+ * True while the [MediaPreviewPager] image slot is drawing the page the pager has
+ * settled on — the item the user is actually looking at — and false for a neighbour
+ * the pager pre-composes as a swipe brings it into view. A video page reads this to
+ * autoplay only once it is the visible page (it still preloads while off-screen);
+ * other content ignores it. Defaults to true so content shown outside a pager plays
+ * as before.
+ */
+val LocalMediaPreviewPageActive = compositionLocalOf { true }
+
+/**
  * Fullscreen, swipeable preview. Pages over [items] with a [HorizontalPager]. A page
  * is pinch-zoom/pan-able when [zoomable] returns true for its item (the default);
  * while zoomed in (scale != 1) paging is disabled so the swipe gesture doesn't fight
@@ -275,7 +287,13 @@ fun <T> MediaPreviewPager(
                     ),
                 contentAlignment = Alignment.Center,
             ) {
-                image(items[page])
+                // A video page autoplays only while it is the settled (visible) page;
+                // a neighbour pre-composed mid-swipe preloads but stays paused.
+                CompositionLocalProvider(
+                    LocalMediaPreviewPageActive provides (page == pagerState.settledPage),
+                ) {
+                    image(items[page])
+                }
             }
         }
 
