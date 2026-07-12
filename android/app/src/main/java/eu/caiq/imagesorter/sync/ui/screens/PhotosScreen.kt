@@ -7,6 +7,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
@@ -307,6 +308,9 @@ fun PhotosScreen(
 
     var previewIndex by remember { mutableStateOf<Int?>(null) }
     var deletingPreview by remember { mutableStateOf(false) }
+    // Set from the moment "Share now" is tapped and cleared once the share link is ready
+    // (right before the system share sheet opens); drives the blocking share spinner.
+    var sharing by remember { mutableStateOf(false) }
     var datePickerOpen by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var nameDialogAction by remember { mutableStateOf<AlbumSelectionAction?>(null) }
@@ -437,10 +441,12 @@ fun PhotosScreen(
                         AlbumSelectionAction.AddToAlbum -> addPickerOpen = true
                         // Share now is instant: no name prompt — create a default-named
                         // album, share it, and open the system share sheet straight away.
+                        // A blocking spinner shows from the tap until the link is ready.
                         AlbumSelectionAction.ShareNow -> {
                             val ids = selectedIds.toList()
                             selectedIds = emptySet()
                             if (albumRepo != null) {
+                                sharing = true
                                 scope.launch {
                                     runCatching {
                                         runAlbumNameAction(
@@ -449,9 +455,16 @@ fun PhotosScreen(
                                             mediaIds = ids,
                                             createdBy = deviceName,
                                             repo = albumRepo,
-                                            onShareUrl = { url -> shareLinkViaChooser(context, url) },
+                                            // Drop the spinner the instant the link is ready,
+                                            // then hand off to the system share sheet.
+                                            onShareUrl = { url ->
+                                                sharing = false
+                                                shareLinkViaChooser(context, url)
+                                            },
                                         )
                                     }
+                                    // Also clear it on failure so the spinner never sticks.
+                                    sharing = false
                                 }
                             }
                         }
@@ -661,6 +674,9 @@ fun PhotosScreen(
                 }
             }
         }
+
+        // Drawn last so it sits above everything while the share link is being built.
+        if (sharing) ShareLoadingOverlay()
     }
 }
 
@@ -764,6 +780,29 @@ suspend fun confirmAlbumCreated(
  */
 fun fabBottomPadding(snackbarVisible: Boolean): androidx.compose.ui.unit.Dp =
     if (snackbarVisible) 84.dp else 16.dp
+
+/** Test tag on the full-screen scrim shown while a "Share now" link is being built. */
+const val PHOTOS_SHARING_TAG = "photosSharingOverlay"
+
+/**
+ * A blocking full-screen scrim with a centered spinner, shown from the moment "Share now"
+ * is tapped until the server has built the share link (after which the system share sheet
+ * opens). Swallows taps so nothing behind it can be touched mid-share.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ShareLoadingOverlay(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag(PHOTOS_SHARING_TAG)
+            .background(Color.Black.copy(alpha = 0.4f))
+            .pointerInput(Unit) { detectTapGestures { } },
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator(color = VaultTheme.colors.accent)
+    }
+}
 
 /** The three album actions offered over a Photos-grid selection (§7.1). */
 enum class AlbumSelectionAction { CreateAlbum, AddToAlbum, ShareNow }

@@ -3,6 +3,7 @@ package eu.caiq.imagesorter.sync.ui
 import androidx.compose.material3.Text
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import eu.caiq.imagesorter.sync.data.api.AlbumApi
@@ -15,7 +16,9 @@ import eu.caiq.imagesorter.sync.data.api.dto.MediaItemDto
 import eu.caiq.imagesorter.sync.data.api.dto.ShareDto
 import eu.caiq.imagesorter.sync.data.media.AlbumRepository
 import eu.caiq.imagesorter.sync.ui.screens.AlbumSelectionAction
+import eu.caiq.imagesorter.sync.ui.screens.PHOTOS_SHARING_TAG
 import eu.caiq.imagesorter.sync.ui.screens.SelectionActionsBar
+import eu.caiq.imagesorter.sync.ui.screens.ShareLoadingOverlay
 import eu.caiq.imagesorter.sync.ui.screens.defaultAlbumName
 import eu.caiq.imagesorter.sync.ui.screens.runAlbumNameAction
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
@@ -73,6 +76,16 @@ class PhotosSelectionTest {
 
         composeRule.onNodeWithText("Share now").performClick()
         assertEquals(listOf(AlbumSelectionAction.ShareNow), actions)
+    }
+
+    @Test
+    fun shareLoadingOverlayShowsSpinnerWhileTheLinkIsBuilt() {
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                ShareLoadingOverlay()
+            }
+        }
+        composeRule.onNodeWithTag(PHOTOS_SHARING_TAG).assertIsDisplayed()
     }
 
     @Test
