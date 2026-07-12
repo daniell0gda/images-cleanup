@@ -53,4 +53,9 @@ interface SyncedCacheDao {
      */
     @Query("DELETE FROM synced_cache WHERE mediaStoreId IN (:mediaStoreIds)")
     suspend fun deleteByMediaStoreIds(mediaStoreIds: List<Long>)
+
+    /** Distinct non-null MediaStore ids currently cached — the reconcile pass diffs
+     *  these against the device enumeration to prune rows for locally-deleted media. */
+    @Query("SELECT DISTINCT mediaStoreId FROM synced_cache WHERE mediaStoreId IS NOT NULL")
+    suspend fun allMediaStoreIds(): List<Long>
 }

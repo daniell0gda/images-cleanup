@@ -5,6 +5,5 @@
 db index should be refreshed so that images on the timeline would be refreshed too.
 Additionally images timeline should be refreshed right away when tab is opened (first time or after going back from other tab)
 when create link is created then default album name should be selected
-improve video loading time before streaming
 when unshare album is clicked it does work but in the ui button doesn't turn normal (not highlited)
 except copy link we should have "share" feature showing android share to apps options

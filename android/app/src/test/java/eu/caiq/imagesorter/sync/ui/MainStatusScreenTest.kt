@@ -716,6 +716,17 @@ class MainStatusScreenTest {
     }
 
     @Test
+    fun syncNowButtonShowsSyncingLabelWhileItemInFlight() {
+        // The in-flight button carries the "Syncing…" label (not "Sync Now") from the
+        // moment the item is tapped, so the user sees the action took effect.
+        setSyncItemScreen(syncingIds = setOf(20L))
+        composeRule.onAllNodesWithTag(STATUS_TILE_TAG)[1].performClick()
+        composeRule.onNodeWithTag(SYNC_NOW_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithText("Syncing…").assertIsDisplayed()
+        composeRule.onNodeWithText("Sync Now").assertDoesNotExist()
+    }
+
+    @Test
     fun syncNowButtonReEnablesWhenInFlightStateClears() {
         val ids = androidx.compose.runtime.mutableStateOf(setOf(20L))
         composeRule.setContent {

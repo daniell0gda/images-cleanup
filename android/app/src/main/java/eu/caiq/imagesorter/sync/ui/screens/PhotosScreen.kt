@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -322,6 +324,34 @@ fun PhotosScreen(
     val deviceName = remember { android.os.Build.MODEL }
     val inSelectionMode = selectedIds.isNotEmpty()
 
+    // Share now: create a default-named album from [ids], share it, and open the system
+    // share sheet — with a blocking spinner from the tap until the link is ready. Shared by
+    // the grid selection bar and the single-item preview action so both behave identically.
+    val shareNow: (List<Long>) -> Unit = { ids ->
+        if (albumRepo != null && ids.isNotEmpty()) {
+            sharing = true
+            scope.launch {
+                runCatching {
+                    runAlbumNameAction(
+                        action = AlbumSelectionAction.ShareNow,
+                        name = defaultAlbumName(java.time.LocalDate.now()),
+                        mediaIds = ids,
+                        createdBy = deviceName,
+                        repo = albumRepo,
+                        // Drop the spinner the instant the link is ready, then hand off
+                        // to the system share sheet.
+                        onShareUrl = { url ->
+                            sharing = false
+                            shareLinkViaChooser(context, url)
+                        },
+                    )
+                }
+                // Also clear it on failure so the spinner never sticks.
+                sharing = false
+            }
+        }
+    }
+
     val repository = remember(locator) { runCatching { locator.mediaRepository }.getOrNull() }
     val syncEngine = remember(locator) { runCatching { locator.syncEngine }.getOrNull() }
     // Load the available-dates tree once so adjacent-segment navigation can resolve against it.
@@ -441,32 +471,10 @@ fun PhotosScreen(
                         AlbumSelectionAction.AddToAlbum -> addPickerOpen = true
                         // Share now is instant: no name prompt — create a default-named
                         // album, share it, and open the system share sheet straight away.
-                        // A blocking spinner shows from the tap until the link is ready.
                         AlbumSelectionAction.ShareNow -> {
                             val ids = selectedIds.toList()
                             selectedIds = emptySet()
-                            if (albumRepo != null) {
-                                sharing = true
-                                scope.launch {
-                                    runCatching {
-                                        runAlbumNameAction(
-                                            action = AlbumSelectionAction.ShareNow,
-                                            name = defaultAlbumName(java.time.LocalDate.now()),
-                                            mediaIds = ids,
-                                            createdBy = deviceName,
-                                            repo = albumRepo,
-                                            // Drop the spinner the instant the link is ready,
-                                            // then hand off to the system share sheet.
-                                            onShareUrl = { url ->
-                                                sharing = false
-                                                shareLinkViaChooser(context, url)
-                                            },
-                                        )
-                                    }
-                                    // Also clear it on failure so the spinner never sticks.
-                                    sharing = false
-                                }
-                            }
+                            shareNow(ids)
                         }
                         AlbumSelectionAction.CreateAlbum -> nameDialogAction = action
                     }
@@ -521,18 +529,31 @@ fun PhotosScreen(
             modifier = Modifier.align(Alignment.BottomCenter),
         )
 
+        // Delete keeps the preview open: as the deleted item leaves [mediaItems] the pager
+        // (its page count follows the list) slides to the next item, so the viewer stays up
+        // showing the neighbour instead of dropping back to the grid. This effect closes it
+        // only once the last item is gone.
+        LaunchedEffect(mediaItems.isEmpty()) {
+            if (mediaItems.isEmpty()) previewIndex = null
+        }
         val idx = previewIndex
-        if (idx != null && idx in mediaItems.indices) {
+        if (idx != null && mediaItems.isNotEmpty()) {
             PhotosPreview(
                 items = mediaItems,
-                startIndex = idx,
+                startIndex = idx.coerceIn(0, mediaItems.size - 1),
                 deleting = deletingPreview,
                 onClose = { previewIndex = null },
+                // Share the single previewed item, reusing the same instant-share flow and
+                // blocking spinner as the grid selection bar.
+                onShare = { sharedIndex ->
+                    mediaItems.getOrNull(sharedIndex)?.let { shareNow(listOf(it.id)) }
+                },
                 onDelete = { deletedIndex ->
                     // Delete the item server-side (original file + index) and drop its cached
                     // Room row; that invalidates the timeline paging source so the item leaves
-                    // the grid. The trash icon shows a spinner until it resolves; on success the
-                    // preview closes, revealing the refreshed timeline without the deleted item.
+                    // the grid. The trash icon shows a spinner until it resolves; the preview
+                    // stays open and the pager advances to the next item (closing only when the
+                    // deleted item was the last one — see the LaunchedEffect above).
                     val entity = mediaItems.getOrNull(deletedIndex)
                     if (entity != null && repository != null && !deletingPreview) {
                         deletingPreview = true
@@ -543,13 +564,11 @@ fun PhotosScreen(
                                 kotlinx.coroutines.withTimeout(30_000) { repository.delete(entity.id) }
                             }
                             deletingPreview = false
-                            result
-                                .onSuccess { previewIndex = null }
-                                .onFailure { e ->
-                                    snackbarHostState.showSnackbar(
-                                        "Delete failed: ${e.message ?: e.javaClass.simpleName}",
-                                    )
-                                }
+                            result.onFailure { e ->
+                                snackbarHostState.showSnackbar(
+                                    "Delete failed: ${e.message ?: e.javaClass.simpleName}",
+                                )
+                            }
                         }
                     }
                 },
@@ -724,6 +743,7 @@ fun PhotosPreview(
     onClose: () -> Unit,
     onDelete: (mediaIndex: Int) -> Unit,
     modifier: Modifier = Modifier,
+    onShare: (mediaIndex: Int) -> Unit = {},
     deleting: Boolean = false,
     image: @Composable (MediaEntity) -> Unit,
 ) {
@@ -734,15 +754,24 @@ fun PhotosPreview(
         modifier = modifier,
         zoomable = { it.kind != KIND_VIDEO },
         actions = { index ->
-            if (deleting) {
-                CircularProgressIndicator(
-                    color = Color.White,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(24.dp),
-                )
-            } else {
-                IconButton(onClick = { onDelete(index) }) {
-                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                IconButton(onClick = { onShare(index) }) {
+                    Icon(Icons.Rounded.Share, contentDescription = "Share", tint = Color.White)
+                }
+                if (deleting) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(24.dp),
+                    )
+                } else {
+                    IconButton(onClick = { onDelete(index) }) {
+                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
+                    }
                 }
             }
         },

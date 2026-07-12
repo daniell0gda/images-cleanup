@@ -559,6 +559,51 @@ class MainViewModelTest {
     }
 
     @Test
+    fun inFlightItemStaysDisabledAcrossPendingThenInProgressThenClearsOnSynced() {
+        val vm = mainVm()
+        // Tap: the row is PENDING → stays in flight (button disabled), marked activated.
+        val (afterTap, act1) = vm.nextSyncing(setOf(70L), emptySet(), listOf(row(70L, SyncStatus.PENDING)))
+        assertEquals("PENDING keeps the button disabled", setOf(70L), afterTap)
+
+        // The (force_place or split) session picks it up: IN_PROGRESS → still in flight.
+        val (uploading, act2) = vm.nextSyncing(afterTap, act1, listOf(row(70L, SyncStatus.IN_PROGRESS)))
+        assertEquals("IN_PROGRESS keeps the button disabled", setOf(70L), uploading)
+
+        // It finishes: SYNCED → leaves the in-flight set so the button resolves.
+        val (afterSync, _) = vm.nextSyncing(uploading, act2, listOf(row(70L, SyncStatus.SYNCED)))
+        assertTrue("SYNCED re-resolves the button (no longer syncing)", afterSync.isEmpty())
+    }
+
+    @Test
+    fun dedupedTappedItemLeavesInFlightWhenTheLiveSessionReportsItsOutcome() {
+        // Criterion: under the split, a Sync Now tap can dedupe onto an item the LIVE
+        // session is already uploading — so its terminal state is reported by the live
+        // session, not the force_place one. At tap the row is already IN_PROGRESS.
+        val vm = mainVm()
+        val (afterTap, act1) =
+            vm.nextSyncing(setOf(80L), emptySet(), listOf(row(80L, SyncStatus.IN_PROGRESS)))
+        assertEquals("deduped-onto-live item is in flight and disabled", setOf(80L), afterTap)
+
+        // The live session completes the upload → the row flips to SYNCED and the id
+        // must leave syncingNow, so the button is never stuck disabled.
+        val (afterSync, _) = vm.nextSyncing(afterTap, act1, listOf(row(80L, SyncStatus.SYNCED)))
+        assertTrue("live-session outcome resolves the button", afterSync.isEmpty())
+    }
+
+    @Test
+    fun dedupedTappedItemReEnablesWhenTheLiveSessionReportsAFailure() {
+        // The same dedupe case, but the live session fails the item: because it was seen
+        // active (IN_PROGRESS) since the tap, a fresh FAILED drops the id → button re-enables.
+        val vm = mainVm()
+        val (afterTap, act1) =
+            vm.nextSyncing(setOf(90L), emptySet(), listOf(row(90L, SyncStatus.IN_PROGRESS)))
+        assertEquals(setOf(90L), afterTap)
+
+        val (afterFail, _) = vm.nextSyncing(afterTap, act1, listOf(row(90L, SyncStatus.FAILED)))
+        assertTrue("a live-session failure resolves and re-enables the button", afterFail.isEmpty())
+    }
+
+    @Test
     fun inFlightItemStaysForInitialFailedButClearsOnAFreshFailure() {
         val vm = mainVm()
         // Retry of a FAILED row: at tap the row is still FAILED (never seen active) → keep.

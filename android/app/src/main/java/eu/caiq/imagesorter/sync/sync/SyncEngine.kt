@@ -87,6 +87,13 @@ class SyncEngine(
     // the guard is free.
     private val overrideQueue = java.util.concurrent.ConcurrentLinkedQueue<MediaItem>()
 
+    // Set when a "Sync Now" override lands while a pass is actively uploading. The
+    // active pass reads it to preempt itself: files that have not yet started
+    // uploading bail and stay PENDING (see uploadAll) so the override can jump ahead
+    // in its own force_place session before those files resume. Reset at the start of
+    // each upload pass so a fresh pass is never wrongly preempted.
+    @Volatile private var preemptRequested = false
+
     /**
      * Run one sync. Safe to call again to resume — discovery + the persisted
      * pending queue make a re-run idempotent.
@@ -121,7 +128,7 @@ class SyncEngine(
                     return
                 }
 
-                uploadPending(profileId, toUpload)
+                uploadWithOverrides(profileId, toUpload)
                 advanceWatermark()
 
                 _progress.value = _progress.value.copy(phase = SyncPhase.DONE)
@@ -206,6 +213,12 @@ class SyncEngine(
         // to the camera folder so app media (Viber, screenshots, etc.) is never
         // backed up — only photos/videos the camera produced.
         val items = scanner.enumerate(sinceGeneration = sinceGeneration, folders = CAMERA_FOLDERS)
+        // A full enumerate is the complete current camera set, so prune cache/queue
+        // rows for media that has since left the device (deleted from the gallery /
+        // file manager) — otherwise a locally-deleted file lingers in the working set
+        // forever. Skipped on an incremental enumerate, which sees only what changed
+        // since the watermark and would wrongly prune everything else.
+        if (sinceGeneration < 0) pruneDeletedMedia(items)
         val byIdentity = items.associateBy { it.identity }
 
         _progress.value = SyncProgress(phase = SyncPhase.RECONCILING, totalFiles = items.size)
@@ -279,6 +292,24 @@ class SyncEngine(
         return notSynced
     }
 
+    /**
+     * Drop cache + queue rows for media no longer on the device. The [present] list
+     * is a full camera enumeration, so any cached MediaStore id absent from it is a
+     * file the user deleted locally; its synced/pending rows are removed so it leaves
+     * the working set. Deletes are chunked to stay under SQLite's bound-variable
+     * limit when a large batch of files was removed at once.
+     */
+    private suspend fun pruneDeletedMedia(present: List<MediaItem>) {
+        val presentIds = present.mapTo(HashSet()) { it.mediaStoreId }
+        val cachedIds = pendingUploadDao.allMediaStoreIds() + syncedCacheDao.allMediaStoreIds()
+        val staleIds = cachedIds.toHashSet().filter { it !in presentIds }
+        if (staleIds.isEmpty()) return
+        staleIds.chunked(PRUNE_BATCH).forEach { batch ->
+            pendingUploadDao.deleteByMediaStoreIds(batch)
+            syncedCacheDao.deleteByMediaStoreIds(batch)
+        }
+    }
+
     // --- Sessions + upload ----------------------------------------------------
 
     private suspend fun openSession(profileId: String, forcePlace: Boolean = false): String =
@@ -303,9 +334,16 @@ class SyncEngine(
         items.forEach { item ->
             syncedCacheDao.delete(item.identity.name, item.identity.createdOn, item.identity.size)
         }
-        pendingUploadDao.upsert(items.map { it.toPending() })
+        // Queue only files not already pending. Re-queuing a file the live session is
+        // mid-upload would mint a second row (fresh fileId) for the same media file
+        // and let it upload twice; leaving the existing row untouched dedupes it.
+        val alreadyPending = pendingUploadDao.pending().map { it.mediaStoreId }.toHashSet()
+        pendingUploadDao.upsert(items.filter { it.mediaStoreId !in alreadyPending }.map { it.toPending() })
 
         overrideQueue.addAll(items)
+        // Signal any active pass to preempt itself so this override can jump ahead of
+        // the still-PENDING files instead of waiting for the whole run to finish.
+        preemptRequested = true
         drainOverrides()
     }
 
@@ -318,15 +356,50 @@ class SyncEngine(
         while (overrideQueue.isNotEmpty()) {
             if (!active.compareAndSet(false, true)) return
             try {
-                val batch = ArrayList<MediaItem>()
-                while (true) {
-                    batch.add(overrideQueue.poll() ?: break)
-                }
-                if (batch.isNotEmpty()) forcePlaceUpload(batch)
+                forcePlaceQueued()
             } finally {
                 active.set(false)
             }
         }
+    }
+
+    /**
+     * Upload [initial] plus any "Sync Now" overrides that land mid-pass, all within
+     * this one run and serialized so only ever one session is open. An override
+     * preempts the current pass ([preemptRequested]): files not yet started stay
+     * PENDING, the in-flight files finish, the partial session is completed, the
+     * override runs in its own force_place session (jumping ahead), then the
+     * bailed-out files resume in a fresh session on the next loop turn.
+     */
+    private suspend fun uploadWithOverrides(profileId: String, initial: List<MediaItem>) {
+        var remaining = initial
+        while (remaining.isNotEmpty()) {
+            preemptRequested = false
+            val bailed = uploadPending(profileId, remaining)
+            forcePlaceQueued()
+            remaining = bailed
+        }
+    }
+
+    /**
+     * Force-place every queued "Sync Now" override in a single force_place session,
+     * skipping any whose file the live session already uploaded/placed (it is no
+     * longer PENDING), so the same physical file is never uploaded or placed twice.
+     */
+    private suspend fun forcePlaceQueued() {
+        val overrides = ArrayList<MediaItem>()
+        while (true) {
+            overrides.add(overrideQueue.poll() ?: break)
+        }
+        if (overrides.isEmpty()) return
+        // Skip any override whose file the live session already placed (it is no
+        // longer PENDING), so the same physical file is never uploaded/placed twice.
+        val stillPending = pendingUploadDao.pending()
+            .filter { it.status == SyncStatus.PENDING.name }
+            .map { it.mediaStoreId }
+            .toHashSet()
+        val toPlace = overrides.filter { it.mediaStoreId in stillPending }
+        if (toPlace.isNotEmpty()) forcePlaceUpload(toPlace)
     }
 
     /**
@@ -340,9 +413,12 @@ class SyncEngine(
         if (profileId.isNullOrEmpty()) return
         val total = items.size
         val completed = java.util.concurrent.atomic.AtomicInteger(0)
+        // Reset progress for this session so completedFiles never trails a larger
+        // total left by a preempted pass (keeps completedFiles <= totalFiles).
+        _progress.value = SyncProgress(phase = SyncPhase.UPLOADING, totalFiles = total)
         for (batch in items.chunked(uploadBatchSize)) {
             val sessionId = openSession(profileId, forcePlace = true)
-            uploadAll(sessionId, batch, total, completed)
+            uploadAll(sessionId, batch, total, completed, preemptible = false)
             completeAndReportSafely(sessionId)
         }
     }
@@ -358,10 +434,14 @@ class SyncEngine(
      * libraries of thousands of files — and each blocking `complete` call's
      * server-side work stays bounded.
      */
-    private suspend fun uploadPending(profileId: String, items: List<MediaItem>) {
+    private suspend fun uploadPending(profileId: String, items: List<MediaItem>): List<MediaItem> {
         val total = items.size
         val completed = java.util.concurrent.atomic.AtomicInteger(0)
         _progress.value = SyncProgress(phase = SyncPhase.UPLOADING, totalFiles = total)
+
+        // Files that bailed out because a "Sync Now" override preempted the pass; they
+        // stay PENDING and are returned so the caller can resume them in a fresh pass.
+        val bailed = ArrayList<MediaItem>()
 
         val sessionByMediaId = pendingUploadDao.pending()
             .mapNotNull { row -> row.sessionId?.let { row.mediaStoreId to it } }
@@ -371,15 +451,24 @@ class SyncEngine(
         // Resume interrupted sessions first so already-uploaded bytes are kept.
         resumable.groupBy { sessionByMediaId.getValue(it.mediaStoreId) }
             .forEach { (sessionId, group) ->
-                uploadAll(sessionId, group, total, completed)
+                if (preemptRequested) {
+                    bailed += group
+                    return@forEach
+                }
+                bailed += uploadAll(sessionId, group, total, completed)
                 completeAndReportSafely(sessionId)
             }
 
         for (batch in fresh.chunked(uploadBatchSize)) {
+            if (preemptRequested) {
+                bailed += batch
+                continue
+            }
             val sessionId = openSession(profileId)
-            uploadAll(sessionId, batch, total, completed)
+            bailed += uploadAll(sessionId, batch, total, completed)
             completeAndReportSafely(sessionId)
         }
+        return bailed
     }
 
     /** Complete + report, swallowing a timeout so one slow batch never aborts the run. */
@@ -399,17 +488,28 @@ class SyncEngine(
         items: List<MediaItem>,
         total: Int,
         completed: java.util.concurrent.atomic.AtomicInteger,
-    ) = coroutineScope {
+        preemptible: Boolean = true,
+    ): List<MediaItem> = coroutineScope {
         val concurrency = securePrefs.getUploadConcurrency()
         val semaphore = Semaphore(concurrency)
         _progress.value = _progress.value.copy(phase = SyncPhase.UPLOADING, totalFiles = total)
 
         // Reuse persisted file ids so resume keeps the same server-side identity.
         val pendingById = pendingUploadDao.pending().associateBy { it.mediaStoreId }
+        val bailed = java.util.Collections.synchronizedList(ArrayList<MediaItem>())
 
         items.forEach { item ->
             launch {
                 semaphore.withPermit {
+                    // The force_place session is never preemptible: its own items must
+                    // upload even while a "Sync Now" override is still flagged.
+                    if (preemptible && preemptRequested) {
+                        // A "Sync Now" override landed and this file has not started
+                        // uploading (no session/status issued yet), so leave it PENDING
+                        // for the resume pass instead of uploading it into this session.
+                        bailed.add(item)
+                        return@withPermit
+                    }
                     val fileId = pendingById[item.mediaStoreId]?.fileId ?: UUID.randomUUID().toString()
                     pendingUploadDao.setSession(fileId, sessionId)
                     pendingUploadDao.setStatus(fileId, SyncStatus.IN_PROGRESS.name)
@@ -431,6 +531,7 @@ class SyncEngine(
                 }
             }
         }
+        bailed
     }
 
     // --- Complete + report ----------------------------------------------------
@@ -591,6 +692,9 @@ class SyncEngine(
 
     companion object {
         private const val RECONCILE_BATCH = 500
+        // Ids per prune delete — kept well under SQLite's ~999 bound-variable limit
+        // so removing a large batch of locally-deleted media never overflows the IN().
+        private const val PRUNE_BATCH = 500
         // Files per upload session. Each batch is completed and placed server-side
         // before the next, so progress is incremental and each `complete` call's
         // classification work stays bounded (keeping it under the HTTP read timeout).

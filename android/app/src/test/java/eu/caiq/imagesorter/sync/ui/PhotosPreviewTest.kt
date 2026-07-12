@@ -52,6 +52,44 @@ class PhotosPreviewTest {
     }
 
     @Test
+    fun previewSuppliesAShareActionThatRunsWithTheCurrentPageIndex() {
+        val shared = mutableListOf<Int>()
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                PhotosPreview(
+                    items = listOf(img(1), img(2), img(3)),
+                    startIndex = 0,
+                    onClose = {},
+                    onShare = { shared.add(it) },
+                    onDelete = {},
+                ) { Text("img-${it.id}") }
+            }
+        }
+        composeRule.onNodeWithContentDescription("Share").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Share").performClick()
+        assertEquals(listOf(0), shared)
+    }
+
+    @Test
+    fun theShareActionStaysAvailableWhileADeleteIsInFlight() {
+        val shared = mutableListOf<Int>()
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                PhotosPreview(
+                    items = listOf(img(1), img(2)),
+                    startIndex = 0,
+                    deleting = true,
+                    onClose = {},
+                    onShare = { shared.add(it) },
+                    onDelete = {},
+                ) { Text("img-${it.id}") }
+            }
+        }
+        composeRule.onNodeWithContentDescription("Share").performClick()
+        assertEquals(listOf(0), shared)
+    }
+
+    @Test
     fun deletingTheOnlyItemRunsTheHandlerAndDoesNotThrow() {
         val deleted = mutableListOf<Int>()
         composeRule.setContent {

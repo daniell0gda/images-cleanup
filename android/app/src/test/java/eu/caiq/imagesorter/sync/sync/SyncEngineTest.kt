@@ -9,6 +9,8 @@ import eu.caiq.imagesorter.sync.data.api.ChunkUploader
 import eu.caiq.imagesorter.sync.data.api.SyncApi
 import eu.caiq.imagesorter.sync.data.api.dto.ChunkResponse
 import eu.caiq.imagesorter.sync.data.db.AppDatabase
+import eu.caiq.imagesorter.sync.data.db.entity.PendingUploadEntity
+import eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity
 import eu.caiq.imagesorter.sync.data.prefs.SecurePrefs
 import eu.caiq.imagesorter.sync.data.prefs.SyncPrefs
 import eu.caiq.imagesorter.sync.domain.model.Identity
@@ -242,6 +244,83 @@ class SyncEngineTest {
         // Nothing was uploaded.
         assertEquals("discovery must not open an upload session", 0, sessionsOpened.get())
         assertEquals(SyncPhase.IDLE, engine.progress.value.phase)
+    }
+
+    @Test
+    fun discoverPrunesCacheRowsForLocallyDeletedMedia() = runTest {
+        // The user deleted files from the gallery: their MediaStore ids no longer
+        // enumerate, so their stale synced/pending rows must be dropped from the
+        // working set instead of lingering forever.
+        val present = item("present.jpg", 5)
+        val gonePending = item("gone-pending.jpg", 7)
+        val goneSynced = item("gone-synced.jpg", 9)
+        db.pendingUploadDao().upsert(
+            PendingUploadEntity(
+                fileId = "f-gone",
+                mediaStoreId = gonePending.mediaStoreId,
+                name = gonePending.identity.name,
+                createdOn = gonePending.identity.createdOn,
+                size = gonePending.identity.size,
+                mimeType = "image/jpeg",
+                status = "PENDING",
+            ),
+        )
+        db.syncedCacheDao().upsert(
+            SyncedCacheEntity(
+                name = goneSynced.identity.name,
+                createdOn = goneSynced.identity.createdOn,
+                size = goneSynced.identity.size,
+                status = "SYNCED",
+                mediaStoreId = goneSynced.mediaStoreId,
+            ),
+        )
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"present.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                else -> resp("{}")
+            }
+        }
+
+        // Only present.jpg still enumerates from the device.
+        engine(FakeMediaSource(listOf(present)), FakeSyncPrefs()).discover()
+
+        val pendingIds = db.pendingUploadDao().allMediaStoreIds().toSet()
+        val syncedIds = db.syncedCacheDao().allMediaStoreIds().toSet()
+        // The deleted files' rows were pruned; the still-present file remains queued.
+        assertTrue(gonePending.mediaStoreId !in pendingIds)
+        assertTrue(goneSynced.mediaStoreId !in syncedIds)
+        assertTrue(present.mediaStoreId in pendingIds)
+    }
+
+    @Test
+    fun incrementalRunDoesNotPruneMediaMissingFromThePartialEnumerate() = runTest {
+        // An incremental enumerate sees only what changed since the watermark, so it
+        // must NOT be treated as the full device set — otherwise every untouched file
+        // would be wrongly pruned from the cache.
+        val existing = item("existing.jpg", 5)
+        db.syncedCacheDao().upsert(
+            SyncedCacheEntity(
+                name = existing.identity.name,
+                createdOn = existing.identity.createdOn,
+                size = existing.identity.size,
+                status = "SYNCED",
+                mediaStoreId = existing.mediaStoreId,
+            ),
+        )
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp("""{"results":[]}""")
+                else -> resp("{}")
+            }
+        }
+
+        // Incremental enumerate returns nothing new; the cached row must survive.
+        engine(FakeMediaSource(emptyList()), FakeSyncPrefs(mediaGenerationWatermark = 42L))
+            .run(incremental = true)
+
+        assertTrue(existing.mediaStoreId in db.syncedCacheDao().allMediaStoreIds().toSet())
     }
 
     @Test
@@ -1025,11 +1104,18 @@ class SyncEngineTest {
     }
 
     @Test
-    fun overrideUploadIsDeferredNotDroppedWhenAPassIsActiveThenForceUploaded() = runBlocking {
-        // "Sync anyway" during an active pass must not be silently dropped: no
-        // force_place session opens while the engine is busy, but once it is free the
-        // items are force-uploaded (force_place session) and become SYNCED.
-        val work = item("work.jpg", 5)
+    fun overrideMidPassPreemptsLiveSessionThenForcePlacesThenResumes() = runBlocking {
+        // A "Sync Now" override landing while the live session is uploading must:
+        //  - leave files not yet started (w2, w3) PENDING, out of the live session,
+        //  - let the in-flight file (w1) finish and be reported by the partial session,
+        //  - open the force_place session only after the live session is completed
+        //    (never two sessions open at once),
+        //  - force-place the tapped item (np) ahead of the resumed pending files,
+        //  - resume the bailed files in a fresh session within the same run, ending DONE
+        //    with every file synced exactly once.
+        val w1 = item("w1.jpg", 5)
+        val w2 = item("w2.jpg", 5)
+        val w3 = item("w3.jpg", 5)
         val np = item("np.jpg", 6)
         db.syncedCacheDao().upsert(
             eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
@@ -1041,54 +1127,329 @@ class SyncEngineTest {
                 mimeType = np.mimeType,
             ),
         )
-        val forceSessions = java.util.concurrent.atomic.AtomicInteger(0)
+        val open = java.util.concurrent.atomic.AtomicInteger(0)
+        val maxOpen = java.util.concurrent.atomic.AtomicInteger(0)
+        val sessionCounter = java.util.concurrent.atomic.AtomicInteger(0)
+        val uploader = GateAndRecordUploader()
         dispatch { req ->
             val path = req.path!!
             when {
                 path.endsWith("/reconcile") -> resp(
-                    """{"results":[{"name":"work.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                    """{"results":[
+                        {"name":"w1.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"w2.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"w3.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}
+                    ]}""",
+                )
+                path.endsWith("/sessions") -> {
+                    val n = open.incrementAndGet()
+                    maxOpen.updateAndGet { kotlin.math.max(it, n) }
+                    resp("""{"session_id":"sess${sessionCounter.incrementAndGet()}"}""")
+                }
+                path.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                path.endsWith("/files") -> resp("""{"offset":6,"length":6}""")
+                path.endsWith("/complete") -> {
+                    open.decrementAndGet()
+                    resp("""{"status":"complete"}""")
+                }
+                path.endsWith("/outcomes") -> {
+                    val sid = path.substringAfter("/sessions/").substringBefore("/outcomes")
+                    val parts = uploader.namesFor(sid)
+                        .joinToString(",") { """{"file_id":"srv-$it","name":"$it","status":"synced"}""" }
+                    resp("""{"outcomes":[$parts]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+        val engine = engine(FakeMediaSource(listOf(w1, w2, w3)), FakeSyncPrefs(concurrency = 1), uploader = uploader)
+
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val run = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
+        uploader.awaitEntered() // w1 is in flight, holding the only permit
+
+        kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(np)) }
+        uploader.release()
+        run.join()
+
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        val synced = db.syncedCacheDao().syncedItems().map { it.name }.toSet()
+        assertTrue("all files ended synced", synced.containsAll(setOf("w1.jpg", "w2.jpg", "w3.jpg", "np.jpg")))
+        assertTrue("pending drained", db.pendingUploadDao().pending().isEmpty())
+
+        val uploadsPerName = uploader.allNames().groupingBy { it }.eachCount()
+        assertEquals("w1 uploaded exactly once", 1, uploadsPerName["w1.jpg"])
+        assertEquals("w2 uploaded exactly once", 1, uploadsPerName["w2.jpg"])
+        assertEquals("w3 uploaded exactly once", 1, uploadsPerName["w3.jpg"])
+        assertEquals("np uploaded exactly once", 1, uploadsPerName["np.jpg"])
+
+        // Criterion 1 & 2: the preempted live session uploaded only the single
+        // in-flight file; the two not-yet-started work files bailed and stayed PENDING.
+        val sessions = uploader.sessions()
+        val liveSession = sessions.first()
+        assertEquals("only the in-flight file uploaded into the preempted live session", 1, liveSession.size)
+        val bailedWork = setOf("w1.jpg", "w2.jpg", "w3.jpg") - liveSession.toSet()
+        assertEquals("the other two work files bailed out of the live session", 2, bailedWork.size)
+
+        // Criterion 3: only one upload session is ever open at a time.
+        assertEquals("never two sessions open concurrently", 1, maxOpen.get())
+
+        // Criterion 4 & 6: np's force_place session ran ahead of the resumed pending files.
+        bailedWork.forEach { resumed ->
+            assertTrue(
+                "the override jumped ahead of resumed pending file $resumed",
+                uploader.sessionOrderOf("np.jpg") < uploader.sessionOrderOf(resumed),
+            )
+        }
+    }
+
+    /** Gates the first upload to enter and records, per session, the names uploaded. */
+    private class GateAndRecordUploader : ChunkUploader {
+        private val bySession = LinkedHashMap<String, MutableList<String>>()
+        private val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        private val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        private val gated = java.util.concurrent.atomic.AtomicBoolean(false)
+        suspend fun awaitEntered() = entered.await()
+        fun release() = release.complete(Unit)
+        fun namesFor(sessionId: String): List<String> =
+            synchronized(bySession) { bySession[sessionId]?.toList() ?: emptyList() }
+        fun allNames(): List<String> = synchronized(bySession) { bySession.values.flatten() }
+        fun sessions(): List<List<String>> = synchronized(bySession) { bySession.values.map { it.toList() } }
+        fun sessionOrderOf(name: String): Int =
+            synchronized(bySession) { bySession.values.indexOfFirst { it.contains(name) } }
+        override suspend fun uploadChunk(
+            sessionId: String,
+            fileId: String,
+            item: MediaItem,
+            offset: Long,
+            length: Long,
+        ): ChunkResponse {
+            synchronized(bySession) { bySession.getOrPut(sessionId) { mutableListOf() }.add(item.identity.name) }
+            // Hold only the very first file that enters, so with concurrency 1 exactly
+            // one file is in flight when the override lands — independent of the order
+            // the semaphore hands out its single permit.
+            if (gated.compareAndSet(false, true)) {
+                entered.complete(Unit)
+                release.await()
+            }
+            return ChunkResponse(offset = offset + length, length = length)
+        }
+    }
+
+    @Test
+    fun overrideForItemAlreadyUploadingInLiveSessionIsNotPlacedTwice() = runBlocking {
+        // The user taps "Sync Now" on the very file the live session is already
+        // uploading. The override must not upload or place that physical file a
+        // second time: it uploads exactly once and no force_place session re-sends it.
+        val w = item("w.jpg", 5)
+        val forceSessions = java.util.concurrent.atomic.AtomicInteger(0)
+        val uploader = GateAndRecordUploader()
+        dispatch { req ->
+            val path = req.path!!
+            when {
+                path.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"w.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
                 )
                 path.endsWith("/sessions") -> {
                     if (req.body.readUtf8().contains("\"force_place\":true")) {
                         forceSessions.incrementAndGet()
-                        resp("""{"session_id":"npsess"}""")
+                        resp("""{"session_id":"force${forceSessions.get()}"}""")
                     } else {
-                        resp("""{"session_id":"worksess"}""")
+                        resp("""{"session_id":"live"}""")
                     }
                 }
                 path.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                path.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
+                path.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                path.endsWith("/outcomes") -> {
+                    val sid = path.substringAfter("/sessions/").substringBefore("/outcomes")
+                    val parts = uploader.namesFor(sid)
+                        .joinToString(",") { """{"file_id":"srv-$it","name":"$it","status":"synced"}""" }
+                    resp("""{"outcomes":[$parts]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+        val engine = engine(FakeMediaSource(listOf(w)), FakeSyncPrefs(concurrency = 1), uploader = uploader)
+
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val run = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
+        uploader.awaitEntered() // w is in flight in the live session
+
+        kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(w)) }
+        uploader.release()
+        run.join()
+
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        assertEquals(
+            "the same physical file is uploaded exactly once across the live and force_place sessions",
+            1,
+            uploader.allNames().count { it == "w.jpg" },
+        )
+        assertTrue("w ended synced", db.syncedCacheDao().syncedItems().any { it.name == "w.jpg" })
+        assertTrue("pending drained", db.pendingUploadDao().pending().none { it.name == "w.jpg" })
+    }
+
+    @Test
+    fun progressStaysCoherentAcrossThePreemptOverrideResumeSplit() = runBlocking {
+        // Through the whole preempt → override → resume split the progress flow must
+        // stay coherent: completedFiles never exceeds totalFiles, and the run's final
+        // phase is DONE (no corruption from carrying one pass's counters into another).
+        val w1 = item("w1.jpg", 5)
+        val w2 = item("w2.jpg", 5)
+        val w3 = item("w3.jpg", 5)
+        val np = item("np.jpg", 6)
+        db.syncedCacheDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = np.identity.name,
+                createdOn = np.identity.createdOn,
+                size = np.identity.size,
+                status = "UNCLASSIFIED",
+                mediaStoreId = np.mediaStoreId,
+                mimeType = np.mimeType,
+            ),
+        )
+        val uploader = GateAndRecordUploader()
+        dispatch { req ->
+            val path = req.path!!
+            when {
+                path.endsWith("/reconcile") -> resp(
+                    """{"results":[
+                        {"name":"w1.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"w2.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"w3.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}
+                    ]}""",
+                )
+                path.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                path.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
                 path.endsWith("/files") -> resp("""{"offset":6,"length":6}""")
                 path.endsWith("/complete") -> resp("""{"status":"complete"}""")
-                path.contains("npsess") && path.endsWith("/outcomes") ->
-                    resp("""{"outcomes":[{"file_id":"srv","name":"np.jpg","status":"synced"}]}""")
                 path.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
                 else -> resp("{}")
             }
         }
-        val gate = GateUploader()
-        val engine = engine(FakeMediaSource(listOf(work)), FakeSyncPrefs(concurrency = 1), uploader = gate)
+        val engine = engine(FakeMediaSource(listOf(w1, w2, w3)), FakeSyncPrefs(concurrency = 1), uploader = uploader)
+
+        val violations = java.util.Collections.synchronizedList(mutableListOf<String>())
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val collector = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            engine.progress.collect { p ->
+                if (p.completedFiles > p.totalFiles) {
+                    violations.add("completed=${p.completedFiles} > total=${p.totalFiles}")
+                }
+            }
+        }
+
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val run = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
+        uploader.awaitEntered()
+        kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(np)) }
+        uploader.release()
+        run.join()
+        collector.cancel()
+
+        assertTrue("completedFiles never exceeded totalFiles: $violations", violations.isEmpty())
+        assertEquals("the run ends in DONE", SyncPhase.DONE, engine.progress.value.phase)
+        assertTrue(
+            "final completedFiles within totalFiles",
+            engine.progress.value.completedFiles <= engine.progress.value.totalFiles,
+        )
+    }
+
+    @Test
+    fun overrideUploadIsDeferredNotDroppedWhenAPassIsActiveThenForceUploaded() = runBlocking {
+        // "Sync Now" during an active pass is never dropped and never opens a second
+        // concurrent session. Under the preempt-and-jump-ahead semantics: no force_place
+        // session opens while the live session is still uploading; once the in-flight
+        // file finishes and the live session is completed, the override runs in its own
+        // force_place session AHEAD of the still-PENDING work file, which then resumes.
+        val workInFlight = item("work.jpg", 5)
+        val workPending = item("later.jpg", 5)
+        val np = item("np.jpg", 6)
+        db.syncedCacheDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = np.identity.name,
+                createdOn = np.identity.createdOn,
+                size = np.identity.size,
+                status = "UNCLASSIFIED",
+                mediaStoreId = np.mediaStoreId,
+                mimeType = np.mimeType,
+            ),
+        )
+        val open = java.util.concurrent.atomic.AtomicInteger(0)
+        val maxOpen = java.util.concurrent.atomic.AtomicInteger(0)
+        val forceSessions = java.util.concurrent.atomic.AtomicInteger(0)
+        val sessionCounter = java.util.concurrent.atomic.AtomicInteger(0)
+        val uploader = GateAndRecordUploader()
+        dispatch { req ->
+            val path = req.path!!
+            when {
+                path.endsWith("/reconcile") -> resp(
+                    """{"results":[
+                        {"name":"work.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false},
+                        {"name":"later.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}
+                    ]}""",
+                )
+                path.endsWith("/sessions") -> {
+                    val n = open.incrementAndGet()
+                    maxOpen.updateAndGet { kotlin.math.max(it, n) }
+                    if (req.body.readUtf8().contains("\"force_place\":true")) forceSessions.incrementAndGet()
+                    resp("""{"session_id":"sess${sessionCounter.incrementAndGet()}"}""")
+                }
+                path.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                path.endsWith("/files") -> resp("""{"offset":6,"length":6}""")
+                path.endsWith("/complete") -> {
+                    open.decrementAndGet()
+                    resp("""{"status":"complete"}""")
+                }
+                path.endsWith("/outcomes") -> {
+                    val sid = path.substringAfter("/sessions/").substringBefore("/outcomes")
+                    val parts = uploader.namesFor(sid)
+                        .joinToString(",") { """{"file_id":"srv-$it","name":"$it","status":"synced"}""" }
+                    resp("""{"outcomes":[$parts]}""")
+                }
+                else -> resp("{}")
+            }
+        }
+        val engine = engine(FakeMediaSource(listOf(workInFlight, workPending)), FakeSyncPrefs(concurrency = 1), uploader = uploader)
 
         @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
         val first = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
-        gate.awaitEntered() // run() holds the guard, blocked mid-upload
+        uploader.awaitEntered() // the live session is mid-upload, holding the only permit
 
         kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(np)) }
-        assertEquals("force upload is deferred, not run, while a pass is active", 0, forceSessions.get())
+        assertEquals("no force_place session opens while the live session is mid-upload", 0, forceSessions.get())
 
-        gate.release()
+        uploader.release()
         first.join()
 
-        assertTrue("force_place session opened once the engine was free", forceSessions.get() >= 1)
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        assertEquals("force_place session opened once the live session was completed", 1, forceSessions.get())
+        assertEquals("never two sessions open concurrently", 1, maxOpen.get())
+        // Never dropped: the override ends SYNCED.
         val row = db.syncedCacheDao().observeAll().first().firstOrNull { it.name == "np.jpg" }
         assertEquals("overridden item becomes SYNCED and leaves the Not People set", "SYNCED", row?.status)
+        // Whichever work file was not the in-flight one bailed and resumed after np.
+        val bailedWork = setOf("work.jpg", "later.jpg") - uploader.sessions().first().toSet()
+        assertEquals("one work file bailed out of the preempted live session", 1, bailedWork.size)
+        bailedWork.forEach { name ->
+            assertTrue(
+                "the override jumped ahead of the still-pending work file $name",
+                uploader.sessionOrderOf("np.jpg") < uploader.sessionOrderOf(name),
+            )
+        }
+        assertTrue(
+            "the preempted work file still finished",
+            db.syncedCacheDao().syncedItems().map { it.name }.containsAll(bailedWork),
+        )
     }
 
     @Test
     fun severalOverridesRequestedWhileAPassIsActiveAreAllDeferredThenForceUploaded() = runBlocking {
-        // "Sync Now" tapped several times while a sync pass is active: every request
-        // must be deferred via the override queue (never dropped) and, once the engine
-        // is free, all of them are force-place-uploaded and flip to SYNCED.
-        val work = item("work.jpg", 5)
+        // Several "Sync Now" taps during one active pass: each is force-uploaded exactly
+        // once (none dropped) and jumps ahead of the still-PENDING work file, all without
+        // ever opening a second concurrent session.
+        val workInFlight = item("work.jpg", 7)
+        val workPending = item("later.jpg", 7)
         val a = item("a.jpg", 6)
         val b = item("b.jpg", 7)
         listOf(a, b).forEach { np ->
@@ -1103,55 +1464,79 @@ class SyncEngineTest {
                 ),
             )
         }
+        val open = java.util.concurrent.atomic.AtomicInteger(0)
+        val maxOpen = java.util.concurrent.atomic.AtomicInteger(0)
         val forceSessions = java.util.concurrent.atomic.AtomicInteger(0)
+        val sessionCounter = java.util.concurrent.atomic.AtomicInteger(0)
+        val uploader = GateAndRecordUploader()
         dispatch { req ->
             val path = req.path!!
             when {
                 path.endsWith("/reconcile") -> resp(
-                    """{"results":[{"name":"work.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                    """{"results":[
+                        {"name":"work.jpg","created_on":"2024-01-01T00:00:00","size":7,"already_synced":false},
+                        {"name":"later.jpg","created_on":"2024-01-01T00:00:00","size":7,"already_synced":false}
+                    ]}""",
                 )
                 path.endsWith("/sessions") -> {
-                    if (req.body.readUtf8().contains("\"force_place\":true")) {
-                        forceSessions.incrementAndGet()
-                        resp("""{"session_id":"npsess"}""")
-                    } else {
-                        resp("""{"session_id":"worksess"}""")
-                    }
+                    val n = open.incrementAndGet()
+                    maxOpen.updateAndGet { kotlin.math.max(it, n) }
+                    if (req.body.readUtf8().contains("\"force_place\":true")) forceSessions.incrementAndGet()
+                    resp("""{"session_id":"sess${sessionCounter.incrementAndGet()}"}""")
                 }
                 path.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
                 path.endsWith("/files") -> resp("""{"offset":7,"length":7}""")
-                path.endsWith("/complete") -> resp("""{"status":"complete"}""")
-                path.contains("npsess") && path.endsWith("/outcomes") -> resp(
-                    """{"outcomes":[
-                        {"file_id":"x","name":"a.jpg","status":"synced"},
-                        {"file_id":"y","name":"b.jpg","status":"synced"}
-                    ]}""",
-                )
-                path.endsWith("/outcomes") -> resp("""{"outcomes":[]}""")
+                path.endsWith("/complete") -> {
+                    open.decrementAndGet()
+                    resp("""{"status":"complete"}""")
+                }
+                path.endsWith("/outcomes") -> {
+                    val sid = path.substringAfter("/sessions/").substringBefore("/outcomes")
+                    val parts = uploader.namesFor(sid)
+                        .joinToString(",") { """{"file_id":"srv-$it","name":"$it","status":"synced"}""" }
+                    resp("""{"outcomes":[$parts]}""")
+                }
                 else -> resp("{}")
             }
         }
-        val gate = GateUploader()
-        val engine = engine(FakeMediaSource(listOf(work)), FakeSyncPrefs(concurrency = 1), uploader = gate)
+        val engine = engine(FakeMediaSource(listOf(workInFlight, workPending)), FakeSyncPrefs(concurrency = 1), uploader = uploader)
 
         @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
         val first = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) { engine.run() }
-        gate.awaitEntered() // run() holds the guard, blocked mid-upload
+        uploader.awaitEntered() // the live session is mid-upload, holding the only permit
 
         // Two separate "Sync Now" requests land while the pass is active.
         kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(a)) }
         kotlinx.coroutines.withTimeout(5_000) { engine.overrideUpload(listOf(b)) }
-        assertEquals("both requests are deferred, none run while the pass is active", 0, forceSessions.get())
+        assertEquals("no force_place session opens while the live session is mid-upload", 0, forceSessions.get())
 
-        gate.release()
+        uploader.release()
         first.join()
 
-        assertTrue("deferred overrides are force-uploaded once the engine is free", forceSessions.get() >= 1)
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        assertEquals("never two sessions open concurrently", 1, maxOpen.get())
+        // None dropped, none duplicated: each override uploaded exactly once and SYNCED.
+        val uploadsPerName = uploader.allNames().groupingBy { it }.eachCount()
+        assertEquals("a force-uploaded exactly once", 1, uploadsPerName["a.jpg"])
+        assertEquals("b force-uploaded exactly once", 1, uploadsPerName["b.jpg"])
         val synced = db.syncedCacheDao().observeAll().first()
             .filter { it.status == "SYNCED" }
             .map { it.name }
             .toSet()
-        assertTrue("both deferred items ended up SYNCED", synced.containsAll(setOf("a.jpg", "b.jpg")))
+        assertTrue("both overrides ended up SYNCED", synced.containsAll(setOf("a.jpg", "b.jpg")))
+        // Both jumped ahead of whichever work file bailed out of the live session.
+        val bailedWork = setOf("work.jpg", "later.jpg") - uploader.sessions().first().toSet()
+        assertEquals("one work file bailed out of the preempted live session", 1, bailedWork.size)
+        bailedWork.forEach { name ->
+            assertTrue(
+                "override a jumped ahead of the still-pending work file $name",
+                uploader.sessionOrderOf("a.jpg") < uploader.sessionOrderOf(name),
+            )
+            assertTrue(
+                "override b jumped ahead of the still-pending work file $name",
+                uploader.sessionOrderOf("b.jpg") < uploader.sessionOrderOf(name),
+            )
+        }
     }
 
     @Test

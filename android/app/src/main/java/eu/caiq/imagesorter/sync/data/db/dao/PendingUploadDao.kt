@@ -43,6 +43,11 @@ interface PendingUploadDao {
     @Query("DELETE FROM pending_upload WHERE mediaStoreId IN (:mediaStoreIds)")
     suspend fun deleteByMediaStoreIds(mediaStoreIds: List<Long>)
 
+    /** Distinct MediaStore ids currently queued — the reconcile pass diffs these
+     *  against the device enumeration to prune rows for locally-deleted media. */
+    @Query("SELECT DISTINCT mediaStoreId FROM pending_upload")
+    suspend fun allMediaStoreIds(): List<Long>
+
     @Query("DELETE FROM pending_upload")
     suspend fun clear()
 }
