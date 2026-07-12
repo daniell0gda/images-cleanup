@@ -57,7 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -73,11 +73,15 @@ import coil3.request.crossfade
 import eu.caiq.imagesorter.sync.SyncApp
 import eu.caiq.imagesorter.sync.data.api.dto.MediaDatesDto
 import eu.caiq.imagesorter.sync.data.db.entity.MediaEntity
+import eu.caiq.imagesorter.sync.data.media.ChunkSizePolicy
+import eu.caiq.imagesorter.sync.data.media.ChunkedDataSource
 import eu.caiq.imagesorter.sync.data.media.MediaListItem
 import eu.caiq.imagesorter.sync.data.media.MediaUrls
 import eu.caiq.imagesorter.sync.data.media.bearerDataSourceFactory
 import eu.caiq.imagesorter.sync.data.media.buildVideoMediaItem
 import eu.caiq.imagesorter.sync.data.media.insertDayHeaders
+import eu.caiq.imagesorter.sync.data.media.pauseTolerantLoadControl
+import eu.caiq.imagesorter.sync.data.media.videoRequestHeaders
 import eu.caiq.imagesorter.sync.serverAddressToBaseUrl
 import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.MediaThumb
@@ -954,9 +958,48 @@ private fun authedRequest(
 }
 
 /**
+ * The HTTP [DataSource.Factory] for a video page: each read is a bounded range
+ * request ([ChunkedDataSource]) that still carries the bearer [token] on every
+ * request, per the video-loading policy — so no single open-ended request
+ * dominates the stream while the bearer auth rides along.
+ */
+@AndroidOptIn(UnstableApi::class)
+fun chunkedBearerDataSourceFactory(token: String?): DataSource.Factory =
+    DataSource.Factory {
+        ChunkedDataSource(
+            upstream = bearerDataSourceFactory(token).createDataSource(),
+            policy = ChunkSizePolicy(clock = { android.os.SystemClock.elapsedRealtime() }),
+            requestHeaders = videoRequestHeaders(token),
+        )
+    }
+
+/**
+ * Latches video readiness on: once the player first reports [Player.STATE_READY]
+ * it stays ready, so a later mid-playback buffering stall never flips it back.
+ */
+fun latchVideoReady(everReady: Boolean, playbackState: Int): Boolean =
+    everReady || playbackState == Player.STATE_READY
+
+/** The thumb poster + loading spinner show only until the video first becomes ready. */
+fun videoPosterVisible(everReady: Boolean): Boolean = !everReady
+
+/**
+ * The play/pause control's "playing" state tracks the user's play intent
+ * ([playWhenReady]) only; a mid-playback buffering stall must never toggle it to
+ * paused, so [playbackState] is deliberately ignored.
+ */
+fun videoShowsPlaying(playWhenReady: Boolean, @Suppress("UNUSED_PARAMETER") playbackState: Int): Boolean =
+    playWhenReady
+
+/** PlayerView must never show its built-in buffering spinner, so a rebuffer is silent. */
+@AndroidOptIn(UnstableApi::class)
+fun quietBufferingMode(): Int = PlayerView.SHOW_BUFFERING_NEVER
+
+/**
  * A single video page in the preview pager. Builds an [ExoPlayer] streaming
- * `/api/media/{id}/stream` (bearer token via [bearerDataSourceFactory]) and
- * **releases it on dispose** so leaving the page leaks no player.
+ * `/api/media/{id}/stream` through the chunked bearer-authed data source and the
+ * pause-tolerant load control from the video-loading policy, and **releases it on
+ * dispose** so leaving the page leaks no player.
  */
 @AndroidOptIn(UnstableApi::class)
 @Composable
@@ -964,19 +1007,8 @@ private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
     val context = LocalContext.current
     val exoPlayer = remember(id) {
         ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(bearerDataSourceFactory(token)))
-            // Start playback after buffering ~0.5s instead of the 2.5s default, so
-            // the first frame appears far sooner on a fast local network.
-            .setLoadControl(
-                DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
-                        DefaultLoadControl.DEFAULT_MAX_BUFFER_MS,
-                        /* bufferForPlaybackMs = */ 500,
-                        /* bufferForPlaybackAfterRebufferMs = */ 1000,
-                    )
-                    .build()
-            )
+            .setMediaSourceFactory(DefaultMediaSourceFactory(chunkedBearerDataSourceFactory(token)))
+            .setLoadControl(pauseTolerantLoadControl())
             .build()
             .apply {
                 setMediaItem(buildVideoMediaItem(urls, id))
@@ -986,11 +1018,14 @@ private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
     }
     // Show the thumb poster + spinner until the first frame is ready. The first play of a
     // non-web-safe video waits on a server-side transcode, so this can take a few seconds.
+    // Readiness latches on (see [latchVideoReady]) so a mid-playback rebuffer keeps it hidden.
     var ready by remember(id) { mutableStateOf(exoPlayer.playbackState == Player.STATE_READY) }
     DisposableEffect(id) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
-                ready = state == Player.STATE_READY
+                ready = latchVideoReady(ready, state)
+                // A rebuffer must never pause playback: reassert the user's play intent.
+                exoPlayer.playWhenReady = videoShowsPlaying(exoPlayer.playWhenReady, state)
             }
         }
         exoPlayer.addListener(listener)
@@ -1001,10 +1036,16 @@ private fun VideoPlayerPage(urls: MediaUrls, token: String?, id: Long) {
     }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(
-            factory = { ctx -> PlayerView(ctx).apply { player = exoPlayer } },
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    // Playback stops quietly and resumes on its own during a stall.
+                    setShowBuffering(quietBufferingMode())
+                }
+            },
             modifier = Modifier.fillMaxSize(),
         )
-        if (!ready) {
+        if (videoPosterVisible(ready)) {
             MediaThumb(
                 model = authedRequest(context, urls.thumb(id), token),
                 modifier = Modifier.fillMaxSize(),

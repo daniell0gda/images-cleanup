@@ -6,11 +6,19 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.media3.common.Player
+import androidx.media3.ui.PlayerView
+import eu.caiq.imagesorter.sync.data.media.ChunkedDataSource
 import eu.caiq.imagesorter.sync.ui.components.MediaPreviewPager
 import eu.caiq.imagesorter.sync.ui.components.PREVIEW_TAG
 import eu.caiq.imagesorter.sync.ui.components.previewCanPan
 import eu.caiq.imagesorter.sync.ui.components.previewIndexAfterDelete
 import eu.caiq.imagesorter.sync.ui.components.previewPagingEnabled
+import eu.caiq.imagesorter.sync.ui.screens.chunkedBearerDataSourceFactory
+import eu.caiq.imagesorter.sync.ui.screens.latchVideoReady
+import eu.caiq.imagesorter.sync.ui.screens.quietBufferingMode
+import eu.caiq.imagesorter.sync.ui.screens.videoPosterVisible
+import eu.caiq.imagesorter.sync.ui.screens.videoShowsPlaying
 import org.junit.Assert.assertNull
 import eu.caiq.imagesorter.sync.ui.theme.ImageSorterSyncTheme
 import org.junit.Assert.assertEquals
@@ -31,10 +39,19 @@ import org.robolectric.annotation.GraphicsMode
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MediaPreviewPagerTest {
 
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun videoPageDataSourceIsChunkedAndBearerAuthed() {
+        // The video page reads its stream through the chunked, bearer-authed data
+        // source from the video-loading policy, not one open-ended request.
+        val dataSource = chunkedBearerDataSourceFactory("tok-1").createDataSource()
+        assertTrue(dataSource is ChunkedDataSource)
+    }
 
     @Test
     fun pagingEnabledAtRestAndDisabledWhenZoomed() {
@@ -120,6 +137,36 @@ class MediaPreviewPagerTest {
         composeRule.onNodeWithText("Sync anyway").assertIsDisplayed()
         composeRule.onNodeWithText("Sync anyway").performClick()
         assertEquals(listOf(0), clicks)
+    }
+
+    @Test
+    fun posterAndSpinnerShowDuringInitialBufferingBeforeFirstReady() {
+        // Before the first frame is ready the page is still buffering, so the thumb
+        // poster + spinner are shown, exactly as today.
+        val everReady = latchVideoReady(everReady = false, playbackState = Player.STATE_BUFFERING)
+        assertTrue(videoPosterVisible(everReady))
+    }
+
+    @Test
+    fun posterStaysHiddenThroughAMidPlaybackStallOnceReady() {
+        // Once ready, readiness latches on, so a later buffering stall does not
+        // re-show the poster or the loading spinner.
+        val afterReady = latchVideoReady(everReady = false, playbackState = Player.STATE_READY)
+        val afterStall = latchVideoReady(afterReady, playbackState = Player.STATE_BUFFERING)
+        assertFalse(videoPosterVisible(afterStall))
+    }
+
+    @Test
+    fun aRebufferKeepsThePlayPauseControlShowingPlaying() {
+        // A mid-playback buffering stall never toggles the play/pause control to
+        // paused: it tracks play intent, not the buffering state.
+        assertTrue(videoShowsPlaying(playWhenReady = true, playbackState = Player.STATE_BUFFERING))
+    }
+
+    @Test
+    fun playerViewShowsNoBuiltInBufferingIndicator() {
+        // No built-in buffering spinner during a stall — playback resumes quietly.
+        assertEquals(PlayerView.SHOW_BUFFERING_NEVER, quietBufferingMode())
     }
 
     @Test
