@@ -161,7 +161,12 @@ def create_app(config: Config, state: ScanState):
                     yield {"event": "complete", "data": "{}"}
                     return
                 while True:
-                    item = await queue.get()
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        yield {"event": "ping", "data": "{}"}
+                        continue
+
                     if item.get("event") == "complete":
                         yield {"event": "complete", "data": "{}"}
                         break
