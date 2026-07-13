@@ -230,7 +230,7 @@ internal fun AlbumsScreenContent(
 ) {
     val context = LocalContext.current
 
-    var albums by remember { mutableStateOf<List<AlbumDto>>(emptyList()) }
+    var albums by remember { mutableStateOf<List<AlbumDto>?>(null) }
     var selectedAlbumId by remember { mutableStateOf<Long?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
 
@@ -254,7 +254,7 @@ internal fun AlbumsScreenContent(
     // one is active, since it is composed after this.
     BackHandler(enabled = selectedAlbumId != null) { selectedAlbumId = null; reloadKey++ }
 
-    val openAlbum = openAlbumFor(selectedAlbumId, albums)
+    val openAlbum = openAlbumFor(selectedAlbumId, albums ?: emptyList())
     if (openAlbum != null && repo != null) {
         AlbumDetail(
             album = openAlbum,
@@ -326,11 +326,20 @@ internal fun AlbumsScreenContent(
             },
             modifier = modifier.fillMaxSize(),
         ) {
-            AlbumsList(
-                albums = albums,
-                cover = { album -> coverRequest(context, urls, token, album) },
-                onOpen = { selectedAlbumId = it },
-            )
+            if (albums == null) {
+                Box(
+                    modifier = modifier.fillMaxSize().background(VaultTheme.colors.ground),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator(color = VaultTheme.colors.accent)
+                }
+            } else {
+                AlbumsList(
+                    albums = albums ?: emptyList(),
+                    cover = { album -> coverRequest(context, urls, token, album) },
+                    onOpen = { selectedAlbumId = it },
+                )
+            }
         }
     }
 }
@@ -385,7 +394,7 @@ private fun AlbumDetail(
     var shareState by remember(albumId) { mutableStateOf(album) }
     var shareMenuOpen by remember(albumId) { mutableStateOf(false) }
     var renameOpen by remember(albumId) { mutableStateOf(false) }
-    var entities by remember(albumId) { mutableStateOf<List<MediaEntity>>(emptyList()) }
+    var entities by remember(albumId) { mutableStateOf<List<MediaEntity>?>(null) }
     var reloadKey by remember(albumId) { mutableStateOf(0) }
     var selectedIds by remember(albumId) { mutableStateOf<Set<Long>>(emptySet()) }
     var addPickerOpen by remember(albumId) { mutableStateOf(false) }
@@ -396,7 +405,7 @@ private fun AlbumDetail(
         entities = runCatching { albumItemsToEntities(repo.items(albumId)) }.getOrDefault(emptyList())
     }
 
-    val listItems = remember(entities) { entities.map { MediaListItem.Media(it) } }
+    val listItems = remember(entities) { entities?.map { MediaListItem.Media(it) } ?: emptyList() }
     val inSelectionMode = selectedIds.isNotEmpty()
 
     // Back exits selection first (rather than leaving the album) when selecting.
@@ -476,21 +485,30 @@ private fun AlbumDetail(
                     Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete album", tint = c.text)
                 }
             }
-            PhotosGrid(
-                items = listItems,
-                onOpen = { previewIndex = it },
-                selectedIds = selectedIds,
-                inSelectionMode = inSelectionMode,
-                onToggle = { entity ->
-                    selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
-                },
-                onLongPress = { entity -> selectedIds = selectedIds + entity.id },
-                modifier = Modifier.weight(1f),
-            ) { entity, cellModifier ->
-                MediaThumb(
-                    model = albumRequest(context, urls.thumb(entity.id), token),
-                    modifier = cellModifier,
-                )
+            if (entities == null) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().weight(1f).background(c.ground),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator(color = c.accent)
+                }
+            } else {
+                PhotosGrid(
+                    items = listItems,
+                    onOpen = { previewIndex = it },
+                    selectedIds = selectedIds,
+                    inSelectionMode = inSelectionMode,
+                    onToggle = { entity ->
+                        selectedIds = if (entity.id in selectedIds) selectedIds - entity.id else selectedIds + entity.id
+                    },
+                    onLongPress = { entity -> selectedIds = selectedIds + entity.id },
+                    modifier = Modifier.weight(1f),
+                ) { entity, cellModifier ->
+                    MediaThumb(
+                        model = albumRequest(context, urls.thumb(entity.id), token),
+                        modifier = cellModifier,
+                    )
+                }
             }
         }
 
@@ -562,9 +580,9 @@ private fun AlbumDetail(
         }
 
         val idx = previewIndex
-        if (idx != null && idx in entities.indices) {
+        if (idx != null && entities != null && idx in entities!!.indices) {
             PhotosPreview(
-                items = entities,
+                items = entities!!,
                 startIndex = idx,
                 onClose = { previewIndex = null },
                 onDelete = { previewIndex = null },
