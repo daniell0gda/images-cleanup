@@ -74,11 +74,13 @@ def _image_metadata(path: Path) -> tuple[int | None, int | None, str | None]:
     ``date_taken`` is the EXIF ``DateTimeOriginal`` when present (returned as an
     ISO string), else ``None`` so the caller falls back to the file mtime.
     """
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     with Image.open(path) as img:
-        width, height = img.size
         date_taken = _exif_datetime(img)
+        # Report the display dimensions (EXIF orientation applied), so a portrait
+        # photo stored as landscape pixels + a rotate tag is recorded portrait.
+        width, height = ImageOps.exif_transpose(img).size
     return width, height, date_taken
 
 
@@ -137,10 +139,11 @@ def _save_jpeg(img, dest: Path) -> None:
 
 
 def _image_square_thumb(src: Path, dest: Path) -> None:
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     with Image.open(src) as img:
         img.load()
+        img = ImageOps.exif_transpose(img)
         square = _center_crop_square(img)
         square = square.resize((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
         _save_jpeg(square, dest)
@@ -195,12 +198,13 @@ def generate_preview(src: Path, dest: Path) -> bool:
     The aspect ratio is preserved; an image already within the long-edge limit is
     re-encoded at its native size. Returns True on success.
     """
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     src = Path(src)
     dest = Path(dest)
     with Image.open(src) as img:
         img.load()
+        img = ImageOps.exif_transpose(img)
         long_edge = max(img.size)
         if long_edge > PREVIEW_LONG_EDGE:
             scale = PREVIEW_LONG_EDGE / long_edge

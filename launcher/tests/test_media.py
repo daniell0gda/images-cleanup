@@ -8,9 +8,21 @@ from PIL import Image
 
 from launcher.media import (
     MediaIndexer,
+    _image_metadata,
+    generate_preview,
     generate_thumbnail,
     make_thumbnail_hook,
 )
+
+
+def make_oriented_image(path: Path, size=(400, 300), orientation=6) -> None:
+    """Write a landscape JPEG tagged with an EXIF [orientation] (default 6 =
+    ROTATE_90), so its *display* orientation differs from its stored pixels."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", size, (200, 30, 30))
+    exif = img.getexif()
+    exif[274] = orientation
+    img.save(path, format="JPEG", exif=exif.tobytes())
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +395,40 @@ def test_generate_thumbnail_writes_320px_square_jpeg(tmp_path):
     with Image.open(dest) as img:
         assert img.format == "JPEG"
         assert img.size == (320, 320)
+
+
+def test_preview_applies_exif_orientation(tmp_path):
+    # A portrait photo stored as landscape pixels + a rotate tag (common off-Pixel)
+    # must be served upright: the preview's long edge becomes its height, not width.
+    src = tmp_path / "rotated.jpg"
+    make_oriented_image(src, size=(400, 300), orientation=6)
+    dest = tmp_path / "preview.jpg"
+
+    assert generate_preview(src, dest) is True
+    with Image.open(dest) as img:
+        assert img.height > img.width
+
+
+def test_thumbnail_applies_exif_orientation(tmp_path):
+    # The square thumb is center-cropped after the rotation is applied, so the
+    # subject is upright in the tile rather than lying on its side.
+    src = tmp_path / "rotated.jpg"
+    make_oriented_image(src, size=(400, 300), orientation=6)
+    dest = tmp_path / "thumb.jpg"
+
+    assert generate_thumbnail(src, "image", dest) is True
+    with Image.open(dest) as img:
+        assert img.size == (320, 320)
+
+
+def test_metadata_reports_display_dimensions_for_oriented_image(tmp_path):
+    # The recorded width/height reflect the display orientation, so a rotate-tagged
+    # landscape file is indexed as the portrait it renders as.
+    src = tmp_path / "rotated.jpg"
+    make_oriented_image(src, size=(400, 300), orientation=6)
+
+    width, height, _ = _image_metadata(src)
+    assert (width, height) == (300, 400)
 
 
 def test_build_writes_thumb_per_item_and_marks_ready(tmp_path):
