@@ -69,7 +69,7 @@ function modeTitle(mode: string): string {
   return MODE_INFO[mode]?.title ?? mode;
 }
 
-type Page = "launcher" | "devices" | "settings";
+type Page = "launcher" | "devices" | "settings" | "errors";
 
 type DeviceStatus = "pending" | "trusted" | "revoked";
 
@@ -738,6 +738,184 @@ function SettingsView() {
   );
 }
 
+interface ErrorEntry {
+  id: number;
+  ts: string;
+  source: string;
+  level: string;
+  logger: string | null;
+  message: string;
+  traceback: string | null;
+  device_id: string | null;
+}
+
+const ERROR_SOURCE_OPTIONS = [
+  { value: "", label: "Wszystkie źródła" },
+  { value: "launcher", label: "Launcher" },
+  { value: "sorter", label: "Sortownik" },
+  { value: "android", label: "Telefon" },
+];
+
+const ERROR_LEVEL_OPTIONS = [
+  { value: "", label: "Wszystkie poziomy" },
+  { value: "WARNING", label: "WARNING" },
+  { value: "ERROR", label: "ERROR" },
+  { value: "CRITICAL", label: "CRITICAL" },
+];
+
+function ErrorsView() {
+  const [errors, setErrors] = useState<ErrorEntry[]>([]);
+  const [source, setSource] = useState("");
+  const [level, setLevel] = useState("");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+
+  const fetchErrors = useCallback(() => {
+    const params = new URLSearchParams();
+    if (source) params.set("source", source);
+    if (level) params.set("level", level);
+    const qs = params.toString();
+    fetch(`/api/errors${qs ? `?${qs}` : ""}`)
+      .then((r) => r.json())
+      .then((rows: ErrorEntry[]) => setErrors(Array.isArray(rows) ? rows : []))
+      .catch(() => {});
+  }, [source, level]);
+
+  // Fetch on open and whenever a filter changes; there is deliberately no
+  // polling interval here (unlike DevicesView) — errors refresh on demand only.
+  useEffect(() => {
+    fetchErrors();
+  }, [fetchErrors]);
+
+  const clearAll = useCallback(async () => {
+    try {
+      await fetch("/api/errors", { method: "DELETE" });
+      setErrors([]);
+    } catch {
+      /* leave the list as-is; the admin can retry */
+    }
+  }, []);
+
+  const deleteOne = useCallback(async (id: number) => {
+    try {
+      await fetch(`/api/errors/${id}`, { method: "DELETE" });
+      setErrors((es) => es.filter((e) => e.id !== id));
+    } catch {
+      /* leave the row as-is; the admin can retry */
+    }
+  }, []);
+
+  return (
+    <Box className={classes.view} key="errors">
+      <Box className={classes.hero}>
+        <Text component="span" className={classes.eyebrow}>
+          Synchronizacja telefonu
+        </Text>
+        <Title order={1} className={classes.title}>
+          Błędy
+        </Title>
+        <Text className={classes.subtitle}>
+          Ostatnie ostrzeżenia i błędy z serwera, sortownika i telefonów
+        </Text>
+      </Box>
+
+      <Group justify="space-between" align="flex-end" mb="md" wrap="nowrap">
+        <Group gap="xs" wrap="nowrap">
+          <label className={classes.filterField}>
+            <span className={classes.filterLabel}>Źródło</span>
+            <select
+              aria-label="Źródło"
+              className={classes.filterSelect}
+              value={source}
+              onChange={(e) => setSource(e.currentTarget.value)}
+            >
+              {ERROR_SOURCE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className={classes.filterField}>
+            <span className={classes.filterLabel}>Poziom</span>
+            <select
+              aria-label="Poziom"
+              className={classes.filterSelect}
+              value={level}
+              onChange={(e) => setLevel(e.currentTarget.value)}
+            >
+              {ERROR_LEVEL_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </Group>
+        <Group gap="xs" wrap="nowrap">
+          <Button variant="light" size="xs" onClick={fetchErrors}>
+            Odśwież
+          </Button>
+          <Button variant="subtle" color="red" size="xs" onClick={clearAll}>
+            Wyczyść wszystko
+          </Button>
+        </Group>
+      </Group>
+
+      {errors.length === 0 ? (
+        <Text className={classes.emptyState}>Brak zarejestrowanych błędów.</Text>
+      ) : (
+        <Stack gap="xs">
+          {errors.map((e) => {
+            const expanded = expandedId === e.id;
+            const summary = `${e.ts} · ${e.source} · ${e.level} · ${e.message}`;
+            return (
+              <Box key={e.id} className={classes.deviceCard}>
+                <Group justify="space-between" align="flex-start" wrap="nowrap">
+                  <Box
+                    style={{ flex: 1, cursor: "pointer" }}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setExpandedId(expanded ? null : e.id)}
+                    onKeyDown={(ev) => {
+                      if (ev.key === "Enter" || ev.key === " ")
+                        setExpandedId(expanded ? null : e.id);
+                    }}
+                  >
+                    <Text className={classes.errorSummary}>{summary}</Text>
+                  </Box>
+                  <ActionIcon
+                    variant="subtle"
+                    color="red"
+                    aria-label="Usuń błąd"
+                    onClick={() => deleteOne(e.id)}
+                  >
+                    ✕
+                  </ActionIcon>
+                </Group>
+                {expanded && (
+                  <Stack gap="xs" mt="sm">
+                    <Text className={classes.deviceMeta}>
+                      Logger: {e.logger ?? "—"}
+                    </Text>
+                    <Text className={classes.deviceMeta}>
+                      Urządzenie: {e.device_id ?? "—"}
+                    </Text>
+                    {e.traceback ? (
+                      <Code block>{e.traceback}</Code>
+                    ) : (
+                      <Text className={classes.deviceMeta}>Brak śladu stosu.</Text>
+                    )}
+                  </Stack>
+                )}
+              </Box>
+            );
+          })}
+        </Stack>
+      )}
+    </Box>
+  );
+}
+
 function LauncherApp() {
   const [page, setPage] = useState<Page>("launcher");
   const [users, setUsers] = useState<UserEntry[]>([]);
@@ -839,6 +1017,11 @@ function LauncherApp() {
               ⚙️ Ustawienia
             </Button>
           )}
+          {page !== "errors" && (
+            <Button variant="subtle" color="gray" size="xs" onClick={() => setPage("errors")}>
+              🐞 Błędy
+            </Button>
+          )}
         </Group>
       </Box>
 
@@ -849,6 +1032,10 @@ function LauncherApp() {
       ) : page === "settings" ? (
         <Box className={classes.inner}>
           <SettingsView />
+        </Box>
+      ) : page === "errors" ? (
+        <Box className={classes.inner}>
+          <ErrorsView />
         </Box>
       ) : (
       <Box className={classes.inner}>

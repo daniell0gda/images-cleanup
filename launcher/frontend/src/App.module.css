@@ -277,6 +277,52 @@
   letter-spacing: 0.22em;
 }
 
+/* ---------- Errors view ---------- */
+.errorSummary {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.85rem;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+  word-break: break-word;
+}
+
+.filterField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.filterLabel {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.filterSelect {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: rgba(255, 255, 255, 0.06);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%23ffffff' stroke-opacity='0.5' stroke-width='1.5'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  background-size: 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  color: white;
+  font-size: 0.85rem;
+  padding: 0.45rem 1.9rem 0.45rem 0.7rem;
+  cursor: pointer;
+}
+
+.filterSelect:focus {
+  outline: none;
+  border-color: rgba(116, 143, 252, 0.6);
+}
+
+.filterSelect option {
+  background: #24243e;
+  color: white;
+}
+
 /* Stack action cards on narrow screens */
 @media (max-width: 520px) {
   .actionGrid {

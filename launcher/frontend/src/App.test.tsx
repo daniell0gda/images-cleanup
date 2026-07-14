@@ -293,6 +293,217 @@ describe("Profile synchronizacji section", () => {
   });
 });
 
+describe("Errors view", () => {
+  interface ErrorRow {
+    id: number;
+    ts: string;
+    source: string;
+    level: string;
+    logger: string | null;
+    message: string;
+    traceback: string | null;
+    device_id: string | null;
+  }
+
+  function errorRow(over: Partial<ErrorRow>): ErrorRow {
+    return {
+      id: 1,
+      ts: "2026-07-14T10:00:00+00:00",
+      source: "launcher",
+      level: "ERROR",
+      logger: "launcher",
+      message: "something failed",
+      traceback: null,
+      device_id: null,
+      ...over,
+    };
+  }
+
+  async function openErrors() {
+    render(<App />);
+    const btn = await screen.findByText("🐞 Błędy");
+    fireEvent.click(btn);
+  }
+
+  function errorsCalls() {
+    return calls.filter((c) => c.url.startsWith("/api/errors"));
+  }
+
+  it("opens via the 🐞 Błędy nav button, fetches /api/errors once with no polling", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      calls.push({ url, opts });
+      if (url.startsWith("/api/errors")) return Promise.resolve(jsonResponse([]));
+      const def = launcherDefault(url);
+      return Promise.resolve(def ?? jsonResponse({}));
+    });
+
+    await openErrors();
+    await waitFor(() => expect(errorsCalls().length).toBe(1));
+
+    vi.advanceTimersByTime(8000);
+    await Promise.resolve();
+    expect(errorsCalls().length).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it("re-fetches /api/errors when the Odśwież button is clicked", async () => {
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      calls.push({ url, opts });
+      if (url.startsWith("/api/errors")) return Promise.resolve(jsonResponse([]));
+      const def = launcherDefault(url);
+      return Promise.resolve(def ?? jsonResponse({}));
+    });
+
+    await openErrors();
+    await waitFor(() => expect(errorsCalls().length).toBe(1));
+    fireEvent.click(await screen.findByText("Odśwież"));
+    await waitFor(() => expect(errorsCalls().length).toBe(2));
+  });
+
+  it("renders rows newest-first as ts · source · level · message and expands to show traceback, logger and device_id", async () => {
+    const rows = [
+      errorRow({
+        id: 2,
+        source: "sorter",
+        level: "ERROR",
+        logger: "imagesorter.sorter",
+        message: "newest boom",
+        traceback: "Traceback (most recent call last): newest",
+        device_id: null,
+      }),
+      errorRow({
+        id: 1,
+        source: "android",
+        level: "WARNING",
+        logger: "android",
+        message: "older glitch",
+        traceback: null,
+        device_id: "dev-123",
+      }),
+    ];
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      calls.push({ url, opts });
+      if (url.startsWith("/api/errors")) return Promise.resolve(jsonResponse(rows));
+      const def = launcherDefault(url);
+      return Promise.resolve(def ?? jsonResponse({}));
+    });
+
+    await openErrors();
+    const summaries = await screen.findAllByText(/ · /);
+    // Newest-first order preserved from the API.
+    expect(summaries[0]).toHaveTextContent("newest boom");
+    expect(summaries[0]).toHaveTextContent("sorter");
+    expect(summaries[0]).toHaveTextContent("ERROR");
+    expect(summaries[1]).toHaveTextContent("older glitch");
+
+    // Collapsed by default.
+    expect(screen.queryByText(/Traceback \(most recent call last\): newest/)).not.toBeInTheDocument();
+
+    // Expand the newest row: traceback + logger revealed.
+    fireEvent.click(summaries[0]);
+    expect(
+      await screen.findByText(/Traceback \(most recent call last\): newest/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/imagesorter\.sorter/)).toBeInTheDocument();
+
+    // Expand the older row: device_id revealed, null traceback handled.
+    fireEvent.click(summaries[1]);
+    expect(await screen.findByText(/dev-123/)).toBeInTheDocument();
+    expect(screen.getByText("Brak śladu stosu.")).toBeInTheDocument();
+  });
+
+  it("sends the source and level filter selections as query params on fetch", async () => {
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      calls.push({ url, opts });
+      if (url.startsWith("/api/errors")) return Promise.resolve(jsonResponse([]));
+      const def = launcherDefault(url);
+      return Promise.resolve(def ?? jsonResponse({}));
+    });
+
+    await openErrors();
+    await waitFor(() => expect(errorsCalls().length).toBe(1));
+
+    fireEvent.change(screen.getByLabelText("Źródło"), {
+      target: { value: "sorter" },
+    });
+    fireEvent.change(screen.getByLabelText("Poziom"), {
+      target: { value: "ERROR" },
+    });
+
+    await waitFor(() =>
+      expect(
+        errorsCalls().some(
+          (c) => c.url.includes("source=sorter") && c.url.includes("level=ERROR"),
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("Wyczyść wszystko calls DELETE /api/errors and empties the list", async () => {
+    let cleared = false;
+    const rows = [errorRow({ id: 1, message: "boom one" })];
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      calls.push({ url, opts });
+      if (url === "/api/errors" && opts?.method === "DELETE") {
+        cleared = true;
+        return Promise.resolve(jsonResponse({ cleared: true }));
+      }
+      if (url.startsWith("/api/errors"))
+        return Promise.resolve(jsonResponse(cleared ? [] : rows));
+      const def = launcherDefault(url);
+      return Promise.resolve(def ?? jsonResponse({}));
+    });
+
+    await openErrors();
+    expect(await screen.findByText(/boom one/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Wyczyść wszystko"));
+
+    await waitFor(() =>
+      expect(
+        calls.some((c) => c.url === "/api/errors" && c.opts?.method === "DELETE"),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/boom one/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("per-row ✕ calls DELETE /api/errors/{id} and removes only that row", async () => {
+    const rows = [
+      errorRow({ id: 7, message: "row seven" }),
+      errorRow({ id: 8, message: "row eight" }),
+    ];
+    vi.stubGlobal("fetch", (url: string, opts?: RequestInit) => {
+      calls.push({ url, opts });
+      if (url === "/api/errors/7" && opts?.method === "DELETE")
+        return Promise.resolve(jsonResponse({ deleted: true }));
+      if (url.startsWith("/api/errors")) return Promise.resolve(jsonResponse(rows));
+      const def = launcherDefault(url);
+      return Promise.resolve(def ?? jsonResponse({}));
+    });
+
+    await openErrors();
+    await screen.findByText(/row seven/);
+
+    const removeButtons = screen.getAllByLabelText("Usuń błąd");
+    fireEvent.click(removeButtons[0]);
+
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (c) => c.url === "/api/errors/7" && c.opts?.method === "DELETE",
+        ),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/row seven/)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText(/row eight/)).toBeInTheDocument();
+  });
+});
+
 describe("Odśwież teraz force build", () => {
   it("posts the build, polls status while building, shows progress and disables the button", async () => {
     const statuses = [
