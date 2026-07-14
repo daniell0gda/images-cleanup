@@ -63,6 +63,7 @@ ENV SORTER_HOST=0.0.0.0 \
     CONFIGS_DIR=/configs \
     INBOX_BASE=/data/inbox \
     SYNC_DB=/data/sync.db \
+    ERRORS_DB=/data/errors.db \
     MEDIA_DB=/data/media.db \
     MEDIA_THUMBS_DIR=/data/media_thumbs \
     MEDIA_PROXIES_DIR=/data/media_proxies \
