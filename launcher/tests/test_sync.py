@@ -1283,8 +1283,12 @@ def test_create_app_runs_startup_reconcile_on_complete_unprocessed_session(tmp_p
 
 
 def test_create_app_runs_janitor_at_startup_and_on_each_timer_tick(tmp_path):
-    """create_app runs the janitor once at startup and registers a recurring
-    timer; driving the injected scheduler deterministically fires it again."""
+    """create_app runs the sync janitor once at startup and registers a recurring
+    timer for it; driving that scheduled callback deterministically fires it again.
+
+    The app also wires other recurring janitors (e.g. errors retention), so more
+    than one scheduler registration is expected; this test pins only the sync
+    janitor's behaviour and does not assume it is the sole registration."""
     _prepare_env(tmp_path)
     _write_e2e_config(tmp_path)
 
@@ -1309,12 +1313,16 @@ def test_create_app_runs_janitor_at_startup_and_on_each_timer_tick(tmp_path):
             sync_detect_tags=lambda p: set(),
             sync_scheduler=fake_scheduler,
         )
-        # Startup pass ran the janitor once and registered a periodic callback.
+        # Startup pass ran the sync janitor once and registered at least one
+        # recurring callback.
         assert janitor_calls["n"] == 1
-        assert len(ticks) == 1
-        # Driving the scheduled callback runs the janitor again (no sleeping).
-        ticks[0]()
-        assert janitor_calls["n"] == 2
+        assert len(ticks) >= 1
+        # Exactly one registered callback is the sync janitor: driving all of the
+        # scheduled callbacks runs the sync janitor exactly once more (no sleeping).
+        before = janitor_calls["n"]
+        for fn in ticks:
+            fn()
+        assert janitor_calls["n"] == before + 1
     finally:
         sync_mod.SyncLane.janitor = orig
 

@@ -20,7 +20,13 @@ from .api_models import JobRequest as _JobRequest
 from .api_models import MediaLibrarySettings as _MediaLibrarySettings
 from .api_models import ProfileRequest as _ProfileRequest
 from .api_models import SessionRequest as _SessionRequest
+from .api_models import ErrorReportItem as _ErrorReportItem
 from .api_models import SettingsRequest as _SettingsRequest
+from .errors import SqliteErrorHandler as _SqliteErrorHandler
+from .errors import attach_error_handler as _attach_error_handler
+from .errors import errors_db_path as _errors_db_path
+from .errors import open_db as _errors_open_db
+from .errors import purge_old as _errors_purge_old
 from .media_http import assert_within_root as _assert_within_root
 from .media_http import decode_cursor as _decode_cursor
 from .media_http import encode_cursor as _encode_cursor
@@ -142,6 +148,8 @@ def _is_public_path(method: str, path: str) -> bool:
         return True
     if path == "/api/sync/sessions" or path.startswith("/api/sync/sessions/"):
         return True
+    if method == "POST" and path == "/api/errors/report":
+        return True
     if method == "POST" and path == "/api/sync/devices":
         return True
     if method == "GET" and path.startswith("/api/sync/devices/") and path.endswith("/status"):
@@ -208,7 +216,11 @@ def create_app(
         if not config_file.exists():
             raise HTTPException(status_code=404, detail=f"Config not found: {config_file}")
 
-        env = {**os.environ, "LAUNCHER_PUBLIC_PORT": _launcher_public_port()}
+        env = {
+            **os.environ,
+            "LAUNCHER_PUBLIC_PORT": _launcher_public_port(),
+            "ERRORS_DB": str(_errors_db_path()),
+        }
         state.proc = subprocess.Popen(
             [sys.executable, "-m", "imagesorter", "--config", str(config_file)],
             env=env,
@@ -305,6 +317,9 @@ class _DeferredDetect:
 
 _SYNC_TTL = timedelta(hours=24)
 
+# How often the recurring janitor trims errors past the 30-day retention window.
+_ERRORS_RETENTION_INTERVAL = timedelta(hours=24).total_seconds()
+
 # Timeline page sizing: keyset pages are lightweight, but cap the page so a
 # client can't request an unbounded scan.
 _MEDIA_PAGE_DEFAULT = 100
@@ -337,6 +352,22 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
     lane.janitor(_SYNC_TTL)
     if scheduler is not None:
         scheduler(_SYNC_TTL.total_seconds(), lambda: lane.janitor(_SYNC_TTL))
+
+    # Error log store: attach the launcher capture handler onto the root logger,
+    # trim rows past the 30-day retention window once, and register a recurring
+    # janitor to keep trimming. Gated on a scheduler (present only in production
+    # via serve()) so schedulerless create_app() calls in tests never attach a
+    # process-global logging handler or touch the shared errors DB.
+    if scheduler is not None:
+        errors_db = _errors_db_path()
+        already_attached = any(
+            isinstance(h, _SqliteErrorHandler) and h.source == "launcher"
+            for h in logging.getLogger().handlers
+        )
+        if not already_attached:
+            _attach_error_handler(errors_db, source="launcher")
+        _errors_purge_old(errors_db)
+        scheduler(_ERRORS_RETENTION_INTERVAL, lambda: _errors_purge_old(errors_db))
 
     # Periodic synced-file index refresh: prune rows whose destination file was
     # deleted outside the app so the next reconcile re-uploads them. The cron
@@ -917,6 +948,86 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
                 break
             time.sleep(0.001)
         return media_indexer.status()
+
+    # -- error log store (device report + local management UI) -----------
+
+    def _errors_conn():
+        return _errors_open_db(_errors_db_path())
+
+    @app.post("/api/errors/report")
+    async def errors_report(
+        items: list[_ErrorReportItem],
+        authorization: str | None = Header(default=None),
+    ):
+        # Device-facing: the phone posts its own sync failures. ts is the server
+        # receive time (UTC ISO), so GET's id-DESC newest-first ordering lines up
+        # with arrival order; the client's failedAt is folded into the message.
+        device = _require_device(authorization)
+        con = _errors_conn()
+        try:
+            for it in items:
+                level = "WARNING" if it.retryable else "ERROR"
+                message = it.reason if not it.message else f"{it.reason}: {it.message}"
+                con.execute(
+                    "INSERT INTO errors "
+                    "(ts, source, level, logger, message, traceback, device_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        "android", level, "android", message, None,
+                        device["device_id"],
+                    ),
+                )
+            con.commit()
+        finally:
+            con.close()
+        return {"stored": len(items)}
+
+    @app.get("/api/errors")
+    async def errors_list(
+        source: str | None = None,
+        level: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ):
+        where, params = [], []
+        if source is not None:
+            where.append("source = ?")
+            params.append(source)
+        if level is not None:
+            where.append("level = ?")
+            params.append(level)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        con = _errors_conn()
+        try:
+            rows = con.execute(
+                "SELECT id, ts, source, level, logger, message, traceback, device_id "
+                f"FROM errors{clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        finally:
+            con.close()
+        return [dict(r) for r in rows]
+
+    @app.delete("/api/errors")
+    async def errors_clear():
+        con = _errors_conn()
+        try:
+            con.execute("DELETE FROM errors")
+            con.commit()
+        finally:
+            con.close()
+        return {"cleared": True}
+
+    @app.delete("/api/errors/{error_id}")
+    async def errors_delete_one(error_id: int):
+        con = _errors_conn()
+        try:
+            con.execute("DELETE FROM errors WHERE id = ?", (error_id,))
+            con.commit()
+        finally:
+            con.close()
+        return {"deleted": True}
 
     # -- albums + public share -------------------------------------------
     # Mounted from albums_api so the album/share surface lives in one module;

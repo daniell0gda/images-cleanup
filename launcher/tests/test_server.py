@@ -171,6 +171,36 @@ def test_subprocess_receives_launcher_url_env(tmp_path, monkeypatch):
     assert captured_env["LAUNCHER_PUBLIC_PORT"] == "7000"
 
 
+def test_subprocess_receives_errors_db_env(tmp_path, monkeypatch):
+    """The spawned sorter subprocess gets ERRORS_DB in its environment so its log
+    capture writes into the same errors DB the launcher UI reads. Even when the
+    launcher's own process has no ERRORS_DB set, post_jobs injects the resolved
+    default path so the child still shares one DB."""
+    (tmp_path / "config_alice_groupby.yaml").write_text("mode: GroupByTags\n")
+    monkeypatch.delenv("ERRORS_DB", raising=False)
+
+    from fastapi.testclient import TestClient
+    from launcher.errors import errors_db_path
+    app = make_app(tmp_path)
+
+    captured_env = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_env.update(kwargs.get("env", {}))
+        return type("FakeProc", (), {
+            "poll": lambda self: None,
+            "pid": 99,
+            "terminate": lambda self: None,
+        })()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    client = TestClient(app)
+    client.post("/api/jobs", json={"user": "alice", "mode": "groupby"})
+
+    assert captured_env.get("ERRORS_DB") == str(errors_db_path())
+
+
 # ---------------------------------------------------------------------------
 # Criterion: GET /api/status — idle after subprocess exits
 # ---------------------------------------------------------------------------
@@ -511,6 +541,7 @@ def test_is_public_path_classification():
     assert pub("POST", "/api/sync/devices")               # register
     assert pub("GET", "/api/sync/devices/abc/status")     # status poll
     assert pub("GET", "/share/tok/media/1/thumb")
+    assert pub("POST", "/api/errors/report")              # device failure report
 
     # Admin: UI, jobs, settings, build, device listing / approve / revoke.
     assert not pub("GET", "/")
@@ -522,6 +553,9 @@ def test_is_public_path_classification():
     assert not pub("GET", "/api/sync/devices")            # listing
     assert not pub("POST", "/api/sync/devices/abc/approve")
     assert not pub("POST", "/api/sync/devices/abc/revoke")
+    assert not pub("GET", "/api/errors")                  # admin errors view
+    assert not pub("DELETE", "/api/errors")
+    assert not pub("DELETE", "/api/errors/1")
 
 
 def test_admin_route_hidden_from_proxied_requests(tmp_path):
@@ -564,6 +598,23 @@ def test_public_app_route_passes_guard_but_still_requires_token(tmp_path):
 
     # Reaches the handler (device auth), so it is NOT the guard's 404.
     assert client.get("/api/albums", headers=_PROXIED).status_code == 401
+
+
+def test_errors_report_public_but_admin_errors_hidden_when_proxied(tmp_path):
+    """Only POST /api/errors/report is reachable through the proxy (device-facing):
+    it passes the guard and is rejected by its own auth (401). The admin errors
+    surface (GET/DELETE) stays hidden (404) from proxied requests."""
+    from fastapi.testclient import TestClient
+    client = TestClient(make_app(tmp_path))
+
+    # Passes the guard (not 404); its own device auth rejects the tokenless call.
+    assert client.post(
+        "/api/errors/report", headers=_PROXIED, json=[]
+    ).status_code == 401
+
+    assert client.get("/api/errors", headers=_PROXIED).status_code == 404
+    assert client.delete("/api/errors", headers=_PROXIED).status_code == 404
+    assert client.delete("/api/errors/1", headers=_PROXIED).status_code == 404
 
 
 # ---------------------------------------------------------------------------

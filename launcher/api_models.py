@@ -61,3 +61,18 @@ class AlbumRenameRequest(BaseModel):
 
 class AlbumItemsRequest(BaseModel):
     media_ids: list[int] = []
+
+
+class ErrorReportItem(BaseModel):
+    """One phone-side sync failure reported to POST /api/errors/report.
+
+    Field names are camelCase to match the Android client's JSON payload
+    verbatim; ``message`` is optional (a bare reason with no detail sends null).
+    """
+    name: str
+    createdOn: str
+    size: int
+    reason: str
+    retryable: bool
+    message: str | None = None
+    failedAt: int

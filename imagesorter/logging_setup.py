@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
@@ -20,3 +21,8 @@ def setup(log_level: str, log_file: str | None = None) -> None:
         handlers=handlers,
         force=True,
     )
+    errors_db = os.environ.get("ERRORS_DB")
+    if errors_db:
+        from launcher.errors import attach_error_handler
+
+        attach_error_handler(errors_db, source="sorter")
