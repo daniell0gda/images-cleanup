@@ -114,4 +114,17 @@ class RoomDaoTest {
         assertTrue(dao.observeAll().first().isEmpty())
         assertNull(dao.retryable().firstOrNull())
     }
+
+    @Test
+    fun failureUnreportedReturnsOnlyUnreportedRowsAndMarkReportedFlipsTheFlag() = runTest {
+        val dao = db.failureDao()
+        dao.upsert(FailureEntity("a.jpg", "2024-01-01T00:00:00", 10, "UNREADABLE", retryable = false, failedAt = 1))
+        dao.upsert(FailureEntity("b.jpg", "2024-01-02T00:00:00", 20, "NETWORK", retryable = true, failedAt = 2))
+
+        assertEquals(setOf("a.jpg", "b.jpg"), dao.unreported().map { it.name }.toSet())
+
+        dao.markReported("a.jpg", "2024-01-01T00:00:00", 10)
+
+        assertEquals(listOf("b.jpg"), dao.unreported().map { it.name })
+    }
 }

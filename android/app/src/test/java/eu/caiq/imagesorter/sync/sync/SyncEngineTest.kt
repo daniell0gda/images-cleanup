@@ -1051,6 +1051,101 @@ class SyncEngineTest {
         """{"outcomes":[{"file_id":"$fid","name":"$name","status":"synced"}]}"""
     }
 
+    private fun failedOutcomeForQueued(name: String, reason: String = "no_video_destination"): String = runBlocking {
+        val fid = db.pendingUploadDao().pending().first { it.name == name }.fileId
+        """{"outcomes":[{"file_id":"$fid","name":"$name","status":"failed","reason":"$reason","retryable":false}]}"""
+    }
+
+    private val reportMoshi = Moshi.Builder().build()
+    private fun reportedItemCount(json: String): Int {
+        val map = com.squareup.moshi.Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
+        val list = com.squareup.moshi.Types.newParameterizedType(List::class.java, map)
+        return reportMoshi.adapter<List<Map<String, Any?>>>(list).fromJson(json)!!.size
+    }
+
+    @Test
+    fun recordFailurePostsTheFailureAndMarksItReportedOnSuccess() = runTest {
+        val bad = item("bad.jpg", 6)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"bad.jpg","created_on":"2024-01-01T00:00:00","size":6,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":6,"length":6}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/errors/report") -> resp("""{"stored":1}""")
+                req.path!!.endsWith("/outcomes") -> resp(failedOutcomeForQueued("bad.jpg"))
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(listOf(bad)), FakeSyncPrefs(concurrency = 1)).run()
+
+        val row = db.failureDao().observeAll().first().single { it.name == "bad.jpg" }
+        assertTrue("a failure the server accepted is marked reported", row.reported)
+    }
+
+    @Test
+    fun recordFailureLeavesRowUnreportedOnServerErrorAndRunStillCompletes() = runTest {
+        val bad = item("bad.jpg", 6)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"bad.jpg","created_on":"2024-01-01T00:00:00","size":6,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":6,"length":6}""")
+                req.path!!.endsWith("/complete") -> resp("""{"status":"complete"}""")
+                req.path!!.endsWith("/errors/report") -> MockResponse().setResponseCode(500).setBody("{}")
+                req.path!!.endsWith("/outcomes") -> resp(failedOutcomeForQueued("bad.jpg"))
+                else -> resp("{}")
+            }
+        }
+
+        val engine = engine(FakeMediaSource(listOf(bad)), FakeSyncPrefs(concurrency = 1))
+        engine.run()
+
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
+        val row = db.failureDao().observeAll().first().single { it.name == "bad.jpg" }
+        assertTrue("a rejected report leaves the row unreported for retry", !row.reported)
+    }
+
+    @Test
+    fun startOfRunPostsAllUnreportedFailuresInOneRequestAndMarksThemReported() = runTest {
+        db.failureDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.FailureEntity(
+                "x.jpg", "2024-01-01T00:00:00", 5, "UNREADABLE", retryable = false, failedAt = 1,
+            ),
+        )
+        db.failureDao().upsert(
+            eu.caiq.imagesorter.sync.data.db.entity.FailureEntity(
+                "y.jpg", "2024-01-02T00:00:00", 6, "NETWORK", retryable = true, failedAt = 2,
+            ),
+        )
+        val reportRequests = java.util.concurrent.atomic.AtomicInteger(0)
+        val itemsInReport = java.util.concurrent.atomic.AtomicInteger(0)
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/errors/report") -> {
+                    reportRequests.incrementAndGet()
+                    itemsInReport.set(reportedItemCount(req.body.readUtf8()))
+                    resp("""{"stored":2}""")
+                }
+                req.path!!.endsWith("/reconcile") -> resp("""{"results":[]}""")
+                else -> resp("{}")
+            }
+        }
+
+        engine(FakeMediaSource(emptyList()), FakeSyncPrefs()).run()
+
+        assertEquals("all backlog failures posted in a single request", 1, reportRequests.get())
+        assertEquals("both failures carried in that request", 2, itemsInReport.get())
+        assertTrue("posted backlog failures are marked reported", db.failureDao().unreported().isEmpty())
+    }
+
     @Test
     fun overrideUploadClearsNotPeopleAndQueuesImmediatelyEvenWhileAPassIsActive() = runBlocking {
         // "Sync anyway" tapped while a sync pass is active must still drop the items

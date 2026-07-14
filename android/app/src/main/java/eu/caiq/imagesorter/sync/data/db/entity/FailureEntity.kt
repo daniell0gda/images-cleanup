@@ -17,4 +17,6 @@ data class FailureEntity(
     /** Human-readable detail from the server outcome, if any. */
     val message: String? = null,
     val failedAt: Long,
+    /** True once this failure has been reported to the server's error log. */
+    val reported: Boolean = false,
 )

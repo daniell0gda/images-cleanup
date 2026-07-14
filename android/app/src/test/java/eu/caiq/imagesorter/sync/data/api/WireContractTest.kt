@@ -2,6 +2,7 @@ package eu.caiq.imagesorter.sync.data.api
 
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
+import eu.caiq.imagesorter.sync.data.api.dto.ErrorReportItemDto
 import eu.caiq.imagesorter.sync.data.api.dto.IdentityDto
 import eu.caiq.imagesorter.sync.data.api.dto.OpenSessionRequest
 import eu.caiq.imagesorter.sync.data.api.dto.RegisterDeviceRequest
@@ -117,6 +118,41 @@ class WireContractTest {
         val response = api.outcomes("sess-9")
 
         assertEquals("f-1", response.outcomes.single().fileId)
+    }
+
+    @Test
+    fun reportErrorsSerializesItemsWithCamelCaseFieldsAndSendsBearer() = runTest {
+        server.enqueue(MockResponse().setBody("""{"stored":1}"""))
+        val api = buildSyncApi(server, tokenStore = FakeTokenStore("tok-xyz"))
+
+        api.reportErrors(
+            listOf(
+                ErrorReportItemDto(
+                    name = "a.jpg",
+                    createdOn = "2024-01-02T03:04:05",
+                    size = 10,
+                    reason = "UNREADABLE",
+                    retryable = false,
+                    message = "boom",
+                    failedAt = 123,
+                ),
+            ),
+        )
+
+        val request = server.takeRequest()
+        assertEquals("Bearer tok-xyz", request.getHeader("Authorization"))
+        val sent = bodyAsArray(request.body.readUtf8()).single()
+        assertEquals("a.jpg", sent["name"])
+        assertEquals("2024-01-02T03:04:05", sent["createdOn"])
+        assertEquals(10.0, sent["size"])
+        assertEquals("UNREADABLE", sent["reason"])
+        assertEquals(false, sent["retryable"])
+        assertEquals("boom", sent["message"])
+        assertEquals(123.0, sent["failedAt"])
+        assertEquals(
+            setOf("name", "createdOn", "size", "reason", "retryable", "message", "failedAt"),
+            sent.keys,
+        )
     }
 
     // --- AuthInterceptor ---

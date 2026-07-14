@@ -131,6 +131,7 @@ private class NotImplementedSyncApi : SyncApi {
     ) = fail()
     override suspend fun completeSession(sessionId: String) = fail()
     override suspend fun outcomes(sessionId: String) = fail()
+    override suspend fun reportErrors(items: List<eu.caiq.imagesorter.sync.data.api.dto.ErrorReportItemDto>) = fail()
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)

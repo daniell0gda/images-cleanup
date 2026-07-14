@@ -1,6 +1,7 @@
 package eu.caiq.imagesorter.sync.sync
 
 import eu.caiq.imagesorter.sync.data.api.SyncApi
+import eu.caiq.imagesorter.sync.data.api.dto.ErrorReportItemDto
 import eu.caiq.imagesorter.sync.data.api.dto.IdentityDto
 import eu.caiq.imagesorter.sync.data.api.dto.OpenSessionRequest
 import eu.caiq.imagesorter.sync.data.api.dto.OutcomeDto
@@ -118,6 +119,10 @@ class SyncEngine(
 
             val sinceGeneration =
                 if (incremental) securePrefs.getMediaGeneration() else SecurePrefs.NO_WATERMARK
+
+            // Flush any failures left unreported by a previous run (e.g. the phone
+            // was offline when they were recorded) in one best-effort request.
+            reportFailures(failureDao.unreported())
 
             try {
                 val toUpload = discoverAndReconcile(sinceGeneration)
@@ -592,17 +597,19 @@ class SyncEngine(
         val reason = FailureReason.fromWire(reasonWire)
         // Prefer the server's explicit retryable flag; fall back to the taxonomy.
         val retryable = retryableFromServer ?: reason.retryable
-        failureDao.upsert(
-            FailureEntity(
-                name = identity.name,
-                createdOn = identity.createdOn,
-                size = identity.size,
-                reason = reason.name,
-                retryable = retryable,
-                message = reasonWire,
-                failedAt = System.currentTimeMillis(),
-            ),
+        val entity = FailureEntity(
+            name = identity.name,
+            createdOn = identity.createdOn,
+            size = identity.size,
+            reason = reason.name,
+            retryable = retryable,
+            message = reasonWire,
+            failedAt = System.currentTimeMillis(),
         )
+        failureDao.upsert(entity)
+        // Best-effort report right away; if it can't be sent it stays unreported
+        // (reported = 0) and the next run's start-of-run flush retries it.
+        reportFailures(listOf(entity))
         syncedCacheDao.upsert(
             identity.toSyncedCache(
                 SyncStatus.FAILED,
@@ -639,6 +646,36 @@ class SyncEngine(
     private fun recordFullSyncCompletion() {
         securePrefs.setLastFullSyncAtMillis(now())
     }
+
+    // --- Failure reporting ----------------------------------------------------
+
+    /**
+     * Post [failures] to the server's error log in one best-effort request and,
+     * on HTTP success, mark each row reported so it is not sent again. Any network
+     * or HTTP failure is swallowed: the rows stay `reported = 0` and the sync run
+     * continues, so reporting can never break a sync.
+     */
+    private suspend fun reportFailures(failures: List<FailureEntity>) {
+        if (failures.isEmpty()) return
+        try {
+            val response = api.reportErrors(failures.map { it.toReportDto() })
+            if (response.isSuccessful) {
+                failures.forEach { failureDao.markReported(it.name, it.createdOn, it.size) }
+            }
+        } catch (e: java.io.IOException) {
+            // Offline / transport failure: leave the rows to retry on the next run.
+        }
+    }
+
+    private fun FailureEntity.toReportDto() = ErrorReportItemDto(
+        name = name,
+        createdOn = createdOn,
+        size = size,
+        reason = reason,
+        retryable = retryable,
+        message = message,
+        failedAt = failedAt,
+    )
 
     // --- Mapping helpers ------------------------------------------------------
 

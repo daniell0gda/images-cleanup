@@ -3,6 +3,7 @@ package eu.caiq.imagesorter.sync.data.api
 import eu.caiq.imagesorter.sync.data.api.dto.ChunkResponse
 import eu.caiq.imagesorter.sync.data.api.dto.CompleteSessionResponse
 import eu.caiq.imagesorter.sync.data.api.dto.DeviceStatusResponse
+import eu.caiq.imagesorter.sync.data.api.dto.ErrorReportItemDto
 import eu.caiq.imagesorter.sync.data.api.dto.FileOffsetResponse
 import eu.caiq.imagesorter.sync.data.api.dto.IdentityDto
 import eu.caiq.imagesorter.sync.data.api.dto.OpenSessionRequest
@@ -126,4 +127,16 @@ interface SyncApi {
     suspend fun outcomes(
         @Path("sessionId") sessionId: String,
     ): OutcomesResponse
+
+    // --- Error reporting ---
+
+    /**
+     * Report phone-side sync failures to the launcher's error log. The bearer
+     * token is attached by [AuthInterceptor]. Returns the raw response so callers
+     * can treat reporting as best-effort (an HTTP error leaves the rows to retry).
+     */
+    @POST("api/errors/report")
+    suspend fun reportErrors(
+        @Body items: List<ErrorReportItemDto>,
+    ): retrofit2.Response<okhttp3.ResponseBody>
 }

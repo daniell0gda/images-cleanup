@@ -19,6 +19,15 @@ interface FailureDao {
     @Query("SELECT * FROM failures WHERE retryable = 1")
     suspend fun retryable(): List<FailureEntity>
 
+    @Query("SELECT * FROM failures WHERE reported = 0")
+    suspend fun unreported(): List<FailureEntity>
+
+    @Query(
+        "UPDATE failures SET reported = 1 " +
+            "WHERE name = :name AND createdOn = :createdOn AND size = :size",
+    )
+    suspend fun markReported(name: String, createdOn: String, size: Long)
+
     @Query(
         "DELETE FROM failures " +
             "WHERE name = :name AND createdOn = :createdOn AND size = :size",
