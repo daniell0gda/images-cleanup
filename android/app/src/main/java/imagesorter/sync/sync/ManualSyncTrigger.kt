@@ -10,7 +10,7 @@ class ManualSyncTrigger(
     private val context: Context,
 ) : SyncTrigger {
 
-    override fun requestSync() {
-        SyncForegroundService.start(context)
+    override fun requestSync(silent: Boolean) {
+        SyncForegroundService.start(context, silent = silent)
     }
 }

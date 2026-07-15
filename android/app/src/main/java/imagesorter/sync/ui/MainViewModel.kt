@@ -430,7 +430,7 @@ class MainViewModel(
             lastFullSyncAtMillis = lastFullSyncAtMillis(),
             nowMillis = System.currentTimeMillis(),
         )
-        if (eligible) syncTrigger.requestSync()
+        if (eligible) syncTrigger.requestSync(silent = true)
     }
 
     /**

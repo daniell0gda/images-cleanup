@@ -5,6 +5,8 @@
     <!-- Foreground service notification -->
     <string name="sync_channel_name">Photo sync</string>
     <string name="sync_channel_description">Progress while photos and videos back up to the NAS.</string>
+    <string name="sync_channel_silent_name">Automatic photo sync</string>
+    <string name="sync_channel_silent_description">Silent progress while photos and videos back up automatically when you open the app.</string>
     <string name="sync_notification_title">Syncing to NAS</string>
     <string name="sync_notification_idle">Preparing sync…</string>
 

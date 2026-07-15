@@ -13,6 +13,10 @@ package imagesorter.sync.sync
  *  now (background is out of scope for v1 per the design doc).
  */
 interface SyncTrigger {
-    /** Request a sync run. Implementations decide how the engine is actually run. */
-    fun requestSync()
+    /**
+     * Request a sync run. Implementations decide how the engine is actually run.
+     * [silent] marks an automatic (app-open) run so its notification surfaces
+     * silently; the default `false` is a user-initiated run with normal alerting.
+     */
+    fun requestSync(silent: Boolean = false)
 }

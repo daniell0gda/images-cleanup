@@ -19,12 +19,25 @@ import imagesorter.sync.ui.MainActivity
 object SyncNotification {
 
     const val CHANNEL_ID = "sync_progress"
+
+    /**
+     * Separate channel for automatic (app-open) runs the user didn't initiate, so
+     * they surface silently. A fresh channel is required because Android never
+     * lowers an existing channel's importance, and it must be distinct from
+     * [CHANNEL_ID] so manual "Back up now" runs keep the user's chosen alerting.
+     */
+    const val CHANNEL_ID_SILENT = "sync_progress_silent"
     const val ID = 1001
 
-    /** Build the ongoing notification; [max] > 0 renders a determinate progress bar. */
-    fun build(context: Context, text: String, max: Int, progress: Int): Notification {
-        ensureChannel(context)
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+    /**
+     * Build the ongoing notification; [max] > 0 renders a determinate progress bar.
+     * [silent] routes the notification through [CHANNEL_ID_SILENT] (no sound/vibration)
+     * for automatic app-open runs.
+     */
+    fun build(context: Context, text: String, max: Int, progress: Int, silent: Boolean = false): Notification {
+        val channelId = if (silent) CHANNEL_ID_SILENT else CHANNEL_ID
+        ensureChannel(context, channelId, silent)
+        val builder = NotificationCompat.Builder(context, channelId)
             .setContentTitle(context.getString(R.string.sync_notification_title))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
@@ -42,14 +55,22 @@ object SyncNotification {
             else -> progress.phase.name.lowercase().replaceFirstChar { it.uppercase() }
         }
 
-    private fun ensureChannel(context: Context) {
+    private fun ensureChannel(context: Context, channelId: String, silent: Boolean) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
+        if (manager.getNotificationChannel(channelId) != null) return
+        val nameRes = if (silent) R.string.sync_channel_silent_name else R.string.sync_channel_name
+        val descRes = if (silent) R.string.sync_channel_silent_description else R.string.sync_channel_description
         val channel = NotificationChannel(
-            CHANNEL_ID,
-            context.getString(R.string.sync_channel_name),
+            channelId,
+            context.getString(nameRes),
             NotificationManager.IMPORTANCE_LOW,
-        ).apply { description = context.getString(R.string.sync_channel_description) }
+        ).apply {
+            description = context.getString(descRes)
+            if (silent) {
+                setSound(null, null)
+                enableVibration(false)
+            }
+        }
         manager.createNotificationChannel(channel)
     }
 

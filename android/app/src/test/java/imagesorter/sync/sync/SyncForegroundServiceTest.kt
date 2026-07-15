@@ -34,6 +34,22 @@ class SyncForegroundServiceTest {
     }
 
     @Test
+    fun `silent extra true maps to silent run`() {
+        val intent = Intent().putExtra(SyncForegroundService.EXTRA_SILENT, true)
+        assertTrue(SyncForegroundService.isSilent(intent))
+    }
+
+    @Test
+    fun `missing silent extra maps to audible run`() {
+        assertFalse(SyncForegroundService.isSilent(Intent()))
+    }
+
+    @Test
+    fun `null intent maps to audible run`() {
+        assertFalse(SyncForegroundService.isSilent(null))
+    }
+
+    @Test
     fun `ongoing notification opens MainActivity on the Sync tab`() {
         val service = Robolectric.buildService(SyncForegroundService::class.java).create().get()
 

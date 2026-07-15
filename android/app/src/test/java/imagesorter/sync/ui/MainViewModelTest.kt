@@ -35,9 +35,12 @@ import retrofit2.Response
 private class FakeSyncTrigger : SyncTrigger {
     var calls = 0
         private set
+    var lastSilent: Boolean? = null
+        private set
 
-    override fun requestSync() {
+    override fun requestSync(silent: Boolean) {
         calls++
+        lastSilent = silent
     }
 }
 
@@ -651,6 +654,7 @@ class MainViewModelTest {
         vm.maybeAutoSyncOnOpen(isNetworkAllowed = true)
 
         assertEquals(1, trigger.calls)
+        assertEquals(true, trigger.lastSilent)
     }
 
     @Test
@@ -695,6 +699,7 @@ class MainViewModelTest {
         vm.syncNow()
 
         assertEquals(1, trigger.calls)
+        assertEquals(false, trigger.lastSilent)
     }
 
     @Test
