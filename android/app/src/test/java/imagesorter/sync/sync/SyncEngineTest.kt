@@ -27,6 +27,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -420,6 +421,44 @@ class SyncEngineTest {
             before + 1,
             engine.syncCompletions.value,
         )
+    }
+
+    @Test
+    fun aCompleteTransportFailureIsSurfacedToTheServerErrorLogNotSilentlySwallowed() = runTest {
+        // A `complete` that drops the connection used to vanish silently. The run
+        // must not abort (the file stays pending for next run's reconcile), and the
+        // failure must be best-effort reported to the server error log so it is
+        // visible in the launcher.
+        val ok = item("ok.jpg", 5)
+        var reportedBody: String? = null
+        dispatch { req ->
+            when {
+                req.path!!.endsWith("/reconcile") -> resp(
+                    """{"results":[{"name":"ok.jpg","created_on":"2024-01-01T00:00:00","size":5,"already_synced":false}]}""",
+                )
+                req.path!!.endsWith("/sessions") -> resp("""{"session_id":"sess"}""")
+                req.path!!.contains("/files/") -> MockResponse().setResponseCode(404).setBody("{}")
+                req.path!!.endsWith("/files") -> resp("""{"offset":5,"length":5}""")
+                // The batch's `complete` drops the connection mid-request.
+                req.path!!.endsWith("/complete") ->
+                    MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
+                req.path!!.endsWith("/errors/report") -> {
+                    reportedBody = req.body.readUtf8()
+                    resp("""{"stored":1}""")
+                }
+                else -> resp("{}")
+            }
+        }
+
+        val engine = engine(FakeMediaSource(listOf(ok)), FakeSyncPrefs(concurrency = 1))
+        engine.run()
+
+        assertTrue(
+            "the swallowed complete failure must be reported to /errors/report",
+            reportedBody?.contains("sync_complete_failed") == true,
+        )
+        // The run still reached DONE — one failed batch never aborts the sync.
+        assertEquals(SyncPhase.DONE, engine.progress.value.phase)
     }
 
     @Test

@@ -1,5 +1,6 @@
 package imagesorter.sync.sync
 
+import android.util.Log
 import imagesorter.sync.data.api.SyncApi
 import imagesorter.sync.data.api.dto.ErrorReportItemDto
 import imagesorter.sync.data.api.dto.IdentityDto
@@ -481,9 +482,39 @@ class SyncEngine(
         try {
             completeAndReport(sessionId)
         } catch (e: java.io.IOException) {
-            // A slow `complete` (server classifying the batch) may time out while
-            // the server keeps working; those files stay pending and reconcile
-            // marks them synced next run. Don't abort the whole sync.
+            // A `complete`/`outcomes` transport failure leaves this batch's files
+            // pending; the server may still have placed them, so reconcile marks
+            // the placed ones synced next run — don't abort the whole sync. But
+            // this used to vanish silently: log it and best-effort surface it to
+            // the server error log so it shows up in the launcher.
+            Log.w(TAG, "session $sessionId: complete/report failed, files stay pending", e)
+            reportSessionFailure(sessionId, e)
+        }
+    }
+
+    /**
+     * Best-effort record of a session-level complete/report failure in the
+     * server error log. Advisory only: if the same server that just failed the
+     * `complete` is unreachable, this report fails too and the logcat line is the
+     * only trace — so its own transport error is swallowed.
+     */
+    private suspend fun reportSessionFailure(sessionId: String, e: java.io.IOException) {
+        try {
+            api.reportErrors(
+                listOf(
+                    ErrorReportItemDto(
+                        name = "session:$sessionId",
+                        createdOn = java.time.LocalDateTime.now().toString(),
+                        size = 0,
+                        reason = "sync_complete_failed",
+                        retryable = true,
+                        message = e.message,
+                        failedAt = System.currentTimeMillis(),
+                    ),
+                ),
+            )
+        } catch (_: java.io.IOException) {
+            // Server unreachable: the logcat line is the record.
         }
     }
 
@@ -728,6 +759,7 @@ class SyncEngine(
         }
 
     companion object {
+        private const val TAG = "SyncEngine"
         private const val RECONCILE_BATCH = 500
         // Ids per prune delete — kept well under SQLite's ~999 bound-variable limit
         // so removing a large batch of locally-deleted media never overflows the IN().
