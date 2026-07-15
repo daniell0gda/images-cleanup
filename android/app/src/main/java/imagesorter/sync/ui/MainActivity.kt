@@ -8,6 +8,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
@@ -364,6 +365,9 @@ private fun SyncTabContent(
         }
 
         AppScreen.CLEANUP -> {
+            // System back leaves the cleanup sub-state for the main status view,
+            // matching the bottom-nav exit so cleanup is never a dead end.
+            BackHandler { viewModel.closeCleanup() }
             val phase by viewModel.cleanupPhase.collectAsStateWithLifecycle()
             val deletableIds by viewModel.deletableMediaIds.collectAsStateWithLifecycle()
             CleanupScreen(

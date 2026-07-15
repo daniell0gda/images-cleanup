@@ -101,6 +101,10 @@ class MainViewModel(
 
     /** Switch the home shell's bottom-nav tab (Photos | Albums | Sync | Settings). */
     fun selectHomeTab(tab: HomeTab) {
+        // Tapping any bottom-nav destination (including re-tapping Sync) exits the
+        // Sync tab's cleanup sub-state, so "Free up space" is never a dead end — the
+        // Sync tab always returns to its main status view.
+        if (_screen.value == AppScreen.CLEANUP) _screen.value = AppScreen.MAIN
         _homeTab.value = tab
     }
 

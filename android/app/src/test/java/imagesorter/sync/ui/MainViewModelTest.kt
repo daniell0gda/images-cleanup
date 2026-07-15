@@ -325,6 +325,20 @@ class MainViewModelTest {
     }
 
     @Test
+    fun selectHomeTabExitsCleanupSoTappingSyncReturnsToMain() {
+        val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
+        vm.selectHomeTab(HomeTab.SYNC)
+        vm.openCleanup()
+        assertEquals(AppScreen.CLEANUP, vm.screen.value)
+
+        // Re-tapping the already-selected Sync tab must leave the cleanup sub-state.
+        vm.selectHomeTab(HomeTab.SYNC)
+
+        assertEquals(AppScreen.MAIN, vm.screen.value)
+        assertEquals(HomeTab.SYNC, vm.homeTab.value)
+    }
+
+    @Test
     fun goToAlbumSwitchesToAlbumsTabAndMarksTheAlbumPending() {
         val vm = vmWith(FakeRoutingPrefs(address = "nas.local:7000", trusted = true, profileId = "groupby"))
 
