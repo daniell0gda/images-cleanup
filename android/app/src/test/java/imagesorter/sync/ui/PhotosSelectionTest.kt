@@ -1,0 +1,249 @@
+package imagesorter.sync.ui
+
+import androidx.compose.material3.Text
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import imagesorter.sync.data.api.AlbumApi
+import imagesorter.sync.data.api.dto.AlbumDto
+import imagesorter.sync.data.api.dto.AlbumItemsBody
+import imagesorter.sync.data.api.dto.AlbumNameBody
+import imagesorter.sync.data.api.dto.CreateAlbumBody
+import imagesorter.sync.data.api.dto.DeletedDto
+import imagesorter.sync.data.api.dto.MediaItemDto
+import imagesorter.sync.data.api.dto.ShareDto
+import imagesorter.sync.data.media.AlbumRepository
+import imagesorter.sync.ui.screens.AlbumSelectionAction
+import imagesorter.sync.ui.screens.PHOTOS_SHARING_TAG
+import imagesorter.sync.ui.screens.SelectionActionsBar
+import imagesorter.sync.ui.screens.ShareLoadingOverlay
+import imagesorter.sync.ui.screens.defaultAlbumName
+import imagesorter.sync.ui.screens.runAlbumNameAction
+import imagesorter.sync.ui.theme.ImageSorterSyncTheme
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import java.time.LocalDate
+
+/** Records calls and returns canned responses so the action logic can be asserted. */
+private class FakeAlbumApi : AlbumApi {
+    var entryResponse: AlbumDto = AlbumDto(42, "x", null, "2024-01-01T00:00:00", 3, null, false, null)
+    var shareResponse: ShareDto = ShareDto("tok", "https://photos.example.com/share/tok")
+
+    var lastCreate: CreateAlbumBody? = null
+    var lastSharedId: Long? = null
+
+    override suspend fun albums(): List<AlbumDto> = emptyList()
+    override suspend fun create(body: CreateAlbumBody): AlbumDto { lastCreate = body; return entryResponse }
+    override suspend fun rename(id: Long, body: AlbumNameBody): AlbumDto = entryResponse
+    override suspend fun delete(id: Long): DeletedDto = DeletedDto(true)
+    override suspend fun addItems(id: Long, body: AlbumItemsBody): AlbumDto = entryResponse
+    override suspend fun removeItems(id: Long, body: AlbumItemsBody): AlbumDto = entryResponse
+    override suspend fun items(id: Long): List<MediaItemDto> = emptyList()
+    override suspend fun share(id: Long): ShareDto { lastSharedId = id; return shareResponse }
+    override suspend fun revoke(id: Long) {}
+}
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class PhotosSelectionTest {
+
+    @get:Rule
+    val composeRule = createComposeRule()
+
+    @Test
+    fun selectionBarOffersCreateAlbumAddToAlbumAndShareNow() {
+        val actions = mutableListOf<AlbumSelectionAction>()
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                SelectionActionsBar(count = 2, onAction = { actions.add(it) }, onClose = {})
+            }
+        }
+        composeRule.onNodeWithText("2 selected").assertIsDisplayed()
+        composeRule.onNodeWithText("Create album").assertIsDisplayed()
+        composeRule.onNodeWithText("Add to album").assertIsDisplayed()
+        composeRule.onNodeWithText("Share now").assertIsDisplayed()
+
+        composeRule.onNodeWithText("Share now").performClick()
+        assertEquals(listOf(AlbumSelectionAction.ShareNow), actions)
+    }
+
+    @Test
+    fun shareLoadingOverlayShowsSpinnerWhileTheLinkIsBuilt() {
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                ShareLoadingOverlay()
+            }
+        }
+        composeRule.onNodeWithTag(PHOTOS_SHARING_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun defaultNameIsAlbumWithTodaysDate() {
+        assertEquals("Album 2024-03-02", defaultAlbumName(LocalDate.of(2024, 3, 2)))
+    }
+
+    @Test
+    fun createAlbumCallsCreateAndDoesNotShare() = runTest {
+        val api = FakeAlbumApi()
+        val repo = AlbumRepository(api)
+        val shared = mutableListOf<String>()
+
+        runAlbumNameAction(
+            action = AlbumSelectionAction.CreateAlbum,
+            name = "Album 2024-03-02",
+            mediaIds = listOf(1, 2, 3),
+            createdBy = "Pixel",
+            repo = repo,
+            onShareUrl = { shared.add(it) },
+        )
+
+        assertEquals("Album 2024-03-02", api.lastCreate?.name)
+        assertEquals(listOf(1L, 2L, 3L), api.lastCreate?.mediaIds)
+        assertEquals("Pixel", api.lastCreate?.createdBy)
+        assertNull(api.lastSharedId)
+        assertTrue(shared.isEmpty())
+    }
+
+    @Test
+    fun createAlbumInvokesOnCreatedWithTheNewAlbumAndDoesNotShare() = runTest {
+        val api = FakeAlbumApi().apply {
+            entryResponse = AlbumDto(99, "Trip", null, "2024-01-01T00:00:00", 3, null, false, null)
+        }
+        val repo = AlbumRepository(api)
+        var created: AlbumDto? = null
+        val shared = mutableListOf<String>()
+
+        runAlbumNameAction(
+            action = AlbumSelectionAction.CreateAlbum,
+            name = "Trip",
+            mediaIds = listOf(1, 2, 3),
+            createdBy = "Pixel",
+            repo = repo,
+            onCreated = { created = it },
+            onShareUrl = { shared.add(it) },
+        )
+
+        assertEquals(99L, created?.id)
+        assertTrue("Create album must not share", shared.isEmpty())
+    }
+
+    @Test
+    fun shareNowDoesNotInvokeOnCreated() = runTest {
+        val api = FakeAlbumApi()
+        val repo = AlbumRepository(api)
+        var created: AlbumDto? = null
+
+        runAlbumNameAction(
+            action = AlbumSelectionAction.ShareNow,
+            name = "Trip",
+            mediaIds = listOf(9),
+            createdBy = "Pixel",
+            repo = repo,
+            onCreated = { created = it },
+        )
+
+        assertNull("Share now must not fire the album-created signal", created)
+    }
+
+    @Test
+    fun shareNowCreatesSharesAndOpensShareSheetWithVerbatimUrlWithoutClipboard() = runTest {
+        val serverUrl = "https://photos.example.com/share/Xq7zZ-token"
+        val api = FakeAlbumApi().apply { shareResponse = ShareDto("Xq7zZ-token", serverUrl) }
+        val repo = AlbumRepository(api)
+        val shared = mutableListOf<String>()
+
+        runAlbumNameAction(
+            action = AlbumSelectionAction.ShareNow,
+            name = "Album 2024-03-02",
+            mediaIds = listOf(9),
+            createdBy = "Pixel",
+            repo = repo,
+            onShareUrl = { shared.add(it) },
+        )
+
+        assertEquals("Album 2024-03-02", api.lastCreate?.name)
+        assertEquals(42L, api.lastSharedId)
+        // The share sheet gets the verbatim URL; the app no longer copies it itself.
+        assertEquals(listOf(serverUrl), shared)
+    }
+
+    @Test
+    fun albumCreatedSnackbarOffersGoToAlbumWhichNavigatesToTheNewAlbum() {
+        var goneTo: Long? = null
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                val host = androidx.compose.runtime.remember { androidx.compose.material3.SnackbarHostState() }
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    imagesorter.sync.ui.screens.confirmAlbumCreated(
+                        host = host,
+                        albumId = 77,
+                        onGoToAlbum = { goneTo = it },
+                        // Isolate the action path from the auto-dismiss timeout: the bar must
+                        // stay up long enough for the tap. The timeout is covered separately.
+                        timeoutMillis = Long.MAX_VALUE,
+                    )
+                }
+                androidx.compose.material3.SnackbarHost(hostState = host)
+            }
+        }
+
+        composeRule.onNodeWithText("Go to album").assertIsDisplayed()
+        composeRule.onNodeWithText("Go to album").performClick()
+        composeRule.runOnIdle { assertEquals(77L, goneTo) }
+    }
+
+    @Test
+    fun albumCreatedBarAutoDismissesAfterTimeoutWithoutNavigating() = runTest {
+        // With no host consuming it, an Indefinite snackbar would suspend forever; the 5s cap
+        // must end the wait and return without invoking the "Go to album" navigation. Removing
+        // the timeout would leave this coroutine (and the bar) hanging indefinitely.
+        val host = androidx.compose.material3.SnackbarHostState()
+        var goneTo: Long? = null
+
+        imagesorter.sync.ui.screens.confirmAlbumCreated(
+            host = host,
+            albumId = 77,
+            onGoToAlbum = { goneTo = it },
+            timeoutMillis = 5_000L,
+        )
+
+        assertNull(goneTo)
+    }
+
+    @Test
+    fun goToDateFabLiftsAboveTheAlbumCreatedBarWhenItIsVisible() {
+        assertTrue(
+            "FAB must sit higher when the album-created bar is visible",
+            imagesorter.sync.ui.screens.fabBottomPadding(true) >
+                imagesorter.sync.ui.screens.fabBottomPadding(false),
+        )
+    }
+
+    @Test
+    fun nameDialogPrefillsDefaultAndConfirmsTrimmedName() {
+        var confirmed: String? = null
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                imagesorter.sync.ui.screens.AlbumNameDialog(
+                    defaultName = "Album 2024-03-02",
+                    onConfirm = { confirmed = it },
+                    onDismiss = {},
+                )
+            }
+        }
+        composeRule.onNodeWithText("Album 2024-03-02").assertIsDisplayed()
+        composeRule.onNodeWithText("Create").performClick()
+        assertEquals("Album 2024-03-02", confirmed)
+    }
+}

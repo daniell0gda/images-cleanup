@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_KOTLIN_BASE = _REPO_ROOT / "android" / "app" / "src" / "main" / "java" / "eu" / "caiq" / "imagesorter" / "sync"
+_KOTLIN_BASE = _REPO_ROOT / "android" / "app" / "src" / "main" / "java" / "imagesorter" / "sync"
 
 _KOTLIN_FILES = {
     "SyncApi": _KOTLIN_BASE / "data" / "api" / "SyncApi.kt",

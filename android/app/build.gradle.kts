@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "eu.caiq.imagesorter.sync"
+    namespace = "imagesorter.sync"
     compileSdk = 34
 
     defaultConfig {
