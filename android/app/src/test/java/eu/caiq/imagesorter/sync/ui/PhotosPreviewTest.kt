@@ -4,6 +4,7 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import eu.caiq.imagesorter.sync.data.db.entity.MediaEntity
 import eu.caiq.imagesorter.sync.ui.screens.PhotosPreview
@@ -104,6 +105,26 @@ class PhotosPreviewTest {
         }
         composeRule.onNodeWithContentDescription("Delete").performClick()
         assertEquals(listOf(0), deleted)
+    }
+
+    @Test
+    fun albumPreviewShowsRemoveFromAlbumInsteadOfTheTrashDelete() {
+        val removed = mutableListOf<Int>()
+        composeRule.setContent {
+            ImageSorterSyncTheme(darkTheme = false) {
+                PhotosPreview(
+                    items = listOf(img(1), img(2), img(3)),
+                    startIndex = 0,
+                    onClose = {},
+                    onRemoveFromAlbum = { removed.add(it) },
+                ) { Text("img-${it.id}") }
+            }
+        }
+        // The destructive trash delete is gone; a non-destructive "Remove from album" takes its place.
+        composeRule.onNodeWithContentDescription("Delete").assertDoesNotExist()
+        composeRule.onNodeWithText("Remove from album").assertIsDisplayed()
+        composeRule.onNodeWithText("Remove from album").performClick()
+        assertEquals(listOf(0), removed)
     }
 
     @Test

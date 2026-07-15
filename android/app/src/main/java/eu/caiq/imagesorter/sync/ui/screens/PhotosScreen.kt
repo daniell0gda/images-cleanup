@@ -736,15 +736,21 @@ private fun androidx.compose.foundation.layout.BoxScope.SegmentEdgeIndicator(
  * Delete action in the bottom slot that reports the current page index to [onDelete].
  * Stateless and source-agnostic (the [image] slot draws one entity), so a Compose
  * test can drive the delete callback with a fixed list.
+ *
+ * When [onRemoveFromAlbum] is supplied (album detail), the destructive trash Delete is
+ * replaced by a non-destructive **Remove from album** action reporting the current page
+ * index — membership removal only, never a file delete ([onDelete]/[deleting] are unused
+ * in that mode).
  */
 @Composable
 fun PhotosPreview(
     items: List<MediaEntity>,
     startIndex: Int,
     onClose: () -> Unit,
-    onDelete: (mediaIndex: Int) -> Unit,
+    onDelete: (mediaIndex: Int) -> Unit = {},
     modifier: Modifier = Modifier,
     onShare: (mediaIndex: Int) -> Unit = {},
+    onRemoveFromAlbum: ((mediaIndex: Int) -> Unit)? = null,
     deleting: Boolean = false,
     image: @Composable (MediaEntity) -> Unit,
 ) {
@@ -763,15 +769,23 @@ fun PhotosPreview(
                 IconButton(onClick = { onShare(index) }) {
                     Icon(Icons.Rounded.Share, contentDescription = "Share", tint = Color.White)
                 }
-                if (deleting) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(24.dp),
-                    )
-                } else {
-                    IconButton(onClick = { onDelete(index) }) {
-                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
+                when {
+                    onRemoveFromAlbum != null -> {
+                        androidx.compose.material3.TextButton(onClick = { onRemoveFromAlbum(index) }) {
+                            Text("Remove from album", color = Color.White)
+                        }
+                    }
+                    deleting -> {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                    else -> {
+                        IconButton(onClick = { onDelete(index) }) {
+                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = Color.White)
+                        }
                     }
                 }
             }

@@ -585,7 +585,19 @@ private fun AlbumDetail(
                 items = entities!!,
                 startIndex = idx,
                 onClose = { previewIndex = null },
-                onDelete = { previewIndex = null },
+                // Album preview offers "Remove from album" (membership only, §3.8/§8) in
+                // place of the destructive trash delete: it drops the previewed item's
+                // membership, closes the preview and reloads the album.
+                onRemoveFromAlbum = { removedIndex ->
+                    val entity = entities?.getOrNull(removedIndex)
+                    previewIndex = null
+                    if (entity != null) {
+                        scope.launch {
+                            runCatching { removeFromAlbum(albumId, listOf(entity.id), repo) }
+                            reloadKey++
+                        }
+                    }
+                },
             ) { entity -> MediaPreviewContent(entity, urls, token) }
         }
 
