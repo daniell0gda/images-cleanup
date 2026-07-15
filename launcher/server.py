@@ -1,6 +1,7 @@
 """Launcher FastAPI server — management UI for image-sorter."""
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import os
@@ -33,6 +34,12 @@ from .media_http import encode_cursor as _encode_cursor
 from .media_http import parse_from_date as _parse_from_date
 
 logger = logging.getLogger(__name__)
+
+# Interval between keep-alive whitespace bytes streamed from the sync `complete`
+# route while a batch is being placed. Kept well under Cloudflare's ~100s origin
+# timeout so the proxy always sees the origin responding. Module-level so a test
+# can drop it to sub-second and observe the keep-alive without real waiting.
+_COMPLETE_KEEPALIVE_SECONDS = 15.0
 
 
 def _configs_dir() -> Path:
@@ -636,8 +643,31 @@ def _register_sync_routes(app, detect_tags=None, scheduler=None) -> None:
             sessions.complete(session_id)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Unknown session")
-        lane.process_session(session_id)
-        return {"status": "complete"}
+
+        # Placement (classify + move every file in the batch) can run past
+        # Cloudflare's ~100s origin timeout for a large batch, making the proxy
+        # return a 524 to the phone while the server keeps working — a failure
+        # that never reaches our error log because nothing failed server-side.
+        # Stream the response so the headers leave immediately and a whitespace
+        # keep-alive flows every few seconds while placement runs on a worker
+        # thread. Leading whitespace is insignificant JSON, so the phone parses
+        # the trailing {"status": "complete"} exactly as before — no client
+        # change. Mirrors the SSE keep-alive ping that fixed the sorter web UI.
+        from starlette.concurrency import run_in_threadpool
+        from starlette.responses import StreamingResponse
+
+        async def _place_with_keepalive():
+            placing = asyncio.ensure_future(
+                run_in_threadpool(lane.process_session, session_id)
+            )
+            while not placing.done():
+                done, _ = await asyncio.wait({placing}, timeout=_COMPLETE_KEEPALIVE_SECONDS)
+                if not done:
+                    yield b" "
+            await placing  # surface a placement error instead of swallowing it
+            yield b'{"status": "complete"}'
+
+        return StreamingResponse(_place_with_keepalive(), media_type="application/json")
 
     @app.get("/api/sync/sessions/{session_id}/outcomes")
     async def sync_outcomes(

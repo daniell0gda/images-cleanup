@@ -969,6 +969,39 @@ def test_synced_files_row_records_full_identity_and_stored_path(tmp_path):
     assert _P(row["stored_path"]).exists()
 
 
+def test_complete_streams_keepalive_while_placing_and_still_returns_complete(tmp_path, monkeypatch):
+    """A slow placement streams whitespace keep-alive bytes (so Cloudflare never
+    fires a 524 while the batch is being classified/placed) and still ends with a
+    parseable {"status": "complete"} once placement finishes."""
+    import time
+    import launcher.server as srv
+    # Drop the keep-alive cadence to sub-second so the test observes it without
+    # waiting the production 15s.
+    monkeypatch.setattr(srv, "_COMPLETE_KEEPALIVE_SECONDS", 0.01)
+
+    def slow_detect(_path):
+        time.sleep(0.1)  # hold placement well past the keep-alive interval
+        return {"person"}
+
+    app = make_app(tmp_path, detect_tags=slow_detect)
+    _write_e2e_config(tmp_path)
+    client = TestClient(app)
+    token = trust(client, "dev-1")
+
+    sid = _open_session(client, token)
+    meta = {"name": "slow.jpg", "created_on": "2021-01-01T00:00:00", "size": 4, "mime_type": "image/jpeg"}
+    _upload_chunk(client, token, sid, "f1", meta, 0, b"abcd")
+
+    resp = client.post(f"/api/sync/sessions/{sid}/complete", headers=auth(token))
+    assert resp.status_code == 200, resp.text
+    # Keep-alive whitespace was streamed ahead of the JSON terminator.
+    assert resp.content.startswith(b" ")
+    assert resp.json()["status"] == "complete"
+    # The file was still placed despite the streamed response.
+    outcomes = client.get(f"/api/sync/sessions/{sid}/outcomes", headers=auth(token)).json()["outcomes"]
+    assert outcomes[0]["status"] == "synced"
+
+
 def _jpeg_bytes(color=(10, 20, 30)):
     """A minimal real JPEG so piexif has valid metadata to work with."""
     import io
