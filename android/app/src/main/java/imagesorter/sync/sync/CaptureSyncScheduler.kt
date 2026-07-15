@@ -5,6 +5,7 @@ import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
 import android.provider.MediaStore
+import imagesorter.sync.data.prefs.SyncNetworkType
 
 /**
  * Schedules [CaptureSyncJobService] to fire when the device camera writes new
@@ -18,9 +19,13 @@ object CaptureSyncScheduler {
 
     /**
      * (Re)register the capture job: content-URI triggers on the external images
-     * and videos collections, gated to an unmetered network.
+     * and videos collections, gated to the network allowed by [networkType]
+     * (unmetered for [SyncNetworkType.WIFI_ONLY], any connection for
+     * [SyncNetworkType.ANY]). Re-scheduling with the same [JOB_ID] replaces the
+     * pending job, so calling this after the user changes the setting re-arms the
+     * trigger with the new constraint.
      */
-    fun schedule(context: Context) {
+    fun schedule(context: Context, networkType: SyncNetworkType) {
         val component = ComponentName(context, CaptureSyncJobService::class.java)
         val jobInfo = JobInfo.Builder(JOB_ID, component)
             .addTriggerContentUri(
@@ -35,8 +40,14 @@ object CaptureSyncScheduler {
                     JobInfo.TriggerContentUri.FLAG_NOTIFY_FOR_DESCENDANTS,
                 ),
             )
-            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)
+            .setRequiredNetworkType(jobNetworkType(networkType))
             .build()
         context.getSystemService(JobScheduler::class.java).schedule(jobInfo)
+    }
+
+    /** Map the user's choice to the JobScheduler network constraint. */
+    private fun jobNetworkType(networkType: SyncNetworkType): Int = when (networkType) {
+        SyncNetworkType.WIFI_ONLY -> JobInfo.NETWORK_TYPE_UNMETERED
+        SyncNetworkType.ANY -> JobInfo.NETWORK_TYPE_ANY
     }
 }

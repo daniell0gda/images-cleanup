@@ -136,6 +136,20 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, imagesorter.sy
         plain.edit().putInt(KEY_UPLOAD_CONCURRENCY, value.coerceIn(MIN_CONCURRENCY, MAX_CONCURRENCY)).apply()
     }
 
+    /**
+     * Networks automatic sync may use. Defaults to [SyncNetworkType.WIFI_ONLY] so an
+     * install that predates this setting keeps the unmetered-only behavior. An
+     * unrecognized stored value (e.g. a future rename) also falls back to Wi-Fi only.
+     */
+    fun getSyncNetworkType(): SyncNetworkType {
+        val stored = plain.getString(KEY_SYNC_NETWORK_TYPE, null) ?: return SyncNetworkType.WIFI_ONLY
+        return runCatching { SyncNetworkType.valueOf(stored) }.getOrDefault(SyncNetworkType.WIFI_ONLY)
+    }
+
+    fun setSyncNetworkType(value: SyncNetworkType) {
+        plain.edit().putString(KEY_SYNC_NETWORK_TYPE, value.name).apply()
+    }
+
     companion object {
         private const val SECURE_FILE = "secure_prefs"
         private const val PLAIN_FILE = "sync_prefs"
@@ -149,6 +163,7 @@ class SecurePrefs(context: Context) : CredentialStore, SyncPrefs, imagesorter.sy
         private const val KEY_TRUSTED_SSID = "trusted_ssid"
         private const val KEY_UPLOAD_CONCURRENCY = "upload_concurrency"
         private const val KEY_SERVER_ADDRESS = "server_address"
+        private const val KEY_SYNC_NETWORK_TYPE = "sync_network_type"
 
         const val NO_WATERMARK = -1L
         const val MIN_CONCURRENCY = 4

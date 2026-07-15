@@ -40,7 +40,7 @@ enum class AppScreen { SERVER_SETUP, PAIRING, PROFILE_PICKER, MAIN, CLEANUP }
  * [PHOTOS] browses the server media gallery (profile-independent); [SYNC] owns the
  * existing pairing/profile/back-up flow as a sub-state.
  */
-enum class HomeTab { PHOTOS, ALBUMS, SYNC }
+enum class HomeTab { PHOTOS, ALBUMS, SYNC, SETTINGS }
 
 /**
  * Narrow read/write seam over the prefs the routing + connect flow touches. Kept
@@ -99,9 +99,27 @@ class MainViewModel(
     /** Selected bottom-nav destination in the post-pairing home shell; opens on Photos. */
     val homeTab: StateFlow<HomeTab> = _homeTab.asStateFlow()
 
-    /** Switch the home shell's bottom-nav tab (Photos | Sync). */
+    /** Switch the home shell's bottom-nav tab (Photos | Albums | Sync | Settings). */
     fun selectHomeTab(tab: HomeTab) {
         _homeTab.value = tab
+    }
+
+    private val _syncNetworkType =
+        MutableStateFlow(locator.securePrefs.getSyncNetworkType())
+
+    /** Networks automatic sync may use; shown and edited on the Settings tab. */
+    val syncNetworkType: StateFlow<imagesorter.sync.data.prefs.SyncNetworkType> =
+        _syncNetworkType.asStateFlow()
+
+    /**
+     * Persist the sync-network choice and immediately re-arm the capture job so its
+     * network constraint matches — otherwise the change would only take effect after
+     * the next app start or reboot.
+     */
+    fun setSyncNetworkType(type: imagesorter.sync.data.prefs.SyncNetworkType) {
+        locator.securePrefs.setSyncNetworkType(type)
+        locator.rescheduleCaptureSync()
+        _syncNetworkType.value = type
     }
 
     private val _pendingAlbumId = MutableStateFlow<Long?>(null)
@@ -395,15 +413,16 @@ class MainViewModel(
     }
 
     /**
-     * App-open auto-sync. When the gate passes (unmetered network AND no successful
-     * full run within the throttle window) start a FULL sync via the same trigger
-     * the manual "Back up now" uses. Network detection lives in the Activity (this VM
-     * holds no Android types), which passes [isUnmetered]. Wall-clock now is used so
-     * the throttle compares against the persisted last-full-sync timestamp correctly.
+     * App-open auto-sync. When the gate passes (the active network satisfies the
+     * user's sync-network setting AND no successful full run within the throttle
+     * window) start a FULL sync via the same trigger the manual "Back up now" uses.
+     * Network detection lives in the Activity (this VM holds no Android types), which
+     * passes [isNetworkAllowed]. Wall-clock now is used so the throttle compares
+     * against the persisted last-full-sync timestamp correctly.
      */
-    fun maybeAutoSyncOnOpen(isUnmetered: Boolean) {
+    fun maybeAutoSyncOnOpen(isNetworkAllowed: Boolean) {
         val eligible = imagesorter.sync.sync.shouldAutoSyncOnOpen(
-            isUnmetered = isUnmetered,
+            isNetworkAllowed = isNetworkAllowed,
             lastFullSyncAtMillis = lastFullSyncAtMillis(),
             nowMillis = System.currentTimeMillis(),
         )

@@ -8,6 +8,8 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
+import imagesorter.sync.SyncApp
+import imagesorter.sync.data.prefs.SyncNetworkType
 
 /**
  * Fires when the camera writes new media (content-URI trigger from
@@ -20,11 +22,13 @@ import androidx.work.WorkManager
 class CaptureSyncJobService : JobService() {
 
     override fun onStartJob(params: JobParameters?): Boolean {
-        // Re-arm the one-shot content trigger for the next capture.
-        CaptureSyncScheduler.schedule(applicationContext)
+        val networkType = (applicationContext as SyncApp).serviceLocator.securePrefs.getSyncNetworkType()
+        // Re-arm the one-shot content trigger for the next capture, with the network
+        // constraint the user currently has selected.
+        CaptureSyncScheduler.schedule(applicationContext, networkType)
         val work = OneTimeWorkRequestBuilder<CaptureSyncWorker>()
             .setConstraints(
-                Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build(),
+                Constraints.Builder().setRequiredNetworkType(workNetworkType(networkType)).build(),
             )
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .build()
@@ -35,4 +39,10 @@ class CaptureSyncJobService : JobService() {
     }
 
     override fun onStopJob(params: JobParameters?): Boolean = false
+
+    /** Map the user's choice to the WorkManager network constraint for the upload. */
+    private fun workNetworkType(networkType: SyncNetworkType): NetworkType = when (networkType) {
+        SyncNetworkType.WIFI_ONLY -> NetworkType.UNMETERED
+        SyncNetworkType.ANY -> NetworkType.CONNECTED
+    }
 }

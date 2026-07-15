@@ -39,7 +39,7 @@ class SyncApp : Application() {
     override fun onCreate() {
         super.onCreate()
         serviceLocator = ServiceLocator(this)
-        CaptureSyncScheduler.schedule(this)
+        serviceLocator.rescheduleCaptureSync()
     }
 }
 
@@ -223,6 +223,15 @@ class ServiceLocator(private val app: Context) {
 
     /** v1 trigger: user-initiated foreground sync. Typed as the seam interface. */
     val syncTrigger: SyncTrigger by lazy { ManualSyncTrigger(app) }
+
+    /**
+     * (Re)arm the capture content-trigger job with the currently selected network
+     * type. Called on app start and whenever the user changes the sync-network
+     * setting, so the pending job's constraint reflects the choice immediately.
+     */
+    fun rescheduleCaptureSync() {
+        CaptureSyncScheduler.schedule(app, securePrefs.getSyncNetworkType())
+    }
 
     // --- Observables for the UI ---
 

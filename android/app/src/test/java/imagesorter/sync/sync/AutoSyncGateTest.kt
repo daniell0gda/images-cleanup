@@ -16,7 +16,7 @@ class AutoSyncGateTest {
     fun unmeteredWithNoPriorRunIsEligible() {
         assertTrue(
             shouldAutoSyncOnOpen(
-                isUnmetered = true,
+                isNetworkAllowed = true,
                 lastFullSyncAtMillis = null,
                 nowMillis = now,
             ),
@@ -27,7 +27,7 @@ class AutoSyncGateTest {
     fun unmeteredWithStaleRunIsEligible() {
         assertTrue(
             shouldAutoSyncOnOpen(
-                isUnmetered = true,
+                isNetworkAllowed = true,
                 lastFullSyncAtMillis = now - AUTO_SYNC_THROTTLE_MILLIS - 1,
                 nowMillis = now,
             ),
@@ -38,7 +38,7 @@ class AutoSyncGateTest {
     fun unmeteredExactlyAtThrottleBoundaryIsEligible() {
         assertTrue(
             shouldAutoSyncOnOpen(
-                isUnmetered = true,
+                isNetworkAllowed = true,
                 lastFullSyncAtMillis = now - AUTO_SYNC_THROTTLE_MILLIS,
                 nowMillis = now,
             ),
@@ -49,7 +49,7 @@ class AutoSyncGateTest {
     fun unmeteredWithRecentRunIsThrottled() {
         assertFalse(
             shouldAutoSyncOnOpen(
-                isUnmetered = true,
+                isNetworkAllowed = true,
                 lastFullSyncAtMillis = now - (AUTO_SYNC_THROTTLE_MILLIS - 1),
                 nowMillis = now,
             ),
@@ -60,14 +60,14 @@ class AutoSyncGateTest {
     fun meteredIsNeverEligibleRegardlessOfElapsedTime() {
         assertFalse(
             shouldAutoSyncOnOpen(
-                isUnmetered = false,
+                isNetworkAllowed = false,
                 lastFullSyncAtMillis = null,
                 nowMillis = now,
             ),
         )
         assertFalse(
             shouldAutoSyncOnOpen(
-                isUnmetered = false,
+                isNetworkAllowed = false,
                 lastFullSyncAtMillis = now - AUTO_SYNC_THROTTLE_MILLIS - 1,
                 nowMillis = now,
             ),

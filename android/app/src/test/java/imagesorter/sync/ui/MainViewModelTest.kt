@@ -634,7 +634,7 @@ class MainViewModelTest {
         // Unmetered + no prior full run → gate passes.
         val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = null)
 
-        vm.maybeAutoSyncOnOpen(isUnmetered = true)
+        vm.maybeAutoSyncOnOpen(isNetworkAllowed = true)
 
         assertEquals(1, trigger.calls)
     }
@@ -645,7 +645,7 @@ class MainViewModelTest {
         // A full run 20 minutes ago is past the throttle window → gate passes.
         val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = System.currentTimeMillis() - 20 * 60 * 1000L)
 
-        vm.maybeAutoSyncOnOpen(isUnmetered = true)
+        vm.maybeAutoSyncOnOpen(isNetworkAllowed = true)
 
         assertEquals(1, trigger.calls)
     }
@@ -655,7 +655,7 @@ class MainViewModelTest {
         val trigger = FakeSyncTrigger()
         val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = null)
 
-        vm.maybeAutoSyncOnOpen(isUnmetered = false)
+        vm.maybeAutoSyncOnOpen(isNetworkAllowed = false)
 
         assertEquals(0, trigger.calls)
     }
@@ -666,7 +666,7 @@ class MainViewModelTest {
         // A full run 1 minute ago is inside the 15-minute throttle window → gate fails.
         val vm = vmForAutoSync(trigger, lastFullSyncAtMillis = System.currentTimeMillis() - 60 * 1000L)
 
-        vm.maybeAutoSyncOnOpen(isUnmetered = true)
+        vm.maybeAutoSyncOnOpen(isNetworkAllowed = true)
 
         assertEquals(0, trigger.calls)
     }

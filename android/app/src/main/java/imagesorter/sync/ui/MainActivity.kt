@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Collections
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -46,6 +47,8 @@ import imagesorter.sync.ui.screens.PairingScreen
 import imagesorter.sync.ui.screens.PhotosScreen
 import imagesorter.sync.ui.screens.ProfilePickerScreen
 import imagesorter.sync.ui.screens.ServerSetupScreen
+import imagesorter.sync.ui.screens.SettingsScreen
+import imagesorter.sync.data.prefs.SyncNetworkType
 import imagesorter.sync.ui.theme.ImageSorterSyncTheme
 
 /**
@@ -140,6 +143,7 @@ internal fun HomeShell(
     photos: @Composable () -> Unit,
     albums: @Composable () -> Unit,
     sync: @Composable () -> Unit,
+    settings: @Composable () -> Unit = {},
     syncActive: Boolean = false,
 ) {
     Scaffold(
@@ -174,6 +178,12 @@ internal fun HomeShell(
                     },
                     label = { Text("Sync") },
                 )
+                NavigationBarItem(
+                    selected = selectedTab == HomeTab.SETTINGS,
+                    onClick = { onTabSelected(HomeTab.SETTINGS) },
+                    icon = { Icon(Icons.Rounded.Settings, contentDescription = null) },
+                    label = { Text("Settings") },
+                )
             }
         },
     ) { padding ->
@@ -182,6 +192,7 @@ internal fun HomeShell(
                 HomeTab.PHOTOS -> photos()
                 HomeTab.ALBUMS -> albums()
                 HomeTab.SYNC -> sync()
+                HomeTab.SETTINGS -> settings()
             }
         }
     }
@@ -213,7 +224,11 @@ private fun AppRoot(viewModel: MainViewModel) {
     // active bottom-nav tab (this runs in AppRoot, above the tab switch). The VM's
     // throttle guards against re-firing when the screen re-enters MAIN.
     LaunchedEffect(screen) {
-        if (screen == AppScreen.MAIN) viewModel.maybeAutoSyncOnOpen(isUnmeteredNetwork(context))
+        if (screen == AppScreen.MAIN) {
+            viewModel.maybeAutoSyncOnOpen(
+                isNetworkAllowedForSync(context, viewModel.syncNetworkType.value),
+            )
+        }
     }
 
     // System delete dialog launcher for the cleanup flow.
@@ -267,6 +282,13 @@ private fun AppRoot(viewModel: MainViewModel) {
                         screen = screen,
                         onLaunchNotPeopleDelete = { request -> notPeopleDeleteLauncher.launch(request) },
                         onLaunchCleanupDelete = { request -> deleteLauncher.launch(request) },
+                    )
+                },
+                settings = {
+                    val networkType by viewModel.syncNetworkType.collectAsStateWithLifecycle()
+                    SettingsScreen(
+                        selected = networkType,
+                        onNetworkTypeSelected = viewModel::setSyncNetworkType,
                     )
                 },
             )
@@ -370,15 +392,19 @@ private fun launchDelete(
 }
 
 /**
- * Whether the active network is unmetered (Wi-Fi-like). Drives the app-open
- * auto-sync gate so a full backup never starts on a metered/cellular connection.
- * Absent connectivity or capabilities read as metered (do not sync).
+ * Whether the active network satisfies the user's sync-network setting, gating
+ * app-open auto-sync. For [SyncNetworkType.WIFI_ONLY] the network must be unmetered
+ * (Wi-Fi-like); for [SyncNetworkType.ANY] any internet-capable network qualifies.
+ * Absent connectivity or capabilities read as ineligible (do not sync).
  */
-private fun isUnmeteredNetwork(context: Context): Boolean {
+private fun isNetworkAllowedForSync(context: Context, networkType: SyncNetworkType): Boolean {
     val connectivity = context.getSystemService(ConnectivityManager::class.java) ?: return false
     val network = connectivity.activeNetwork ?: return false
     val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
-    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    return when (networkType) {
+        SyncNetworkType.WIFI_ONLY -> capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+        SyncNetworkType.ANY -> capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
 }
 
 private fun requiredPermissions(): Array<String> =
