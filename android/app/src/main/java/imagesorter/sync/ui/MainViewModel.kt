@@ -470,21 +470,30 @@ class MainViewModel(
         viewModelScope.launch {
             _cleanupPhase.value = CleanupPhase.VERIFYING
             val present: List<Identity> = locator.cleanupManager.verifySyncedItems()
-            // Resolve verified identities back to local MediaStore ids via the
-            // pending/synced cache is out of scope for the skeleton; the Activity
-            // re-queries MediaStore by identity before launching the delete.
+            // Map the server-confirmed identities back to the local MediaStore ids the
+            // system delete dialog needs; only files whose local id is known are offered.
             _deletableMediaIds.value = resolveLocalIds(present)
             _cleanupPhase.value = CleanupPhase.READY_TO_REMOVE
         }
     }
 
     /**
-     * TODO(designer/impl): map verified identities to current MediaStore ids.
-     * Skeleton returns an empty list; the real implementation re-queries
-     * MediaStore by (name, created_on, size) so only files still on the phone are
-     * offered for deletion.
+     * Map each server-confirmed identity back to its local MediaStore uri via the
+     * synced cache, which stores the `MediaStore._ID` (+ mime) for every synced row —
+     * the same rows the "safe on the server" tally counts. Only rows whose local id is
+     * known are offered; the reconcile pass keeps the cache pruned of locally-deleted
+     * media, and the system delete dialog is the final gate. `internal` so the mapping
+     * is unit-testable against a seeded cache.
      */
-    private fun resolveLocalIds(present: List<Identity>): List<android.net.Uri> = emptyList()
+    internal suspend fun resolveLocalIds(present: List<Identity>): List<android.net.Uri> {
+        if (present.isEmpty()) return emptyList()
+        val presentKeys = present.mapTo(HashSet()) { Triple(it.name, it.createdOn, it.size) }
+        return locator.syncedCacheDao().syncedItems()
+            .filter { Triple(it.name, it.createdOn, it.size) in presentKeys }
+            .mapNotNull { entity ->
+                entity.mediaStoreId?.let { id -> mediaContentUri(id, entity.mimeType ?: "image/jpeg") }
+            }
+    }
 
     /** Build the system delete request for the verified-present MediaStore URIs. */
     fun buildDeleteRequest(uris: List<android.net.Uri>): android.content.IntentSender? =

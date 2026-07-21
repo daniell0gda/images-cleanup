@@ -537,6 +537,73 @@ class MainViewModelTest {
     }
 
     @Test
+    fun resolveLocalIdsMapsVerifiedPresentIdentitiesToLocalDeletableUris() = runBlocking {
+        val vm = mainVm()
+        val locator = ServiceLocator(context)
+        locator.syncedCacheDao().deleteByMediaStoreIds(listOf(5001L, 5002L, 5003L))
+        locator.syncedCacheDao().upsert(
+            listOf(
+                imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                    name = "fus-a.jpg", createdOn = "2025-01-01T00:00:00", size = 10,
+                    status = "SYNCED", mediaStoreId = 5001L, mimeType = "image/jpeg",
+                ),
+                imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                    name = "fus-b.jpg", createdOn = "2025-01-02T00:00:00", size = 20,
+                    status = "SYNCED", mediaStoreId = 5002L, mimeType = "image/jpeg",
+                ),
+                // Synced but NOT confirmed present this run: must not be offered.
+                imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                    name = "fus-c.jpg", createdOn = "2025-01-03T00:00:00", size = 30,
+                    status = "SYNCED", mediaStoreId = 5003L, mimeType = "image/jpeg",
+                ),
+            ),
+        )
+
+        val present = listOf(
+            imagesorter.sync.domain.model.Identity("fus-a.jpg", "2025-01-01T00:00:00", 10),
+            imagesorter.sync.domain.model.Identity("fus-b.jpg", "2025-01-02T00:00:00", 20),
+        )
+        val uris = vm.resolveLocalIds(present)
+
+        // The bug: this list was always empty, so "Free up space" reported 0 removable
+        // even though the server had confirmed the files. Each verified identity must
+        // now resolve to its local MediaStore uri.
+        assertEquals(2, uris.size)
+        assertTrue("a.jpg resolves to its local id", uris.any { it.toString().endsWith("/5001") })
+        assertTrue("b.jpg resolves to its local id", uris.any { it.toString().endsWith("/5002") })
+        assertFalse("unconfirmed c.jpg is not offered", uris.any { it.toString().endsWith("/5003") })
+
+        locator.syncedCacheDao().deleteByMediaStoreIds(listOf(5001L, 5002L, 5003L))
+    }
+
+    @Test
+    fun resolveLocalIdsSkipsVerifiedIdentityWithUnknownLocalId() = runBlocking {
+        val vm = mainVm()
+        val locator = ServiceLocator(context)
+        locator.syncedCacheDao().delete("fus-noid.jpg", "2025-02-02T00:00:00", 44)
+        locator.syncedCacheDao().upsert(
+            imagesorter.sync.data.db.entity.SyncedCacheEntity(
+                name = "fus-noid.jpg", createdOn = "2025-02-02T00:00:00", size = 44,
+                status = "SYNCED", mediaStoreId = null, mimeType = "image/jpeg",
+            ),
+        )
+
+        val uris = vm.resolveLocalIds(
+            listOf(imagesorter.sync.domain.model.Identity("fus-noid.jpg", "2025-02-02T00:00:00", 44)),
+        )
+
+        assertTrue("a verified row without a known local id is skipped", uris.isEmpty())
+
+        locator.syncedCacheDao().delete("fus-noid.jpg", "2025-02-02T00:00:00", 44)
+    }
+
+    @Test
+    fun resolveLocalIdsReturnsEmptyForEmptyVerifiedSet() = runBlocking {
+        val vm = mainVm()
+        assertTrue(vm.resolveLocalIds(emptyList()).isEmpty())
+    }
+
+    @Test
     fun syncItemNowAddsTheItemToInFlightImmediately() = runTest(dispatcher) {
         val vm = mainVm()
         assertTrue(vm.syncingNow.value.isEmpty())
