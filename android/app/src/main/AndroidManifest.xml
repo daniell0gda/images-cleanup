@@ -22,6 +22,11 @@
     <!-- Re-arm the capture job after a device reboot. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Lets the app ask the user to exempt it from battery optimization, so OEM
+         battery managers (Samsung One UI etc.) are less likely to kill the
+         background capture-sync work. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:name=".SyncApp"
         android:allowBackup="false"

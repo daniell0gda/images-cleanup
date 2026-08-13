@@ -33,6 +33,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -50,6 +53,8 @@ import imagesorter.sync.ui.screens.ProfilePickerScreen
 import imagesorter.sync.ui.screens.ServerSetupScreen
 import imagesorter.sync.ui.screens.SettingsScreen
 import imagesorter.sync.data.prefs.SyncNetworkType
+import imagesorter.sync.sync.batteryOptimizationExemptionIntent
+import imagesorter.sync.sync.isIgnoringBatteryOptimizations
 import imagesorter.sync.ui.theme.ImageSorterSyncTheme
 
 /**
@@ -214,6 +219,14 @@ private fun AppRoot(viewModel: MainViewModel) {
         permissionLauncher.launch(requiredPermissions())
     }
 
+    // Battery-optimization exemption status, for the Settings screen's reliability
+    // prompt. Rechecked after the system dialog returns, since granting/denying it
+    // doesn't recreate the activity.
+    var batteryOptimizationIgnored by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
+    val batteryOptimizationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { batteryOptimizationIgnored = isIgnoringBatteryOptimizations(context) }
+
     // Keyed on screen (not Unit) so pairing also starts when the user *arrives*
     // at the pairing screen by connecting — not only when the app opens there.
     LaunchedEffect(screen) {
@@ -290,6 +303,10 @@ private fun AppRoot(viewModel: MainViewModel) {
                     SettingsScreen(
                         selected = networkType,
                         onNetworkTypeSelected = viewModel::setSyncNetworkType,
+                        batteryOptimizationIgnored = batteryOptimizationIgnored,
+                        onRequestBatteryOptimizationExemption = {
+                            batteryOptimizationLauncher.launch(batteryOptimizationExemptionIntent(context))
+                        },
                     )
                 },
             )
