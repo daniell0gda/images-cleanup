@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import imagesorter.sync.SyncApp
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
@@ -39,7 +40,10 @@ class CaptureSyncWorker(
         try {
             engine.run(incremental = true)
         } finally {
-            progressJob.cancel()
+            // Join, not just cancel: a bare cancel() doesn't wait for a notify() call
+            // already in flight on another thread, which could otherwise land after
+            // the cancel(ID) below and leave the notification stuck with the worker done.
+            progressJob.cancelAndJoin()
             notifications.cancel(SyncNotification.ID)
         }
         Result.success()

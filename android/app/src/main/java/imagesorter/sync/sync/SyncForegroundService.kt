@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 
 /**
@@ -44,8 +45,15 @@ class SyncForegroundService : Service() {
         if (runJob?.isActive == true) return
         val engine = (application as SyncApp).serviceLocator.syncEngine
         runJob = scope.launch {
-            launch { collectProgress(engine) }
+            val progressJob = launch { collectProgress(engine) }
             engine.run(incremental = incremental)
+            // Wait for the collector to fully finish (not just request cancellation)
+            // before clearing the notification — otherwise a notify() call for the
+            // final DONE state, already in flight on another thread, can land after
+            // this cancel() and leave the ongoing notification stuck with the service
+            // gone and nothing left to dismiss it.
+            progressJob.cancelAndJoin()
+            notificationManager().cancel(SyncNotification.ID)
             stopSelf()
         }
     }
